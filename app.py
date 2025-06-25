@@ -15,7 +15,7 @@ st.set_page_config(
 
 # ---- Load and Display Logo ----
 logo = Image.open("logo.png")
-st.image(logo, use_column_width=False, width=200)
+st.image(logo, use_container_width=True)
 
 # ---- App Header ----
 st.markdown(
