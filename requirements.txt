@@ -1,6 +1,9 @@
 streamlit
 openai
 pandas
-openpyxl
-python-dotenv
-
+pillow
+PyMuPDF
+pdf2image
+pytesseract
+poppler-utils
+tesseract
