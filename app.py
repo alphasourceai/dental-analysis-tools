@@ -66,6 +66,18 @@ P&L Data:
 
             insights = response["choices"][0]["message"]["content"]
 
+        P&L Data:
+{data_str}
+            """
+
+            response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
+
+            insights = response["choices"][0]["message"]["content"]
+
         st.subheader("📈 AI-Powered Insights")
         st.markdown(insights)
 st.download_button(
