@@ -18,10 +18,49 @@ logo = Image.open("logo.png")
 st.image(logo, use_container_width=True)
 
 # ---- App Header ----
+# ---- Custom Dark Theme Styling ----
 st.markdown(
-    "<h1 style='text-align: center; color: #1f77b4;'>🦷 Dental Practice P&L Analyzer</h1>",
+    """
+    <style>
+        body {
+            background-color: #252a34;
+            color: #ffffff;
+        }
+        .stApp {
+            background-color: #252a34;
+        }
+        h1, h2, h3, h4, h5, h6, p, label, .stMarkdown {
+            color: #ffffff !important;
+        }
+        .stButton>button {
+            background-color: #08d9d6;
+            color: black;
+            border-radius: 6px;
+            padding: 0.5rem 1rem;
+            border: none;
+        }
+        .stButton>button:hover {
+            background-color: #00adb5;
+            color: white;
+        }
+        .stDownloadButton>button {
+            background-color: #ff2e63;
+            color: white;
+            border-radius: 6px;
+            padding: 0.5rem 1rem;
+            border: none;
+        }
+        .stDownloadButton>button:hover {
+            background-color: #e3004f;
+        }
+        .css-1kyxreq, .css-1r6slb0 {
+            background-color: #393e46 !important;
+        }
+    </style>
+    """,
     unsafe_allow_html=True
 )
+
 st.markdown(
     "<p style='text-align: center; font-size: 1.1rem;'>Upload your P&L report to receive expert AI-driven analysis.</p>",
     unsafe_allow_html=True
