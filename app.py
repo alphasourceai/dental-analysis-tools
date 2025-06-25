@@ -83,3 +83,4 @@ st.markdown(
     "<p style='text-align: center; font-size: 0.9rem;'>Built by <a href='https://alphasourceai.com' target='_blank'>alphaSource AI</a></p>",
     unsafe_allow_html=True
 )
+ # adds a blank line
