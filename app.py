@@ -63,7 +63,7 @@ openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # ---- Load and Display Logo ----
 logo = Image.open("logo.png")
-st.image(logo, width=200)
+st.image(logo, use_container_width=True)
 
 # ---- App Header ----
 st.markdown(
