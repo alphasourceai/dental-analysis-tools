@@ -8,7 +8,7 @@ import pytesseract
 import tempfile
 import os
 import sendgrid
-from sendgrid.helpers.mail import Mail, Email, To, Content, Attachment, FileContent, FileName, FileType, Disposition
+from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
 import base64
 
 # ---- Page Config ----
@@ -22,29 +22,32 @@ st.markdown("""
         color: #f0f0f0;
     }
     .main-container {
-        background-color: #ffffff;
-        color: #000000;
+        background-color: transparent;
+        color: #f0f0f0;
         max-width: 800px;
-        margin: 2rem auto;
+        margin: 0 auto;
         padding: 2rem;
-        border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
     }
-    .stButton>button, .stDownloadButton>button {
+    .stButton>button {
         background-color: #1f77b4;
-        color: white;
+        color: #00cfc8 !important;
         border-radius: 4px;
         padding: 0.5rem 1rem;
+        font-weight: bold;
     }
-    .stButton>button:hover, .stDownloadButton>button:hover {
+    .stButton>button:hover {
         background-color: #155a8a;
+    }
+    label, .stTextInput label, .stSelectbox label {
+        color: #ffffff !important;
+        font-weight: 500;
     }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("<div class='main-container'>", unsafe_allow_html=True)
 
-# ---- Config ----
+# ---- API Keys ----
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 SENDGRID_API_KEY = st.secrets["SENDGRID_API_KEY"]
 TO_EMAIL = "info@alphasourceai.com"
@@ -53,8 +56,9 @@ TO_EMAIL = "info@alphasourceai.com"
 logo = Image.open("logo.png")
 st.image(logo, width=300)
 
+# ---- Title and Subtitle ----
 st.markdown("<h1 style='text-align: center;'>🦷 Dental Practice P&L Analyzer</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center;'>Upload your P&L report for high-level AI insights. We'll review and send a deeper analysis to your inbox.</p>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center;'>Upload your P&L report for high-level AI insights. We'll conduct a deeper analysis and reach out directly with the results.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ---- User Info Form ----
@@ -67,7 +71,7 @@ with st.form("user_info_form"):
     uploaded_file = st.file_uploader("Upload your P&L file (Excel, CSV, or PDF)", type=["xlsx", "csv", "pdf"])
     submitted = st.form_submit_button("🔍 Analyze and Send")
 
-# ---- File + OCR ----
+# ---- PDF + OCR ----
 def extract_text_from_pdf(uploaded_file):
     text = ""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
@@ -85,10 +89,9 @@ def extract_text_from_pdf(uploaded_file):
         os.remove(tmp_pdf_path)
     return text.strip()
 
-# ---- Email Utility ----
+# ---- Send Email ----
 def send_email(user_info, file, analysis_text):
     sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
-
     subject = f"New P&L Submission - {user_info['office_name']} ({user_info['email']})"
     body = f"""New P&L upload received:
 
@@ -101,14 +104,12 @@ Type: {user_info['org_type']}
 Full AI Analysis:
 {analysis_text}
 """
-
     message = Mail(
         from_email='noreply@alphasourceai.com',
         to_emails=TO_EMAIL,
         subject=subject,
         plain_text_content=body
     )
-
     if file:
         file_data = file.read()
         encoded = base64.b64encode(file_data).decode()
@@ -119,7 +120,6 @@ Full AI Analysis:
             Disposition("attachment")
         )
         message.attachment = attachment
-
     sg.send(message)
 
 # ---- Submission ----
@@ -154,7 +154,7 @@ P&L Data:
             )
             full_analysis = response["choices"][0]["message"]["content"]
 
-            # Generate a short summary for display
+            # Generate summary only for user
             summary_prompt = f"""
 From the following analysis, extract:
 - Number of improvement opportunities
