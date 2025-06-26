@@ -7,3 +7,5 @@ pdf2image
 pytesseract
 poppler-utils
 tesseract
+Sendgrid
+requests
