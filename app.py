@@ -30,20 +30,22 @@ st.markdown("""
         color: #ffffff !important;
         font-weight: 500;
     }
-    .stButton > button {
+    button[kind="primary"] {
         color: #00cfc8 !important;
         background-color: #1f77b4;
         font-weight: bold;
         border-radius: 5px;
         padding: 0.5rem 1rem;
     }
-    .stButton > button:hover {
-        background-color: #155a8a;
+    button[kind="primary"]:hover {
+        background-color: #155a8a !important;
     }
     .stAlert {
         background-color: #39414f !important;
         border-left: 0.5rem solid #00cfc8 !important;
         color: white !important;
+        padding: 0.5rem 1rem;
+        border-radius: 4px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -124,75 +126,109 @@ Type: {user_info['org_type']}
     message.attachment = attachment
     sg.send(message)
 
+def analyze_and_send(file, user_info, prompt, summary_prompt, tool_name):
+    with st.spinner(f"Analyzing {tool_name}..."):
+        if file.name.endswith(".pdf"):
+            data = extract_text_from_pdf(file)
+        else:
+            df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
+            data = df.to_string(index=False)
+
+        full_prompt = prompt.format(data=data)
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": full_prompt}],
+            temperature=0.3,
+        )
+        full_analysis = response["choices"][0]["message"]["content"]
+
+        summary_prompt = summary_prompt.format(analysis=full_analysis)
+        summary_response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": summary_prompt}],
+            temperature=0.2,
+        )
+        summary_output = summary_response["choices"][0]["message"]["content"]
+
+        send_email(user_info, file, full_analysis, tool_name)
+
+    st.success("✅ Summary Ready")
+    st.markdown(summary_output)
+
 # ---- Tool: P&L Analyzer ----
 st.subheader("📊 P&L Analyzer")
-
 if not user_info_complete:
     st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
-
-
 else:
     pnl_file = st.file_uploader("Upload your P&L file (Excel, CSV, or PDF)", type=["xlsx", "csv", "pdf"], key="pnl")
-    if pnl_file and st.button("🔍 Analyze and Send", key="analyze_pnl"):
-        with st.spinner("Analyzing..."):
-            if pnl_file.name.endswith(".pdf"):
-                raw_text = extract_text_from_pdf(pnl_file)
-                data_input = raw_text
-            else:
-                df = pd.read_csv(pnl_file) if pnl_file.name.endswith(".csv") else pd.read_excel(pnl_file)
-                data_input = df.to_string(index=False)
+    if pnl_file and st.button("🔍 Analyze P&L"):
+        analyze_and_send(
+            file=pnl_file,
+            user_info={
+                "first_name": first_name,
+                "last_name": last_name,
+                "office_name": office_name,
+                "email": email,
+                "org_type": org_type,
+            },
+            prompt="""You are a dental consultant. Review the P&L data below and identify 3–5 key issues affecting profitability, count how many are improving vs declining, and end with a call-to-action. \n\n{data}""",
+            summary_prompt="""Summarize this analysis in bullet points with number of improvements, declines, and end with a suggestion to reach out.\n\n{analysis}""",
+            tool_name="P&L Analyzer"
+        )
 
-            prompt = f"""
-You are a dental consultant. Review the P&L data and provide:
-- 3–5 key issues affecting profitability
-- Number of issues showing decline
-- Number of issues showing improvement
-- Total improvement opportunities
-Finish with a call-to-action to request a full review.
+# ---- Tool: AR Analyzer ----
+st.subheader("💰 Accounts Receivable Analyzer")
+ar_file = st.file_uploader("Upload AR Report (CSV or Excel)", type=["csv", "xlsx"], key="ar")
+if user_info_complete and ar_file and st.button("🔍 Analyze AR"):
+    analyze_and_send(
+        file=ar_file,
+        user_info={
+            "first_name": first_name,
+            "last_name": last_name,
+            "office_name": office_name,
+            "email": email,
+            "org_type": org_type,
+        },
+        prompt="""You're a dental RCM specialist. Review the AR report below and identify aging concerns, risk areas, and collection opportunities.\n\n{data}""",
+        summary_prompt="""Summarize the AR insights below into key risks and opportunities.\n\n{analysis}""",
+        tool_name="AR Analyzer"
+    )
 
-P&L Data:
-{data_input}
-"""
-            response = openai.ChatCompletion.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-            )
-            full_analysis = response["choices"][0]["message"]["content"]
+# ---- Tool: Insurance Claim Analyzer ----
+st.subheader("📄 Insurance Claim Analyzer")
+claim_file = st.file_uploader("Upload Claim Report (CSV, Excel, or PDF)", type=["csv", "xlsx", "pdf"], key="claim")
+if user_info_complete and claim_file and st.button("🔍 Analyze Claims"):
+    analyze_and_send(
+        file=claim_file,
+        user_info={
+            "first_name": first_name,
+            "last_name": last_name,
+            "office_name": office_name,
+            "email": email,
+            "org_type": org_type,
+        },
+        prompt="""You are a dental insurance audit expert. Review the claim data below. Identify denials, delays, and appeal opportunities.\n\n{data}""",
+        summary_prompt="""Summarize the claims analysis into denial trends and improvement areas.\n\n{analysis}""",
+        tool_name="Insurance Claim Analyzer"
+    )
 
-            # Create summary for user only
-            summary_prompt = f"""
-From the analysis below, extract:
-- Number of improvement opportunities
-- Number of trends improving
-- Number of trends declining
-
-Use bullet points. Add a short message encouraging paid consulting.
-
-{full_analysis}
-"""
-            summary_response = openai.ChatCompletion.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": summary_prompt}],
-                temperature=0.2,
-            )
-            summary_output = summary_response["choices"][0]["message"]["content"]
-
-            send_email(
-                user_info={
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "office_name": office_name,
-                    "email": email,
-                    "org_type": org_type,
-                },
-                file=pnl_file,
-                analysis_text=full_analysis,
-                tool_name="P&L Analyzer"
-            )
-
-        st.success("✅ Summary Ready")
-        st.markdown(summary_output)
+# ---- Tool: SOP Analyzer ----
+st.subheader("📝 SOP Analyzer")
+sop_file = st.file_uploader("Upload SOP Document (PDF)", type=["pdf"], key="sop")
+if user_info_complete and sop_file and st.button("🔍 Analyze SOPs"):
+    analyze_and_send(
+        file=sop_file,
+        user_info={
+            "first_name": first_name,
+            "last_name": last_name,
+            "office_name": office_name,
+            "email": email,
+            "org_type": org_type,
+        },
+        prompt="""You are a dental operations consultant. Review the SOP below. Identify gaps, redundancies, and suggestions for operational efficiency.\n\n{data}""",
+        summary_prompt="""Summarize the main gaps and suggested improvements from this SOP analysis.\n\n{analysis}""",
+        tool_name="SOP Analyzer"
+    )
 
 # ---- Footer ----
 st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
