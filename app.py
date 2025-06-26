@@ -89,6 +89,49 @@ def extract_text_from_pdf(uploaded_file):
         os.remove(tmp_pdf_path)
     return text.strip()
 
+def send_followup_email(user_info, tool_name):
+    sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
+    
+    # Dynamic email content
+    if tool_name == "P&L Analyzer":
+        improvement_type = "profitability"
+    elif tool_name == "AR Analyzer":
+        improvement_type = "streamline workflows"
+    elif tool_name == "Insurance Claim Analyzer":
+        improvement_type = "reduce claims risk"
+    elif tool_name == "SOP Analyzer":
+        improvement_type = "improve operational consistency"
+    
+    subject = f"Your Dental Analysis Summary – Let’s Talk Strategy"
+    body = f"""
+    Hi {user_info['first_name']},
+    
+    Thank you for submitting your dental operations file to our analysis platform.
+    
+    Here’s a quick summary of your submission:
+    - Tool Used: {tool_name}
+    - Office/Group: {user_info['office_name']}
+    
+    We’ve reviewed the data and identified key areas where improvements can drive {improvement_type}.
+    
+    📞 If you'd like a personalized review of this analysis or want to explore how we can help optimize your practice, reply to this email or book a time here: [Schedule with Us](https://outlook.office365.com/owa/calendar/alphaSourceBookingPage@alphasourceai.com/bookings/)
+    
+    We look forward to helping you grow.
+    
+    – Jason  
+    alphaSource AI  
+    info@alphasourceai.com
+    """
+    
+    message = Mail(
+        from_email="noreply@alphasourceai.com",
+        to_emails=user_info['email'],
+        subject=subject,
+        plain_text_content=body
+    )
+    
+    sg.send(message)
+
 def send_email(user_info, file, analysis_text, tool_name):
     sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
     subject = f"[{tool_name}] {user_info['office_name']} ({user_info['email']})"
@@ -152,6 +195,7 @@ def analyze_and_send(file, user_info, prompt, summary_prompt, tool_name):
         summary_output = summary_response["choices"][0]["message"]["content"]
 
         send_email(user_info, file, full_analysis, tool_name)
+        send_followup_email(user_info, tool_name)
 
         st.success("✅ Summary Ready")
         st.markdown(summary_output)
