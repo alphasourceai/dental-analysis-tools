@@ -30,15 +30,15 @@ st.markdown("""
         color: #ffffff !important;
         font-weight: 500;
     }
-    button[kind="primary"] {
+    .stButton > button, .stForm button {
         color: #00cfc8 !important;
         background-color: #1f77b4;
         font-weight: bold;
         border-radius: 5px;
         padding: 0.5rem 1rem;
     }
-    button[kind="primary"]:hover {
-        background-color: #155a8a !important;
+    .stButton > button:hover, .stForm button:hover {
+        background-color: #155a8a;
     }
     .stAlert {
         background-color: #39414f !important;
@@ -54,12 +54,12 @@ st.markdown("""
 logo = Image.open("logo.png")
 st.image(logo, use_container_width=True)
 
-# ---- Header ----
+# ---- Page Title ----
 st.markdown("<h1 style='text-align: center;'>Dental Operations Analysis Tools</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center;'>Upload files for each section below. Your insights will be reviewed and sent to our team for deeper analysis.</p>", unsafe_allow_html=True)
 st.divider()
 
-# ---- User Info Form ----
+# ---- Global User Info Form ----
 with st.form("user_info_form"):
     st.subheader("📇 User Information")
     first_name = st.text_input("First Name")
@@ -129,30 +129,32 @@ Type: {user_info['org_type']}
 def analyze_and_send(file, user_info, prompt, summary_prompt, tool_name):
     with st.spinner("Analyzing..."):
         if file.name.endswith(".pdf"):
-            data = extract_text_from_pdf(file)
+            raw_text = extract_text_from_pdf(file)
+            data_input = raw_text
         else:
             df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
-            data = df.to_string(index=False)
+            data_input = df.to_string(index=False)
 
-        analysis_prompt = prompt.replace("{data}", data)
+        # Full analysis
         response = openai.ChatCompletion.create(
             model="gpt-4o",
-            messages=[{"role": "user", "content": analysis_prompt}],
+            messages=[{"role": "user", "content": prompt.replace("{data}", data_input)}],
             temperature=0.3,
         )
         full_analysis = response["choices"][0]["message"]["content"]
 
-        summary_prompt = summary_prompt.replace("{analysis}", full_analysis)
+        # Summary
         summary_response = openai.ChatCompletion.create(
             model="gpt-4o",
-            messages=[{"role": "user", "content": summary_prompt}],
+            messages=[{"role": "user", "content": summary_prompt.replace("{analysis}", full_analysis)}],
             temperature=0.2,
         )
-        summary = summary_response["choices"][0]["message"]["content"]
+        summary_output = summary_response["choices"][0]["message"]["content"]
 
         send_email(user_info, file, full_analysis, tool_name)
+
         st.success("✅ Summary Ready")
-        st.markdown(summary)
+        st.markdown(summary_output)
 
 # ---- Tool: P&L Analyzer ----
 st.subheader("📊 P&L Analyzer")
@@ -171,21 +173,20 @@ else:
                 "email": email,
                 "org_type": org_type,
             },
-            prompt="""You are a dental consultant. Review the P&L data and provide:
+            prompt="""You are a dental consultant. Review the P&L data below and provide:
 - 3–5 key issues affecting profitability
 - Number of issues showing decline
 - Number of issues showing improvement
 - Total improvement opportunities
-Finish with a call-to-action to request a full review.
+End with a call-to-action for full consulting review.
 
-P&L Data:
 {data}""",
             summary_prompt="""From the analysis below, extract:
 - Number of improvement opportunities
 - Number of trends improving
 - Number of trends declining
 
-Use bullet points. Add a short message encouraging paid consulting.
+Use bullet points. End with a short consulting pitch.
 
 {analysis}""",
             tool_name="P&L Analyzer"
@@ -208,8 +209,12 @@ else:
                 "email": email,
                 "org_type": org_type,
             },
-            prompt="""You're a dental RCM specialist. Review the AR report below and identify aging concerns, risk areas, and collection opportunities.\n\n{data}""",
-            summary_prompt="""Summarize the AR insights below into key risks and opportunities.\n\n{analysis}""",
+            prompt="""You're a dental RCM specialist. Review the AR report below and identify aging concerns, risk areas, and collection opportunities.
+
+{data}""",
+            summary_prompt="""Summarize the AR insights below into key risks and opportunities.
+
+{analysis}""",
             tool_name="AR Analyzer"
         )
 
@@ -230,8 +235,12 @@ else:
                 "email": email,
                 "org_type": org_type,
             },
-            prompt="""You are a dental insurance audit expert. Review the claim data below. Identify denials, delays, and appeal opportunities.\n\n{data}""",
-            summary_prompt="""Summarize the claims analysis into denial trends and improvement areas.\n\n{analysis}""",
+            prompt="""You are a dental insurance audit expert. Review the claim data below. Identify denials, delays, and appeal opportunities.
+
+{data}""",
+            summary_prompt="""Summarize the claims analysis into denial trends and improvement areas.
+
+{analysis}""",
             tool_name="Insurance Claim Analyzer"
         )
 
@@ -252,8 +261,12 @@ else:
                 "email": email,
                 "org_type": org_type,
             },
-            prompt="""You are a dental operations consultant. Review the SOP below. Identify gaps, redundancies, and suggestions for operational efficiency.\n\n{data}""",
-            summary_prompt="""Summarize the main gaps and suggested improvements from this SOP analysis.\n\n{analysis}""",
+            prompt="""You are a dental operations consultant. Review the SOP below. Identify gaps, redundancies, and suggestions for operational efficiency.
+
+{data}""",
+            summary_prompt="""Summarize the main gaps and suggested improvements from this SOP analysis.
+
+{analysis}""",
             tool_name="SOP Analyzer"
         )
 
