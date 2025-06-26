@@ -15,59 +15,58 @@ st.set_page_config(
     layout="centered"
 )
 
-# ---- Custom Dark Theme Styling ----
-st.markdown(
-    """
+# ---- Custom Branding CSS ----
+st.markdown("""
     <style>
-        body {
+        .stApp, body {
             background-color: #252a34;
-            color: #ffffff;
+            color: #f0f0f0;
         }
-        .stApp {
-            background-color: #252a34;
+        .main-container {
+            background-color: #ffffff;
+            color: #000000;
+            max-width: 800px;
+            margin: 2rem auto;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
         }
-        h1, h2, h3, h4, h5, h6, p, label, .stMarkdown {
-            color: #ffffff !important;
+        .main-container h1, .main-container h2 {
+            color: #1f77b4;
         }
-        .stButton>button {
-            background-color: #08d9d6;
-            color: black;
-            border-radius: 6px;
-            padding: 0.5rem 1rem;
-            border: none;
-        }
-        .stButton>button:hover {
-            background-color: #00adb5;
+        .stButton>button, .stDownloadButton>button {
+            background-color: #1f77b4;
             color: white;
-        }
-        .stDownloadButton>button {
-            background-color: #ff2e63;
-            color: white;
-            border-radius: 6px;
+            border-radius: 4px;
+            margin: 1rem 0;
             padding: 0.5rem 1rem;
+        }
+        .stButton>button:hover, .stDownloadButton>button:hover {
+            background-color: #155a8a;
+        }
+        .stFileUploader>div {
+            margin-bottom: 1.5rem;
+        }
+        hr {
             border: none;
-        }
-        .stDownloadButton>button:hover {
-            background-color: #e3004f;
-        }
-        .css-1kyxreq, .css-1r6slb0 {
-            background-color: #393e46 !important;
+            border-top: 1px solid #ccc;
         }
     </style>
-    """,
-    unsafe_allow_html=True
-)
+""", unsafe_allow_html=True)
+
+# ---- Begin Container ----
+st.markdown("<div class='main-container'>", unsafe_allow_html=True)
 
 # ---- Set up OpenAI ----
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # ---- Load and Display Logo ----
 logo = Image.open("logo.png")
-st.image(logo, use_container_width=True)
+st.image(logo, width=300)
 
 # ---- App Header ----
 st.markdown(
-    "<h1 style='text-align: center; color: #1f77b4;'>🦷 Dental Practice P&L Analyzer</h1>",
+    "<h1 style='text-align: center;'>🦷 Dental Practice P&L Analyzer</h1>",
     unsafe_allow_html=True
 )
 st.markdown(
@@ -194,3 +193,6 @@ st.markdown(
     "<p style='text-align: center; font-size: 0.9rem;'>Built by <a href='https://alphasourceai.com' target='_blank'>AlphaSource AI</a></p>",
     unsafe_allow_html=True
 )
+
+# ---- End Container ----
+st.markdown("</div>", unsafe_allow_html=True)
