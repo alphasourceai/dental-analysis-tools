@@ -54,12 +54,12 @@ st.markdown("""
 logo = Image.open("logo.png")
 st.image(logo, use_container_width=True)
 
-# ---- Page Title ----
+# ---- Header ----
 st.markdown("<h1 style='text-align: center;'>Dental Operations Analysis Tools</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center;'>Upload files for each section below. Your insights will be reviewed and sent to our team for deeper analysis.</p>", unsafe_allow_html=True)
 st.divider()
 
-# ---- Global User Info Form ----
+# ---- User Info Form ----
 with st.form("user_info_form"):
     st.subheader("📇 User Information")
     first_name = st.text_input("First Name")
@@ -127,36 +127,36 @@ Type: {user_info['org_type']}
     sg.send(message)
 
 def analyze_and_send(file, user_info, prompt, summary_prompt, tool_name):
-    with st.spinner(f"Analyzing {tool_name}..."):
+    with st.spinner("Analyzing..."):
         if file.name.endswith(".pdf"):
             data = extract_text_from_pdf(file)
         else:
             df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
             data = df.to_string(index=False)
 
-        full_prompt = prompt.format(data=data)
+        analysis_prompt = prompt.replace("{data}", data)
         response = openai.ChatCompletion.create(
             model="gpt-4o",
-            messages=[{"role": "user", "content": full_prompt}],
+            messages=[{"role": "user", "content": analysis_prompt}],
             temperature=0.3,
         )
         full_analysis = response["choices"][0]["message"]["content"]
 
-        summary_prompt = summary_prompt.format(analysis=full_analysis)
+        summary_prompt = summary_prompt.replace("{analysis}", full_analysis)
         summary_response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": summary_prompt}],
             temperature=0.2,
         )
-        summary_output = summary_response["choices"][0]["message"]["content"]
+        summary = summary_response["choices"][0]["message"]["content"]
 
         send_email(user_info, file, full_analysis, tool_name)
-
-    st.success("✅ Summary Ready")
-    st.markdown(summary_output)
+        st.success("✅ Summary Ready")
+        st.markdown(summary)
 
 # ---- Tool: P&L Analyzer ----
 st.subheader("📊 P&L Analyzer")
+
 if not user_info_complete:
     st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
 else:
@@ -171,64 +171,91 @@ else:
                 "email": email,
                 "org_type": org_type,
             },
-            prompt="""You are a dental consultant. Review the P&L data below and identify 3–5 key issues affecting profitability, count how many are improving vs declining, and end with a call-to-action. \n\n{data}""",
-            summary_prompt="""Summarize this analysis in bullet points with number of improvements, declines, and end with a suggestion to reach out.\n\n{analysis}""",
+            prompt="""You are a dental consultant. Review the P&L data and provide:
+- 3–5 key issues affecting profitability
+- Number of issues showing decline
+- Number of issues showing improvement
+- Total improvement opportunities
+Finish with a call-to-action to request a full review.
+
+P&L Data:
+{data}""",
+            summary_prompt="""From the analysis below, extract:
+- Number of improvement opportunities
+- Number of trends improving
+- Number of trends declining
+
+Use bullet points. Add a short message encouraging paid consulting.
+
+{analysis}""",
             tool_name="P&L Analyzer"
         )
 
 # ---- Tool: AR Analyzer ----
 st.subheader("💰 Accounts Receivable Analyzer")
-ar_file = st.file_uploader("Upload AR Report (CSV or Excel)", type=["csv", "xlsx"], key="ar")
-if user_info_complete and ar_file and st.button("🔍 Analyze AR"):
-    analyze_and_send(
-        file=ar_file,
-        user_info={
-            "first_name": first_name,
-            "last_name": last_name,
-            "office_name": office_name,
-            "email": email,
-            "org_type": org_type,
-        },
-        prompt="""You're a dental RCM specialist. Review the AR report below and identify aging concerns, risk areas, and collection opportunities.\n\n{data}""",
-        summary_prompt="""Summarize the AR insights below into key risks and opportunities.\n\n{analysis}""",
-        tool_name="AR Analyzer"
-    )
+
+if not user_info_complete:
+    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
+else:
+    ar_file = st.file_uploader("Upload AR Report (CSV or Excel)", type=["csv", "xlsx"], key="ar")
+    if ar_file and st.button("🔍 Analyze AR"):
+        analyze_and_send(
+            file=ar_file,
+            user_info={
+                "first_name": first_name,
+                "last_name": last_name,
+                "office_name": office_name,
+                "email": email,
+                "org_type": org_type,
+            },
+            prompt="""You're a dental RCM specialist. Review the AR report below and identify aging concerns, risk areas, and collection opportunities.\n\n{data}""",
+            summary_prompt="""Summarize the AR insights below into key risks and opportunities.\n\n{analysis}""",
+            tool_name="AR Analyzer"
+        )
 
 # ---- Tool: Insurance Claim Analyzer ----
 st.subheader("📄 Insurance Claim Analyzer")
-claim_file = st.file_uploader("Upload Claim Report (CSV, Excel, or PDF)", type=["csv", "xlsx", "pdf"], key="claim")
-if user_info_complete and claim_file and st.button("🔍 Analyze Claims"):
-    analyze_and_send(
-        file=claim_file,
-        user_info={
-            "first_name": first_name,
-            "last_name": last_name,
-            "office_name": office_name,
-            "email": email,
-            "org_type": org_type,
-        },
-        prompt="""You are a dental insurance audit expert. Review the claim data below. Identify denials, delays, and appeal opportunities.\n\n{data}""",
-        summary_prompt="""Summarize the claims analysis into denial trends and improvement areas.\n\n{analysis}""",
-        tool_name="Insurance Claim Analyzer"
-    )
+
+if not user_info_complete:
+    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
+else:
+    claim_file = st.file_uploader("Upload Claim Report (CSV, Excel, or PDF)", type=["csv", "xlsx", "pdf"], key="claim")
+    if claim_file and st.button("🔍 Analyze Claims"):
+        analyze_and_send(
+            file=claim_file,
+            user_info={
+                "first_name": first_name,
+                "last_name": last_name,
+                "office_name": office_name,
+                "email": email,
+                "org_type": org_type,
+            },
+            prompt="""You are a dental insurance audit expert. Review the claim data below. Identify denials, delays, and appeal opportunities.\n\n{data}""",
+            summary_prompt="""Summarize the claims analysis into denial trends and improvement areas.\n\n{analysis}""",
+            tool_name="Insurance Claim Analyzer"
+        )
 
 # ---- Tool: SOP Analyzer ----
 st.subheader("📝 SOP Analyzer")
-sop_file = st.file_uploader("Upload SOP Document (PDF)", type=["pdf"], key="sop")
-if user_info_complete and sop_file and st.button("🔍 Analyze SOPs"):
-    analyze_and_send(
-        file=sop_file,
-        user_info={
-            "first_name": first_name,
-            "last_name": last_name,
-            "office_name": office_name,
-            "email": email,
-            "org_type": org_type,
-        },
-        prompt="""You are a dental operations consultant. Review the SOP below. Identify gaps, redundancies, and suggestions for operational efficiency.\n\n{data}""",
-        summary_prompt="""Summarize the main gaps and suggested improvements from this SOP analysis.\n\n{analysis}""",
-        tool_name="SOP Analyzer"
-    )
+
+if not user_info_complete:
+    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
+else:
+    sop_file = st.file_uploader("Upload SOP Document (PDF)", type=["pdf"], key="sop")
+    if sop_file and st.button("🔍 Analyze SOPs"):
+        analyze_and_send(
+            file=sop_file,
+            user_info={
+                "first_name": first_name,
+                "last_name": last_name,
+                "office_name": office_name,
+                "email": email,
+                "org_type": org_type,
+            },
+            prompt="""You are a dental operations consultant. Review the SOP below. Identify gaps, redundancies, and suggestions for operational efficiency.\n\n{data}""",
+            summary_prompt="""Summarize the main gaps and suggested improvements from this SOP analysis.\n\n{analysis}""",
+            tool_name="SOP Analyzer"
+        )
 
 # ---- Footer ----
 st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
