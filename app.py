@@ -227,7 +227,7 @@ AnthropicAI Analysis:
     message.add_attachment(attachment)
     sg.send(message)
 
-# ---- Tool Analysis ----
+# ---- Tool Analysis Sections ----
 def analyze_and_send(file, user_info, tool_name):
     with st.spinner("Analyzing..."):
         if file.name.endswith(".pdf"):
@@ -249,3 +249,87 @@ def analyze_and_send(file, user_info, tool_name):
         st.markdown(f"**OpenAI Analysis**: {results['OpenAI Analysis']}")
         st.markdown(f"**xAI Analysis**: {results['xAI Analysis']}")
         st.markdown(f"**AnthropicAI Analysis**: {results['AnthropicAI Analysis']}")
+
+# ---- Tool: P&L Analyzer ----
+st.subheader("📊 P&L Analyzer")
+
+if not user_info_complete:
+    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
+else:
+    pnl_file = st.file_uploader("Upload your P&L file (Excel, CSV, or PDF)", type=["xlsx", "csv", "pdf"], key="pnl")
+    if pnl_file and st.button("🔍 Analyze P&L"):
+        analyze_and_send(
+            file=pnl_file,
+            user_info={
+                "first_name": first_name,
+                "last_name": last_name,
+                "office_name": office_name,
+                "email": email,
+                "org_type": org_type,
+            },
+            tool_name="P&L Analyzer"
+        )
+
+# ---- Tool: AR Analyzer ----
+st.subheader("💰 Accounts Receivable Analyzer")
+
+if not user_info_complete:
+    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
+else:
+    ar_file = st.file_uploader("Upload AR Report (CSV or Excel)", type=["csv", "xlsx"], key="ar")
+    if ar_file and st.button("🔍 Analyze AR"):
+        analyze_and_send(
+            file=ar_file,
+            user_info={
+                "first_name": first_name,
+                "last_name": last_name,
+                "office_name": office_name,
+                "email": email,
+                "org_type": org_type,
+            },
+            tool_name="AR Analyzer"
+        )
+
+# ---- Tool: Insurance Claim Analyzer ----
+st.subheader("📄 Insurance Claim Analyzer")
+
+if not user_info_complete:
+    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
+else:
+    claim_file = st.file_uploader("Upload Claim Report (CSV, Excel, or PDF)", type=["csv", "xlsx", "pdf"], key="claim")
+    if claim_file and st.button("🔍 Analyze Claims"):
+        analyze_and_send(
+            file=claim_file,
+            user_info={
+                "first_name": first_name,
+                "last_name": last_name,
+                "office_name": office_name,
+                "email": email,
+                "org_type": org_type,
+            },
+            tool_name="Insurance Claim Analyzer"
+        )
+
+# ---- Tool: SOP Analyzer ----
+st.subheader("📝 SOP Analyzer")
+
+if not user_info_complete:
+    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
+else:
+    sop_file = st.file_uploader("Upload SOP Document (PDF)", type=["pdf"], key="sop")
+    if sop_file and st.button("🔍 Analyze SOPs"):
+        analyze_and_send(
+            file=sop_file,
+            user_info={
+                "first_name": first_name,
+                "last_name": last_name,
+                "office_name": office_name,
+                "email": email,
+                "org_type": org_type,
+            },
+            tool_name="SOP Analyzer"
+        )
+
+# ---- Footer ----
+st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center;'>Built by <a href='https://alphasourceai.com' target='_blank'>AlphaSource AI</a></p>", unsafe_allow_html=True)
