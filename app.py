@@ -2,197 +2,193 @@ import streamlit as st
 import pandas as pd
 import openai
 from PIL import Image
-import fitz  # PyMuPDF
+import fitz
 from pdf2image import convert_from_path
 import pytesseract
 import tempfile
 import os
+import sendgrid
+from sendgrid.helpers.mail import Mail, Email, To, Content, Attachment, FileContent, FileName, FileType, Disposition
+import base64
 
-# ---- Page Configuration ----
-st.set_page_config(
-    page_title="Dental P&L Analyzer",
-    page_icon="🦷",
-    layout="centered"
-)
+# ---- Page Config ----
+st.set_page_config(page_title="Dental P&L Analyzer", page_icon="🦷", layout="centered")
 
-# ---- Custom Branding CSS ----
+# ---- Styles ----
 st.markdown("""
-    <style>
-        .stApp, body {
-            background-color: #252a34;
-            color: #f0f0f0;
-        }
-        .main-container {
-            background-color: #ffffff;
-            color: #000000;
-            max-width: 800px;
-            margin: 2rem auto;
-            padding: 2rem;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-        }
-        .main-container h1, .main-container h2 {
-            color: #1f77b4;
-        }
-        .stButton>button, .stDownloadButton>button {
-            background-color: #1f77b4;
-            color: white;
-            border-radius: 4px;
-            margin: 1rem 0;
-            padding: 0.5rem 1rem;
-        }
-        .stButton>button:hover, .stDownloadButton>button:hover {
-            background-color: #155a8a;
-        }
-        .stFileUploader>div {
-            margin-bottom: 1.5rem;
-        }
-        hr {
-            border: none;
-            border-top: 1px solid #ccc;
-        }
-    </style>
+<style>
+    .stApp, body {
+        background-color: #252a34;
+        color: #f0f0f0;
+    }
+    .main-container {
+        background-color: #ffffff;
+        color: #000000;
+        max-width: 800px;
+        margin: 2rem auto;
+        padding: 2rem;
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+    .stButton>button, .stDownloadButton>button {
+        background-color: #1f77b4;
+        color: white;
+        border-radius: 4px;
+        padding: 0.5rem 1rem;
+    }
+    .stButton>button:hover, .stDownloadButton>button:hover {
+        background-color: #155a8a;
+    }
+</style>
 """, unsafe_allow_html=True)
 
-# ---- Begin Container ----
 st.markdown("<div class='main-container'>", unsafe_allow_html=True)
 
-# ---- Set up OpenAI ----
+# ---- Config ----
 openai.api_key = st.secrets["OPENAI_API_KEY"]
+SENDGRID_API_KEY = st.secrets["SENDGRID_API_KEY"]
+TO_EMAIL = "info@alphasourceai.com"
 
-# ---- Load and Display Logo ----
+# ---- Logo ----
 logo = Image.open("logo.png")
 st.image(logo, width=300)
 
-# ---- App Header ----
-st.markdown(
-    "<h1 style='text-align: center;'>🦷 Dental Practice P&L Analyzer</h1>",
-    unsafe_allow_html=True
-)
-st.markdown(
-    "<p style='text-align: center; font-size: 1.1rem;'>Upload your P&L report (Excel, CSV, or PDF) to receive expert AI-driven analysis.</p>",
-    unsafe_allow_html=True
-)
-
+st.markdown("<h1 style='text-align: center;'>🦷 Dental Practice P&L Analyzer</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center;'>Upload your P&L report for high-level AI insights. We'll review and send a deeper analysis to your inbox.</p>", unsafe_allow_html=True)
 st.divider()
 
-# ---- OCR Utility for PDFs ----
+# ---- User Info Form ----
+with st.form("user_info_form"):
+    first_name = st.text_input("First Name")
+    last_name = st.text_input("Last Name")
+    office_name = st.text_input("Office/Group Name")
+    email = st.text_input("Email Address")
+    org_type = st.selectbox("Type", ["Location", "Group"])
+    uploaded_file = st.file_uploader("Upload your P&L file (Excel, CSV, or PDF)", type=["xlsx", "csv", "pdf"])
+    submitted = st.form_submit_button("🔍 Analyze and Send")
+
+# ---- File + OCR ----
 def extract_text_from_pdf(uploaded_file):
     text = ""
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         tmp_file.write(uploaded_file.read())
         tmp_pdf_path = tmp_file.name
-
     try:
         with fitz.open(tmp_pdf_path) as doc:
             for page in doc:
                 text += page.get_text()
-
         if not text.strip():
             images = convert_from_path(tmp_pdf_path)
             for image in images:
                 text += pytesseract.image_to_string(image)
-
-    except Exception as e:
-        st.error(f"OCR failed: {e}")
-
     finally:
         os.remove(tmp_pdf_path)
-
     return text.strip()
 
-# ---- File Upload ----
-uploaded_file = st.file_uploader("Upload your P&L file (Excel, CSV, or PDF)", type=["xlsx", "csv", "pdf"])
+# ---- Email Utility ----
+def send_email(user_info, file, analysis_text):
+    sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
 
-# ---- Process File ----
-if uploaded_file:
-    if uploaded_file.name.endswith('.pdf'):
-        text_data = extract_text_from_pdf(uploaded_file)
-        if not text_data:
-            st.error("Could not extract any text from PDF.")
-        else:
-            st.text_area("📄 Extracted Text Preview", text_data[:3000], height=300)
+    subject = f"New P&L Submission - {user_info['office_name']} ({user_info['email']})"
+    body = f"""New P&L upload received:
 
-            if st.button("🔍 Run AI Analysis on PDF"):
-                with st.spinner("Analyzing..."):
-                    prompt = f"""
-You are a dental operations consultant. Review this P&L text and provide:
-- Key observations and trends
-- Any cost categories that appear too high
-- Suggestions for improving profitability
-- Benchmarks to compare against industry norms (if possible)
+First Name: {user_info['first_name']}
+Last Name: {user_info['last_name']}
+Office/Group: {user_info['office_name']}
+Email: {user_info['email']}
+Type: {user_info['org_type']}
 
-P&L Text:
-{text_data}
+Full AI Analysis:
+{analysis_text}
 """
-                    response = openai.ChatCompletion.create(
-                        model="gpt-4o",
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.3,
-                    )
-                    insights = response["choices"][0]["message"]["content"]
 
-                st.subheader("📈 AI-Powered Insights")
-                st.markdown(insights)
+    message = Mail(
+        from_email='noreply@alphasourceai.com',
+        to_emails=TO_EMAIL,
+        subject=subject,
+        plain_text_content=body
+    )
 
-                st.download_button(
-                    label="📥 Download Insights",
-                    data=insights,
-                    file_name="pnl_analysis.txt",
-                    mime="text/plain"
-                )
+    if file:
+        file_data = file.read()
+        encoded = base64.b64encode(file_data).decode()
+        attachment = Attachment(
+            FileContent(encoded),
+            FileName(file.name),
+            FileType(file.type),
+            Disposition("attachment")
+        )
+        message.attachment = attachment
 
+    sg.send(message)
+
+# ---- Submission ----
+if submitted:
+    if not all([first_name, last_name, office_name, email, org_type, uploaded_file]):
+        st.warning("All fields and file upload are required.")
     else:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
+        with st.spinner("Analyzing..."):
+            if uploaded_file.name.endswith(".pdf"):
+                raw_text = extract_text_from_pdf(uploaded_file)
+                data_input = raw_text
+            else:
+                df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
+                data_input = df.to_string(index=False)
 
-        st.subheader("📊 P&L File Preview")
-        st.dataframe(df, use_container_width=True)
+            prompt = f"""
+You are a dental consultant. Review the P&L data and provide:
+- Summary of 3–5 key issues to improve profitability
+- Number of issues showing decline
+- Number of issues showing improvement
+- Total number of improvement opportunities
 
-        if st.button("🔍 Run AI Analysis"):
-            with st.spinner("Analyzing..."):
-                data_str = df.to_string(index=False)
-
-                prompt = f"""
-You are a dental operations consultant. Review this P&L and provide:
-- Key observations and trends
-- Any cost categories that appear too high
-- Suggestions for improving profitability
-- Benchmarks to compare against industry norms (if possible)
+End with a brief call-to-action encouraging the user to request a full review.
 
 P&L Data:
-{data_str}
+{data_input}
 """
-                response = openai.ChatCompletion.create(
-                    model="gpt-4o",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                )
+            response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
+            full_analysis = response["choices"][0]["message"]["content"]
 
-                insights = response["choices"][0]["message"]["content"]
+            # Generate a short summary for display
+            summary_prompt = f"""
+From the following analysis, extract:
+- Number of improvement opportunities
+- Number of trends improving
+- Number of trends declining
 
-            st.subheader("📈 AI-Powered Insights")
-            st.markdown(insights)
+Use bullet points. Then add a short call-to-action for consulting:
 
-            st.download_button(
-                label="📥 Download Insights",
-                data=insights,
-                file_name="pnl_analysis.txt",
-                mime="text/plain"
+{full_analysis}
+"""
+            summary_response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": summary_prompt}],
+                temperature=0.2,
+            )
+            summary_output = summary_response["choices"][0]["message"]["content"]
+
+            # Send email
+            send_email(
+                user_info={
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "office_name": office_name,
+                    "email": email,
+                    "org_type": org_type,
+                },
+                file=uploaded_file,
+                analysis_text=full_analysis
             )
 
-else:
-    st.info("Please upload a P&L file to begin.")
+        st.success("✅ AI Summary Generated")
+        st.markdown(summary_output)
 
 # ---- Footer ----
 st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
-st.markdown(
-    "<p style='text-align: center; font-size: 0.9rem;'>Built by <a href='https://alphasourceai.com' target='_blank'>AlphaSource AI</a></p>",
-    unsafe_allow_html=True
-)
-
-# ---- End Container ----
+st.markdown("<p style='text-align: center;'>Built by <a href='https://alphasourceai.com' target='_blank'>AlphaSource AI</a></p>", unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
