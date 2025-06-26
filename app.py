@@ -40,6 +40,11 @@ st.markdown("""
     .stButton > button:hover {
         background-color: #155a8a;
     }
+    .stAlert {
+        background-color: #39414f !important;
+        border-left: 0.5rem solid #00cfc8 !important;
+        color: white !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -48,7 +53,7 @@ logo = Image.open("logo.png")
 st.image(logo, use_container_width=True)
 
 # ---- Page Title ----
-st.markdown("<h1 style='text-align: center;'>🦷 Dental Operations Analysis Tools</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>Dental Operations Analysis Tools</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center;'>Upload files for each section below. Your insights will be reviewed and sent to our team for deeper analysis.</p>", unsafe_allow_html=True)
 st.divider()
 
@@ -123,7 +128,8 @@ Type: {user_info['org_type']}
 st.subheader("📊 P&L Analyzer")
 
 if not user_info_complete:
-    st.info("Please complete the user info form above before uploading.")
+    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
+
 
 else:
     pnl_file = st.file_uploader("Upload your P&L file (Excel, CSV, or PDF)", type=["xlsx", "csv", "pdf"], key="pnl")
