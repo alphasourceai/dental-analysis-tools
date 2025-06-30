@@ -9,3 +9,4 @@ poppler-utils
 tesseract
 Sendgrid
 requests
+pytest
