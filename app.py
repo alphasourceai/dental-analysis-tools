@@ -93,13 +93,14 @@ def extract_text_from_pdf(uploaded_file):
 # ---- API Analysis Functions ----
 # OpenAI Analysis
 def openai_analysis(data_input):
-    response = openai.Completion.create(
+    """Run the data through OpenAI's chat completion API."""
+    response = openai.ChatCompletion.create(
         model="gpt-4o",  # Adjust if needed
-        prompt=data_input,
+        messages=[{"role": "user", "content": data_input}],
         temperature=0.3,
-        max_tokens=500
+        max_tokens=500,
     )
-    return response['choices'][0]['text']
+    return response["choices"][0]["message"]["content"]
 
 # xAI Analysis
 def xai_analysis(data_input):
