@@ -1,336 +1,892 @@
 import streamlit as st
 import pandas as pd
-import openai
 import requests
 from PIL import Image
-import fitz
-from pdf2image import convert_from_path
+import pymupdf as fitz
 import pytesseract
 import tempfile
 import os
-import sendgrid
-from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
-import base64
+from io import BytesIO
+import hmac
+import time
+import logging
+from database import get_db, Base, engine, SessionLocal
+from models import get_admin_by_username, verify_password, Admin, create_admin, User, Upload
+from datetime import datetime
+from analysis_utils import (
+    extract_text_from_pdf,
+    analyze_with_all_models,
+    send_followup_email,
+    send_email,
+    categorize_issue,
+    extract_compelling_insights
+)
+from admin_dashboard import display_admin_dashboard
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ---- API Keys ----
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-XAI_API_KEY = st.secrets["XAI_API_KEY"]  # Replace with actual API key for xAI
-ANTHROPIC_API_KEY = st.secrets["ANTHROPIC_API_KEY"]  # Replace with actual API key for AnthropicAI
+# API keys are loaded from environment variables (Replit Secrets)
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # ---- Page Config ----
-st.set_page_config(page_title="Dental Tools", page_icon="🦷", layout="centered")
+st.set_page_config(page_title="AlphaSource Dental Analysis", page_icon="📊", layout="centered")
 
 # ---- Style ----
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Raleway:wght@400;500;600;700&display=swap');
+    
     .stApp {
-        background-color: #252a34;
-        color: #f0f0f0;
+        background-color: #061551;
+        color: #EBFEFF;
+        font-family: 'Raleway', system-ui, -apple-system, sans-serif;
     }
-    label, .stTextInput label, .stSelectbox label {
-        color: #ffffff !important;
+    
+    /* Remove white bar at top */
+    header[data-testid="stHeader"] {
+        background-color: #061551 !important;
+    }
+    
+    [data-testid="stAppViewContainer"] {
+        background-color: #061551 !important;
+    }
+    
+    [data-testid="stToolbar"] {
+        background-color: #061551 !important;
+    }
+    
+    /* Headers and text */
+    h1, h2, h3, h4, h5, h6 {
+        font-family: 'Raleway', sans-serif;
+        color: #EBFEFF;
+    }
+    
+    p, label, .stMarkdown {
+        font-family: 'Raleway', sans-serif;
+        color: #EBFEFF;
+    }
+    
+    /* Labels */
+    label, .stTextInput label, .stSelectbox label, .stFileUploader label {
+        color: #EBFEFF !important;
         font-weight: 500;
     }
-    .stButton > button, .stForm button {
-        color: #00cfc8 !important;
-        background-color: #1f77b4;
-        font-weight: bold;
-        border-radius: 5px;
-        padding: 0.5rem 1rem;
+    
+    /* Inputs - light background with black text */
+    input, textarea {
+        background-color: rgba(255,255,255,0.9) !important;
+        color: #000000 !important;
+        border: 1px solid rgba(255,255,255,0.14) !important;
+        border-radius: 10px !important;
+        font-family: 'Raleway', sans-serif;
     }
-    .stButton > button:hover, .stForm button:hover {
-        background-color: #155a8a;
+    
+    input::placeholder {
+        color: rgba(0,0,0,0.5) !important;
     }
-    .stAlert {
-        background-color: #39414f !important;
-        border-left: 0.5rem solid #00cfc8 !important;
-        color: white !important;
-        padding: 0.5rem 1rem;
-        border-radius: 4px;
+    
+    /* Dropdown - light background with black text */
+    select, .stSelectbox select {
+        background-color: rgba(255,255,255,0.9) !important;
+        color: #000000 !important;
+        border: 1px solid rgba(255,255,255,0.14) !important;
+        border-radius: 10px !important;
+        font-family: 'Raleway', sans-serif;
+    }
+    
+    /* Buttons */
+    .stButton > button, .stForm button, .stDownloadButton > button {
+        background-color: #AD8BF7 !important;
+        color: #ffffff !important;
+        border: 1px solid #AD8BF7 !important;
+        border-radius: 20px !important;
+        padding: 8px 14px !important;
+        font-weight: 600 !important;
+        font-family: 'Raleway', sans-serif;
+    }
+    
+    .stButton > button:hover, .stForm button:hover, .stDownloadButton > button:hover {
+        background-color: #854DFF !important;
+        border-color: #854DFF !important;
+    }
+    
+    /* Remove glass containers from most elements */
+    .stAlert, div[data-testid="stExpander"] {
+        background-color: transparent !important;
+        border: none !important;
+        color: #EBFEFF !important;
+    }
+    
+    /* Info messages - keep subtle background */
+    .stInfo {
+        background-color: rgba(255,255,255,0.06) !important;
+        border: 1px solid rgba(255,255,255,0.14) !important;
+        border-radius: 12px !important;
+        padding: 1rem !important;
+    }
+    
+    /* Divider */
+    hr {
+        border-color: rgba(255,255,255,0.14) !important;
+    }
+    
+    /* File uploader styling - keep Streamlit's default clean design */
+    .stFileUploader {
+        margin-bottom: 0.5rem !important;
+    }
+    
+    /* Hide upload label since we're using custom icons/labels above */
+    .stFileUploader label {
+        display: none !important;
+    }
+    
+    /* Browse button text color - black */
+    .stFileUploader button {
+        color: #000000 !important;
+    }
+    
+    /* File uploader placeholder text - keep default black/dark color */
+    .stFileUploader [data-testid="stFileUploaderDropzone"] span,
+    .stFileUploader [data-testid="stFileUploaderDropzone"] p,
+    .stFileUploader [data-testid="stFileUploaderDropzone"] small {
+        color: #000000 !important;
+    }
+    
+    /* Uploaded filename text - white color */
+    .stFileUploader [data-testid="stFileUploaderFileName"],
+    .stFileUploader section[data-testid="stFileUploaderFileData"] span,
+    .stFileUploader section[data-testid="stFileUploaderFileData"] small {
+        color: #FFFFFF !important;
+    }
+    
+    /* Selectbox dropdown */
+    .stSelectbox > div > div {
+        background-color: rgba(255,255,255,0.9) !important;
+        border-color: rgba(255,255,255,0.14) !important;
+    }
+    
+    /* Success/Info messages */
+    .stSuccess {
+        background-color: rgba(173,139,247,0.2) !important;
+        border-left: 4px solid #AD8BF7 !important;
+        color: #EBFEFF !important;
+    }
+    
+    /* Spinner animation */
+    .spinner {
+        width: 20px;
+        height: 20px;
+        border: 3px solid rgba(173,139,247,0.3);
+        border-top: 3px solid #AD8BF7;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    
+    /* Logo container */
+    .logo-container {
+        text-align: center;
+        padding: 1rem 0;
+    }
+    
+    /* Sidebar - completely hidden */
+    [data-testid="stSidebar"] {
+        display: none !important;
+        visibility: hidden !important;
+    }
+    
+    [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+    
+    /* Main content takes full width */
+    .main .block-container {
+        max-width: 100% !important;
+        padding-left: 5rem !important;
+        padding-right: 5rem !important;
+    }
+    
+    /* Section headers with icons - vertically centered, contains upload box */
+    .section-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 1rem;
+        padding: 0.75rem 1rem;
+        background-color: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.14);
+        border-radius: 12px;
+        min-height: 60px;
+    }
+    
+    
+    .section-icon {
+        width: 30px;
+        height: 30px;
+        stroke: #AD8BF7;
+        fill: none;
+        flex-shrink: 0;
+    }
+    
+    /* Title containers - vertically centered */
+    .title-container {
+        background-color: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.14);
+        border-radius: 12px;
+        padding: 1rem 1.5rem;
+        text-align: center;
+        margin-bottom: 1rem;
+    }
+    
+    .title-container h1, .title-container h2, .title-container h3 {
+        margin: 0;
+        line-height: 1.3;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ---- Logo ----
-logo = Image.open("logo.png")
-st.image(logo, use_container_width=True)
+# ---- Initialize Session State ----
+if 'analysis_complete' not in st.session_state:
+    st.session_state.analysis_complete = False
+if 'analysis_results' not in st.session_state:
+    st.session_state.analysis_results = {}
+if 'is_admin_logged_in' not in st.session_state:
+    st.session_state.is_admin_logged_in = False
+if 'admin_data' not in st.session_state:
+    st.session_state.admin_data = None
 
-# ---- Page Title ----
-st.markdown("<h1 style='text-align: center;'>Dental Operations Analysis Tools</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center;'>Upload files for each section below. Your insights will be reviewed and sent to our team for deeper analysis.</p>", unsafe_allow_html=True)
-st.divider()
+# ---- Page Navigation (no sidebar, using session state) ----
+if 'page' not in st.session_state:
+    st.session_state.page = "Analyzer"
 
-# ---- Global User Info Form ----
-with st.form("user_info_form"):
-    st.subheader("📇 User Information")
-    first_name = st.text_input("First Name")
-    last_name = st.text_input("Last Name")
-    office_name = st.text_input("Office/Group Name")
-    email = st.text_input("Email Address")
-    org_type = st.selectbox("Type", ["Location", "Group"])
-    submit_user_info = st.form_submit_button("Save Info")
-
-user_info_complete = all([first_name, last_name, office_name, email, org_type])
-
-# ---- Helper Functions ----
-def extract_text_from_pdf(uploaded_file):
-    text = ""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        tmp_pdf_path = tmp_file.name
-    try:
-        with fitz.open(tmp_pdf_path) as doc:
-            for page in doc:
-                text += page.get_text()
-        if not text.strip():
-            images = convert_from_path(tmp_pdf_path)
-            for image in images:
-                text += pytesseract.image_to_string(image)
-    finally:
-        os.remove(tmp_pdf_path)
-    return text.strip()
-
-# ---- API Analysis Functions ----
-# OpenAI Analysis
-def openai_analysis(data_input):
-    """Run the data through OpenAI's chat completion API."""
-    response = openai.ChatCompletion.create(
-        model="gpt-4o",  # Adjust if needed
-        messages=[{"role": "user", "content": data_input}],
-        temperature=0.3,
-        max_tokens=500,
-    )
-    return response["choices"][0]["message"]["content"]
-
-# xAI Analysis
-def xai_analysis(data_input):
-    url = "https://api.xai.com/analyze"  # Replace with actual xAI endpoint
-    headers = {"Authorization": f"Bearer {XAI_API_KEY}"}
-    payload = {"data": data_input}
+# Analyzer Page Content
+if st.session_state.page == "Analyzer":
+    # Page Title - only on Analyzer page
+    st.markdown("""
+        <div class="title-container" style="margin-top: 1.5rem;">
+            <h1>Dental Operations AI Analysis</h1>
+        </div>
+    """, unsafe_allow_html=True)
+    st.markdown('<div style="height: 1.5rem;"></div>', unsafe_allow_html=True)
     
-    response = requests.post(url, json=payload, headers=headers)
-    return response.json()["analysis"]
+    # Show results if analysis is complete
+    if st.session_state.analysis_complete:
+        st.markdown("### Analysis Complete!")
+        st.markdown("Thank you for submitting your documents. The analysis results have been sent to your email.")
+        st.divider()
+        
+        # Display consolidated results with deduplicated counts
+        total_issues_across_all_docs = 0
+        
+        for doc_type, results in st.session_state.analysis_results.items():
+            st.markdown(f"#### {doc_type}")
+            
+            # Display issue count
+            issue_count = results.get('total_issue_count', 0)
+            total_issues_across_all_docs += issue_count
+            
+            st.markdown(f"**{issue_count} improvement opportunities identified** across 3 AI models")
+            
+            insights = extract_compelling_insights(results, max_insights=5)
+            if insights:
+                st.markdown("**Key Insights Identified:**")
+                for i, insight in enumerate(insights, 1):
+                    st.markdown(f"{i}. {insight}")
+                
+                deduplicated = results.get('deduplicated_issues', [])
+                remaining = len(deduplicated) - len(insights)
+                if remaining > 0:
+                    st.markdown(f"*...and {remaining} more improvement opportunities*")
+            
+            st.divider()
+        
+        # Overall summary
+        st.markdown(f"### Total: {total_issues_across_all_docs} improvement opportunities")
+        st.markdown("*Detailed analysis has been sent to the consulting team.*")
+        
+        # Button to start new analysis
+        if st.button("Start New Analysis"):
+            st.session_state.analysis_complete = False
+            st.session_state.analysis_results = {}
+            st.rerun()
+    
+    else:
+        # Show contact form and upload sections only if analysis is not complete
+        # Contact Information Form
+        with st.form("user_info_form"):
+            st.markdown("""
+                <div class="section-header">
+                    <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="12" cy="7" r="4"></circle>
+                    </svg>
+                    <h3 style="margin: 0;">Contact Information</h3>
+                </div>
+            """, unsafe_allow_html=True)
+            first_name = st.text_input("First Name")
+            last_name = st.text_input("Last Name")
+            office_name = st.text_input("Office/Group Name")
+            email = st.text_input("Email Address", placeholder="user@example.com")
+            org_type = st.selectbox("Type", ["Location", "Group"])
+            submit_user_info = st.form_submit_button("Save Info")
 
-# AnthropicAI Analysis
-def anthropic_analysis(data_input):
-    url = "https://api.anthropic.com/v1/complete"  # Replace with actual AnthropicAI endpoint
-    headers = {"Authorization": f"Bearer {ANTHROPIC_API_KEY}"}
-    payload = {
-        "input": data_input,
-        "model": "anthropic-1.0",  # Adjust model if needed
-    }
-    
-    response = requests.post(url, json=payload, headers=headers)
-    return response.json()["result"]
-
-# ---- Combine Results ----
-def analyze_with_all_models(data_input):
-    openai_result = openai_analysis(data_input)
-    xai_result = xai_analysis(data_input)
-    anthropic_result = anthropic_analysis(data_input)
-    
-    # Combine results into a dictionary
-    combined_results = {
-        "OpenAI Analysis": openai_result,
-        "xAI Analysis": xai_result,
-        "AnthropicAI Analysis": anthropic_result,
-    }
-    
-    return combined_results
-
-# ---- Send Follow-Up Email to User ----
-def send_followup_email(user_info, tool_name, results):
-    sg = sendgrid.SendGridAPIClient(api_key=st.secrets["SENDGRID_API_KEY"])
-    
-    # Dynamic email content
-    subject = f"Your Dental Analysis Summary – Let’s Talk Strategy"
-    body = f"""
-    Hi {user_info['first_name']},
-    
-    Thank you for submitting your dental operations file to our analysis platform.
-    
-    Here’s a quick summary of your submission:
-    - Tool Used: {tool_name}
-    - Office/Group: {user_info['office_name']}
-    
-    We’ve reviewed the data and identified key areas where improvements can drive profitability, streamline workflows, or reduce claims risk.
-    
-    📞 If you'd like a personalized review of this analysis or want to explore how we can help optimize your practice, reply to this email or book a time here: [Schedule with Us](https://outlook.office365.com/owa/calendar/alphaSourceBookingPage@alphasourceai.com/bookings/)
-    
-    We look forward to helping you grow.
-    
-    – Jason  
-    alphaSource AI  
-    info@alphasourceai.com
-    """
-    
-    sg.send(Mail(
-        from_email="noreply@alphasourceai.com",
-        to_emails=user_info['email'],
-        subject=subject,
-        plain_text_content=body
-    ))
-
-# ---- Send Full Analysis Email to Info ----
-def send_email(user_info, file, results, tool_name):
-    sg = sendgrid.SendGridAPIClient(api_key=st.secrets["SENDGRID_API_KEY"])
-    
-    subject = f"[{tool_name}] {user_info['office_name']} ({user_info['email']})"
-    body = f"""New file submitted for analysis.
-
-Tool: {tool_name}
-File Name: {file.name}
-File Type: {file.type}
-
-Submitted by:
-First Name: {user_info['first_name']}
-Last Name: {user_info['last_name']}
-Office/Group: {user_info['office_name']}
-Email: {user_info['email']}
-Type: {user_info['org_type']}
-
---- AI Analysis ---
-
-OpenAI Analysis:
-{results["OpenAI Analysis"]}
-
-xAI Analysis:
-{results["xAI Analysis"]}
-
-AnthropicAI Analysis:
-{results["AnthropicAI Analysis"]}
-"""
-    
-    # Create a unified report file (text file)
-    with open("/tmp/unified_analysis.txt", "w") as f:
-        f.write(f"Analysis Results for {user_info['office_name']}\n")
-        f.write(f"\nTool: {tool_name}\n")
-        for model, analysis in results.items():
-            f.write(f"\n{model}:\n{analysis}\n")
-    
-    # Attach the unified report as a text file
-    with open("/tmp/unified_analysis.txt", "rb") as f:
-        file_data = f.read()
-        encoded = base64.b64encode(file_data).decode()
-        attachment = Attachment(
-            FileContent(encoded),
-            FileName("unified_analysis.txt"),
-            FileType("text/plain"),
-            Disposition("attachment")
-        )
-    
-    message = Mail(
-        from_email="noreply@alphasourceai.com",
-        to_emails="info@alphasourceai.com",  # Your email
-        subject=subject,
-        plain_text_content=body
-    )
-    message.add_attachment(attachment)
-    sg.send(message)
-
-# ---- Tool Analysis Sections ----
-def analyze_and_send(file, user_info, tool_name):
-    with st.spinner("Analyzing..."):
-        if file.name.endswith(".pdf"):
-            raw_text = extract_text_from_pdf(file)
-            data_input = raw_text
+        import re
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        valid_email = re.match(email_pattern, email) if email else False
+        
+        user_info_complete = all([first_name, last_name, office_name, email, org_type]) and valid_email
+        
+        if email and not valid_email:
+            st.error("Please enter a valid email address (e.g., user@example.com)")
+        
+        if not user_info_complete:
+            st.info("Please complete the contact information form above before uploading documents.")
         else:
-            df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
-            data_input = df.to_string(index=False)
+            st.markdown("""
+                <div class="title-container" style="margin-top: 2rem;">
+                    <h3>Upload Documents for Analysis</h3>
+                </div>
+            """, unsafe_allow_html=True)
+            st.markdown('<div style="height: 1.5rem;"></div>', unsafe_allow_html=True)
+            
+            # Financial Analysis File Upload Section (formerly P&L)
+            st.markdown("""
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 0.5rem;">
+                    <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="12" y1="1" x2="12" y2="23"></line>
+                        <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                    </svg>
+                    <span style="color: #EBFEFF; font-size: 1.31rem; font-weight: 500;">Financial Analysis</span>
+                </div>
+            """, unsafe_allow_html=True)
+            pnl_file = st.file_uploader("Upload your financial document", type=["xlsx", "csv", "pdf"], key="pnl", label_visibility="collapsed")
+            st.markdown('<div style="height: 1rem;"></div>', unsafe_allow_html=True)
+
+            # SOP File Upload Section - HIDDEN FOR NOW (will be used later with templates)
+            # st.markdown("""
+            #     <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 0.5rem;">
+            #         <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            #             <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path>
+            #             <polyline points="14 2 14 8 20 8"></polyline>
+            #             <line x1="9" y1="13" x2="15" y2="13"></line>
+            #             <line x1="9" y1="17" x2="15" y2="17"></line>
+            #         </svg>
+            #         <span style="color: #EBFEFF; font-size: 1.31rem; font-weight: 500;">SOP Analysis</span>
+            #     </div>
+            # """, unsafe_allow_html=True)
+            # sop_file = st.file_uploader("Upload your SOP Document", type=["pdf"], key="sop", label_visibility="collapsed")
+            sop_file = None  # Hidden for now - will be enabled later with templates
+
+            # Analyze Documents Button
+            st.divider()
+            uploaded_files = {
+                "Financial Analyzer": pnl_file,
+            }
+            uploaded_count = sum(1 for f in uploaded_files.values() if f is not None)
+            
+            if uploaded_count > 0:
+                st.markdown(f"**Document ready for analysis**")
+                
+                if 'analyzing' not in st.session_state:
+                    st.session_state.analyzing = False
+                
+                analyze_clicked = st.button("Analyze Document", type="primary", disabled=st.session_state.analyzing)
+                
+                if st.session_state.analyzing:
+                    st.markdown("""
+                        <div style="display: flex; align-items: center; gap: 10px; margin-top: 1rem;">
+                            <div class="spinner"></div>
+                            <span style="color: #AD8BF7; font-size: 0.95rem;">Analysis may take a couple of minutes. Please wait...</span>
+                        </div>
+                    """, unsafe_allow_html=True)
+                
+                if analyze_clicked:
+                    st.session_state.analyzing = True
+                    st.rerun()
+                
+                if st.session_state.analyzing:
+                    user_info_dict = {
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "office_name": office_name,
+                        "email": email,
+                        "org_type": org_type,
+                    }
+                    
+                    # Save user to database FIRST, then close the session before AI analysis
+                    db = SessionLocal()
+                    try:
+                        # Check if user already exists by email
+                        existing_user = db.query(User).filter(User.email == email).first()
+                        if not existing_user:
+                            # Create new user
+                            new_user = User(
+                                first_name=first_name,
+                                last_name=last_name,
+                                email=email,
+                                office_name=office_name,
+                                org_type=org_type
+                            )
+                            db.add(new_user)
+                            db.commit()
+                            logging.info(f"New user created: {email}")
+                        else:
+                            logging.info(f"Existing user found: {email}")
+                    except Exception as e:
+                        logging.error(f"Error saving user to database: {str(e)}")
+                        db.rollback()
+                    finally:
+                        # Close this session before long-running AI analysis
+                        db.close()
+                    
+                    # Initialize debug log in session state
+                    if 'debug_log' not in st.session_state:
+                        st.session_state.debug_log = []
+                    st.session_state.debug_log = []  # Reset for this analysis
+                    
+                    # Process each uploaded document
+                    st.session_state.debug_log.append("🔍 Starting upload processing loop...")
+                    for tool_name, file in uploaded_files.items():
+                            if file is not None:
+                                st.session_state.debug_log.append(f"🔍 Processing file: {file.name} ({tool_name})")
+                                with st.spinner(f"Analyzing {tool_name}..."):
+                                    # Read file content once upfront to avoid invalidating file object
+                                    file.seek(0)
+                                    file_content = file.read()
+                                    file_name = file.name
+                                    file_type = file.type
+                                    
+                                    # Reset file pointer for processing
+                                    file.seek(0)
+                                    
+                                    if file.name.endswith(".pdf"):
+                                        raw_text = extract_text_from_pdf(file)
+                                        data_input = raw_text
+                                    else:
+                                        df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
+                                        data_input = df.to_string(index=False)
+                                    
+                                    st.session_state.debug_log.append(f"🔍 Running AI analysis for {file.name}...")
+                                    # Run the analysis with all models
+                                    results = analyze_with_all_models(data_input)
+                                    st.session_state.debug_log.append(f"✅ Analysis complete for {file.name}")
+                                    
+                                    # Store results in session state
+                                    st.session_state.analysis_results[tool_name] = results
+                                    
+                                    st.session_state.debug_log.append(f"📧 Sending emails for {file.name}...")
+                                    # Send emails (pass file content instead of file object)
+                                    send_followup_email(user_info_dict, tool_name, results)
+                                    send_email(user_info_dict, file_content, file_name, file_type, results, tool_name)
+                                    st.session_state.debug_log.append(f"✅ Emails sent for {file.name}")
+                                    
+                                    # Save upload to database with FRESH session (after long AI analysis)
+                                    st.session_state.debug_log.append(f"💾 Opening new database session for {file.name}...")
+                                    upload_db = SessionLocal()
+                                    try:
+                                        import json
+                                        logging.info(f"Starting database save for {file.name}")
+                                        
+                                        st.session_state.debug_log.append(f"🔍 Serializing analysis to JSON...")
+                                        # Include all analysis data including trends
+                                        analysis_json = json.dumps({
+                                            'raw_analyses': results['raw_analyses'],
+                                            'deduplicated_issues': results['deduplicated_issues'],
+                                            'total_issue_count': results['total_issue_count'],
+                                            'all_trends': results.get('all_trends', [])
+                                        })
+                                        st.session_state.debug_log.append(f"✅ JSON serialized, length: {len(analysis_json)}")
+                                        logging.info(f"Analysis JSON serialized, length: {len(analysis_json)}")
+                                        
+                                        st.session_state.debug_log.append(f"🔍 Creating Upload object...")
+                                        new_upload = Upload(
+                                            file_name=file.name,
+                                            tool_name=tool_name,
+                                            upload_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            user_email=email,
+                                            analysis_data=analysis_json
+                                        )
+                                        st.session_state.debug_log.append(f"✅ Upload object created")
+                                        logging.info(f"Upload object created for {file.name}")
+                                        
+                                        st.session_state.debug_log.append(f"🔍 Adding upload to database session...")
+                                        upload_db.add(new_upload)
+                                        st.session_state.debug_log.append(f"✅ Upload added to session")
+                                        logging.info(f"Upload added to session for {file.name}")
+                                        
+                                        st.session_state.debug_log.append(f"🔍 Committing to database...")
+                                        upload_db.commit()
+                                        st.session_state.debug_log.append(f"✅ Database commit successful!")
+                                        logging.info(f"✅ Upload committed successfully: {file.name} - {tool_name}")
+                                        
+                                        st.session_state.debug_log.append(f"✅ Upload saved to database: {file.name}")
+                                    except json.JSONDecodeError as e:
+                                        st.session_state.debug_log.append(f"❌ JSON error: {str(e)}")
+                                        logging.error(f"❌ JSON serialization error for {file.name}: {str(e)}")
+                                        upload_db.rollback()
+                                    except Exception as e:
+                                        st.session_state.debug_log.append(f"❌ Database error: {type(e).__name__}: {str(e)}")
+                                        logging.error(f"❌ Error saving upload to database for {file.name}: {str(e)}")
+                                        logging.error(f"Exception type: {type(e).__name__}")
+                                        logging.error(f"Results keys: {results.keys() if results else 'None'}")
+                                        import traceback
+                                        logging.error(f"Traceback: {traceback.format_exc()}")
+                                        upload_db.rollback()
+                                    finally:
+                                        # Always close the upload database session
+                                        upload_db.close()
+                    
+                    # Reset analyzing state and mark analysis as complete
+                    st.session_state.analyzing = False
+                    st.session_state.analysis_complete = True
+                    st.rerun()
+
+# Admin Setup Page (for initial production setup)
+elif st.session_state.page == "Admin Setup":
+    # Initialize session state for attempt tracking
+    if 'setup_failed_attempts' not in st.session_state:
+        st.session_state.setup_failed_attempts = 0
+    if 'setup_next_allowed_time' not in st.session_state:
+        st.session_state.setup_next_allowed_time = 0
+    
+    # Server-side check: only allow if no admins exist
+    try:
+        db = next(get_db())
+        try:
+            admin_count = db.query(Admin).count()
+            if admin_count > 0:
+                logging.info("Admin Setup access blocked: admins already exist")
+                st.error("Admin Setup is disabled. Admin accounts already exist.")
+                st.info("Please use the Admin Dashboard login page to access the dashboard.")
+                col1, col2, col3 = st.columns([1, 1, 1])
+                with col2:
+                    if st.button("Go to Admin Login", key="setup_disabled_to_login", use_container_width=True):
+                        st.session_state.page = "Admin Dashboard"
+                        st.rerun()
+                st.stop()
+        finally:
+            db.close()
+    except StopIteration:
+        logging.error("Admin Setup access failed: database connection error")
+        st.error("Database connection error. Please contact the administrator.")
+        st.stop()
+    except Exception as e:
+        logging.error(f"Admin Setup access failed: {str(e)}")
+        st.error(f"Error checking database: {str(e)}")
+        st.stop()
+    
+    st.markdown("""
+        <div class="title-container" style="margin-top: 1.5rem;">
+            <h1>Admin Setup</h1>
+        </div>
+    """, unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; margin-bottom: 2rem; margin-top: 1.5rem;'>Create admin accounts for the dashboard. This page is for initial production setup.</p>", unsafe_allow_html=True)
+    
+    # Check if locked out due to too many failed attempts
+    current_time = time.time()
+    if current_time < st.session_state.setup_next_allowed_time:
+        wait_seconds = int(st.session_state.setup_next_allowed_time - current_time)
+        st.error(f"Setup temporarily locked due to multiple failed attempts. Please try again in {wait_seconds} seconds.")
+        logging.warning(f"Admin Setup locked: {wait_seconds}s remaining")
         
-        # Run the analysis with all models
-        results = analyze_with_all_models(data_input)
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Back to Analyzer", key="setup_locked_to_analyzer", use_container_width=True):
+                st.session_state.page = "Analyzer"
+                st.rerun()
+        with col2:
+            if st.button("Go to Admin Login", key="setup_locked_to_login", use_container_width=True):
+                st.session_state.page = "Admin Dashboard"
+                st.rerun()
+        st.stop()
+    
+    # Hard lockout after 5 failed attempts
+    if st.session_state.setup_failed_attempts >= 5:
+        st.error("Setup has been permanently locked due to multiple failed attempts. Please contact the system administrator.")
+        logging.error("Admin Setup permanently locked: exceeded 5 failed attempts")
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("Back to Analyzer", key="setup_perm_locked", use_container_width=True):
+                st.session_state.page = "Analyzer"
+                st.rerun()
+        st.stop()
+    
+    # Setup form with token verification
+    with st.form("admin_setup_form"):
+        st.markdown("""
+            <div class="section-header">
+                <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="8.5" cy="7" r="4"></circle>
+                    <path d="M20 8v6M23 11h-6"></path>
+                </svg>
+                <span class="section-title">Create Admin Account</span>
+            </div>
+        """, unsafe_allow_html=True)
         
-        # Send the email with individual analyses and attach the unified report
-        send_followup_email(user_info, tool_name, results)
-        send_email(user_info, file, results, tool_name)
+        setup_token = st.text_input("Setup Token (required for first-time setup)", type="password", key="setup_token", help="Contact the system administrator for the setup token")
+        setup_username = st.text_input("Username", key="setup_username")
+        setup_password = st.text_input("Password", type="password", key="setup_password")
+        setup_password_confirm = st.text_input("Confirm Password", type="password", key="setup_password_confirm")
         
-        st.success("✅ Analysis Complete! The results have been emailed.")
-        st.markdown("### Analysis Results:")
-        st.markdown(f"**OpenAI Analysis**: {results['OpenAI Analysis']}")
-        st.markdown(f"**xAI Analysis**: {results['xAI Analysis']}")
-        st.markdown(f"**AnthropicAI Analysis**: {results['AnthropicAI Analysis']}")
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            create_button = st.form_submit_button("Create Admin", use_container_width=True)
+        
+        if create_button:
+            # Verify setup token first (using constant-time comparison to prevent timing attacks)
+            admin_setup_token = os.getenv("ADMIN_SETUP_TOKEN", "")
+            
+            # Validate environment configuration
+            if not admin_setup_token:
+                logging.error("Admin Setup attempt failed: ADMIN_SETUP_TOKEN not configured")
+                st.error("Admin Setup is not configured properly. Please contact the system administrator.")
+                st.stop()
+            elif len(admin_setup_token) < 32:
+                logging.error(f"Admin Setup attempt failed: ADMIN_SETUP_TOKEN too short (length: {len(admin_setup_token)})")
+                st.error("Admin Setup is not configured properly. Please contact the system administrator.")
+                st.stop()
+            
+            # Check for authentication failure (generic error message to prevent information leakage)
+            auth_failed = False
+            failure_reason = ""
+            
+            if not setup_token:
+                auth_failed = True
+                failure_reason = "missing token"
+            elif not hmac.compare_digest(setup_token, admin_setup_token):
+                auth_failed = True
+                failure_reason = "invalid token"
+            elif not setup_username or not setup_password:
+                auth_failed = True
+                failure_reason = "missing credentials"
+            elif setup_password != setup_password_confirm:
+                auth_failed = True
+                failure_reason = "password mismatch"
+            
+            if auth_failed:
+                # Increment failed attempts and apply exponential backoff
+                st.session_state.setup_failed_attempts += 1
+                attempts = st.session_state.setup_failed_attempts
+                
+                # Calculate backoff delay: 2^attempts seconds (capped at 300s / 5 minutes)
+                backoff_delay = min(2 ** attempts, 300)
+                st.session_state.setup_next_allowed_time = time.time() + backoff_delay
+                
+                # Log the failure (without exposing sensitive details)
+                logging.warning(f"Admin Setup authentication failed (attempt {attempts}): {failure_reason}, backoff {backoff_delay}s")
+                
+                # Generic error message (no specific hints)
+                st.error("Authentication failed. Please check your credentials and try again.")
+                
+                # Clear sensitive form data
+                if "setup_token" in st.session_state:
+                    del st.session_state["setup_token"]
+                if "setup_password" in st.session_state:
+                    del st.session_state["setup_password"]
+                if "setup_password_confirm" in st.session_state:
+                    del st.session_state["setup_password_confirm"]
+                    
+                st.stop()
+            
+            # If we reach here, authentication succeeded
+            else:
+                try:
+                    # Create tables if they don't exist
+                    Base.metadata.create_all(bind=engine)
+                    
+                    db = next(get_db())
+                    try:
+                        # Double-check no admins exist (prevent race condition)
+                        admin_count = db.query(Admin).count()
+                        if admin_count > 0:
+                            st.error("Admin accounts already exist. Setup is now disabled.")
+                        else:
+                            # Check if this specific admin already exists
+                            existing = db.query(Admin).filter(Admin.username == setup_username).first()
+                            if existing:
+                                st.error(f"Admin '{setup_username}' already exists.")
+                            else:
+                                # Create admin
+                                create_admin(db, setup_username, setup_password)
+                                logging.info(f"Admin account created successfully: username='{setup_username}'")
+                                st.success(f"✓ Admin account '{setup_username}' created successfully!")
+                                st.info("You can now log in to the Admin Dashboard.")
+                                
+                                # Reset failed attempts counter on successful creation
+                                st.session_state.setup_failed_attempts = 0
+                                st.session_state.setup_next_allowed_time = 0
+                                
+                                # Clear form values
+                                if "setup_token" in st.session_state:
+                                    del st.session_state["setup_token"]
+                                if "setup_username" in st.session_state:
+                                    del st.session_state["setup_username"]
+                                if "setup_password" in st.session_state:
+                                    del st.session_state["setup_password"]
+                                if "setup_password_confirm" in st.session_state:
+                                    del st.session_state["setup_password_confirm"]
+                    finally:
+                        db.close()
+                except StopIteration:
+                    st.error("Database connection error. Please try again later.")
+                except Exception as e:
+                    st.error(f"Error creating admin: {str(e)}")
+    
+    # Show existing admins
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("### Existing Admins")
+    try:
+        db = next(get_db())
+        try:
+            admins = db.query(Admin).all()
+            if admins:
+                for admin in admins:
+                    st.markdown(f"- {admin.username}")
+            else:
+                st.info("No admin accounts exist yet.")
+        finally:
+            db.close()
+    except Exception as e:
+        st.warning(f"Could not retrieve admin list: {str(e)}")
+    
+    # Navigation buttons
+    st.markdown("<br>", unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Back to Analyzer", key="setup_to_analyzer", use_container_width=True):
+            st.session_state.page = "Analyzer"
+            st.rerun()
+    with col2:
+        if st.button("Go to Admin Login", key="setup_to_login", use_container_width=True):
+            st.session_state.page = "Admin Dashboard"
+            st.rerun()
 
-# ---- Tool: P&L Analyzer ----
-st.subheader("📊 P&L Analyzer")
-
-if not user_info_complete:
-    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
-else:
-    pnl_file = st.file_uploader("Upload your P&L file (Excel, CSV, or PDF)", type=["xlsx", "csv", "pdf"], key="pnl")
-    if pnl_file and st.button("🔍 Analyze P&L"):
-        analyze_and_send(
-            file=pnl_file,
-            user_info={
-                "first_name": first_name,
-                "last_name": last_name,
-                "office_name": office_name,
-                "email": email,
-                "org_type": org_type,
-            },
-            tool_name="P&L Analyzer"
-        )
-
-# ---- Tool: AR Analyzer ----
-st.subheader("💰 Accounts Receivable Analyzer")
-
-if not user_info_complete:
-    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
-else:
-    ar_file = st.file_uploader("Upload AR Report (CSV or Excel)", type=["csv", "xlsx"], key="ar")
-    if ar_file and st.button("🔍 Analyze AR"):
-        analyze_and_send(
-            file=ar_file,
-            user_info={
-                "first_name": first_name,
-                "last_name": last_name,
-                "office_name": office_name,
-                "email": email,
-                "org_type": org_type,
-            },
-            tool_name="AR Analyzer"
-        )
-
-# ---- Tool: Insurance Claim Analyzer ----
-st.subheader("📄 Insurance Claim Analyzer")
-
-if not user_info_complete:
-    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
-else:
-    claim_file = st.file_uploader("Upload Claim Report (CSV, Excel, or PDF)", type=["csv", "xlsx", "pdf"], key="claim")
-    if claim_file and st.button("🔍 Analyze Claims"):
-        analyze_and_send(
-            file=claim_file,
-            user_info={
-                "first_name": first_name,
-                "last_name": last_name,
-                "office_name": office_name,
-                "email": email,
-                "org_type": org_type,
-            },
-            tool_name="Insurance Claim Analyzer"
-        )
-
-# ---- Tool: SOP Analyzer ----
-st.subheader("📝 SOP Analyzer")
-
-if not user_info_complete:
-    st.markdown("<div class='stAlert'>⚠️ Please complete the user info form above before uploading.</div>", unsafe_allow_html=True)
-else:
-    sop_file = st.file_uploader("Upload SOP Document (PDF)", type=["pdf"], key="sop")
-    if sop_file and st.button("🔍 Analyze SOPs"):
-        analyze_and_send(
-            file=sop_file,
-            user_info={
-                "first_name": first_name,
-                "last_name": last_name,
-                "office_name": office_name,
-                "email": email,
-                "org_type": org_type,
-            },
-            tool_name="SOP Analyzer"
-        )
+# Admin Dashboard Content
+elif st.session_state.page == "Admin Dashboard":
+    # Check if admin is logged in
+    if not st.session_state.is_admin_logged_in:
+        # Show login form
+        st.markdown("""
+            <div class="title-container" style="margin-top: 1.5rem;">
+                <h1>Admin Dashboard</h1>
+            </div>
+        """, unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; margin-bottom: 2rem; margin-top: 1.5rem;'>Please log in to access the admin dashboard.</p>", unsafe_allow_html=True)
+        
+        # Login form
+        with st.form("admin_login_form"):
+            st.markdown("""
+                <div class="section-header">
+                    <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                    </svg>
+                    <span class="section-title">Login</span>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            username = st.text_input("Username", key="admin_username")
+            password = st.text_input("Password", type="password", key="admin_password")
+            
+            col1, col2, col3 = st.columns([1, 1, 1])
+            with col2:
+                submit_button = st.form_submit_button("Login", use_container_width=True)
+            
+            if submit_button:
+                # Validate credentials against database
+                try:
+                    db = next(get_db())
+                    try:
+                        admin = get_admin_by_username(db, username)
+                        
+                        if admin and verify_password(password, admin.password_hash):
+                            # Set structured admin session data
+                            st.session_state.is_admin_logged_in = True
+                            st.session_state.admin_data = {
+                                "username": username,
+                                "authenticated": True,
+                                "must_change_password": admin.must_change_password
+                            }
+                            # Clear sensitive form values from session state
+                            if "admin_username" in st.session_state:
+                                del st.session_state["admin_username"]
+                            if "admin_password" in st.session_state:
+                                del st.session_state["admin_password"]
+                            st.success("Login successful! Redirecting...")
+                            st.rerun()
+                        else:
+                            # Clear sensitive form values even on failed attempts
+                            if "admin_username" in st.session_state:
+                                del st.session_state["admin_username"]
+                            if "admin_password" in st.session_state:
+                                del st.session_state["admin_password"]
+                            st.error("Invalid username or password. Please try again.")
+                    finally:
+                        db.close()
+                except StopIteration:
+                    st.error("Database connection error. Please try again later.")
+                except Exception as e:
+                    st.error(f"An error occurred: {str(e)}")
+        
+        # Back to analyzer button
+        st.markdown("<br>", unsafe_allow_html=True)
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("Back to Analyzer", key="back_to_analyzer_from_login", use_container_width=True):
+                st.session_state.page = "Analyzer"
+                st.rerun()
+    else:
+        # Admin is logged in, show the dashboard
+        display_admin_dashboard()  # This calls the function defined in admin_dashboard.py
 
 # ---- Footer ----
 st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center;'>Built by <a href='https://alphasourceai.com' target='_blank'>AlphaSource AI</a></p>", unsafe_allow_html=True)
+
+# Admin links (only on Analyzer page)
+if st.session_state.page == "Analyzer":
+    # Check if any admins exist in the database
+    show_setup = False
+    db_error = False
+    try:
+        db = next(get_db())
+        try:
+            admin_count = db.query(Admin).count()
+            show_setup = (admin_count == 0)
+        finally:
+            db.close()
+    except StopIteration:
+        db_error = True
+    except Exception as e:
+        db_error = True
+    
+    if db_error:
+        # Fail closed - show dashboard button with error message
+        col1, col2, col3 = st.columns([1,1,1])
+        with col2:
+            if st.button("Admin Dashboard", key="admin_link_error", use_container_width=True):
+                st.session_state.page = "Admin Dashboard"
+                st.rerun()
+    elif show_setup:
+        # Only show setup button if no admins exist yet
+        col1, col2, col3 = st.columns([1,1,1])
+        with col2:
+            if st.button("Admin Setup", key="admin_setup_link", use_container_width=True):
+                st.session_state.page = "Admin Setup"
+                st.rerun()
+    else:
+        # Show dashboard button if admins exist
+        col1, col2, col3 = st.columns([1,1,1])
+        with col2:
+            if st.button("Admin Dashboard", key="admin_link", use_container_width=True):
+                st.session_state.page = "Admin Dashboard"
+                st.rerun()
+
+st.markdown("<p style='text-align: center; margin-top: 1rem;'>Built by <a href='https://alphasourceai.com' target='_blank'>AlphaSource AI</a></p>", unsafe_allow_html=True)

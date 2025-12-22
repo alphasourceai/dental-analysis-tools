@@ -1,0 +1,699 @@
+/* Admin Sign In to match client login */
+.admin-auth.auth-wrap { max-width: 480px; }
+.admin-auth .auth-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.admin-auth .auth-logo {
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+}
+.admin-auth label { display: block; margin: 10px 0 6px; }
+.admin-auth input.alpha-input { width: 100% !important; max-width: 100% !important; display: block; }
+.admin-auth button[type="submit"] {
+  width: 100%;
+  margin-top: 12px;
+  font-size: 1rem; /* larger button text */
+}
+
+/* --- AlphaSource theme (Wix-matched) ------------------------------------- */
+
+@import url('https://fonts.googleapis.com/css2?family=Raleway:wght@400;500;600;700&display=swap');
+
+.alpha-theme {
+  --alpha-bg: #061551;
+  --alpha-surface: rgba(255,255,255,0.06);
+  --alpha-border: rgba(255,255,255,0.14);
+  --alpha-text: #EBFEFF;
+  --alpha-muted: rgba(235,254,255,0.75);
+  --alpha-primary: #AD8BF7;
+  --alpha-primary-strong: #854DFF;
+  --alpha-darktext: #2F2E2E;
+  --alpha-radius: 12px;
+  --alpha-gap: 14px;
+}
+
+.alpha-theme, .alpha-theme body {
+  background: var(--alpha-bg);
+  color: var(--alpha-text);
+  font-family: 'Raleway', system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  min-height: 100vh;
+}
+
+/* Links */
+.alpha-theme a { color: var(--alpha-primary); text-decoration: none; }
+.alpha-theme a:hover { text-decoration: underline; }
+
+/* Generic surfaces */
+.alpha-theme .card,
+.alpha-theme .panel,
+.alpha-theme .box,
+.alpha-theme .section,
+.alpha-theme .container,
+.alpha-theme .expanded,
+.alpha-theme .expand,
+.alpha-theme .expander-content,
+.alpha-theme .details,
+.alpha-theme .details-content,
+.alpha-theme .row-details,
+.alpha-theme details[open],
+.alpha-theme .report,
+.alpha-theme [class*="Card"],
+.alpha-theme [class*="Panel"] {
+  background: var(--alpha-surface) !important;
+  border: 1px solid var(--alpha-border) !important;
+  border-radius: var(--alpha-radius);
+  color: var(--alpha-text);
+}
+
+/* Headings inside panels use darker text */
+.alpha-theme .panel h1,
+.alpha-theme .panel h2,
+.alpha-theme .panel h3,
+.alpha-theme .panel h4,
+.alpha-theme .report h1,
+.alpha-theme .report h2,
+.alpha-theme .report h3,
+.alpha-theme .report h4,
+.alpha-theme .expanded h1,
+.alpha-theme .expanded h2,
+.alpha-theme .expanded h3,
+.alpha-theme .expanded h4 {
+  color: var(--alpha-darktext) !important;
+}
+
+/* Table text */
+.alpha-theme table { color: var(--alpha-text); }
+
+/* Buttons */
+.alpha-theme button,
+.alpha-theme .btn,
+.alpha-theme input[type="button"],
+.alpha-theme input[type="submit"] {
+  appearance: none;
+  background: var(--alpha-primary);
+  color: #fff;
+  border: 1px solid var(--alpha-primary);
+  border-radius: 20px;
+  padding: 8px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.alpha-theme button:hover,
+.alpha-theme .btn:hover,
+.alpha-theme input[type="button"]:hover,
+.alpha-theme input[type="submit"]:hover {
+  background: var(--alpha-primary-strong);
+  border-color: var(--alpha-primary-strong);
+}
+
+/* Ghost / link-like buttons */
+.alpha-theme .btn-ghost {
+  background: transparent;
+  color: var(--alpha-primary);
+  border-color: transparent;
+}
+.alpha-theme .btn-ghost:hover {
+  color: #fff;
+  background: var(--alpha-primary);
+}
+
+/* Inputs on dark */
+.alpha-theme input,
+.alpha-theme select,
+.alpha-theme textarea {
+  background: rgba(255,255,255,0.08);
+  color: var(--alpha-text);
+  border: 1px solid var(--alpha-border);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.alpha-theme input::placeholder,
+.alpha-theme textarea::placeholder { color: var(--alpha-muted); }
+
+/* Auth card */
+.alpha-theme .auth-wrap {
+  max-width: 520px;
+  margin: 12vh auto 8vh;
+  padding: 24px;
+  background: var(--alpha-surface);
+  border: 1px solid var(--alpha-border);
+  border-radius: var(--alpha-radius);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+}
+
+/* ====== alpha-theme overrides (append only) ================================= */
+
+.alpha-theme select option { color: #111; }
+
+/* === Admin polish additions === */
+
+.alpha-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.alpha-actions {
+  display: inline-flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+/* SECTION HEADER: toggle + title grouped on the LEFT */
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;                 /* space between pill and title */
+  justify-content: flex-start;
+  margin-bottom: 10px;
+}
+.section-title { font-size: 18px; font-weight: 700; margin-top: 12px; }
+
+
+.section { margin-top: 12px; }
+
+/* helper: spacing for the Show/Hide toggle row beneath input rows */
+.toggle-row { margin-top: 8px; }
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.15);
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.toggle:hover { border-color: rgba(255,255,255,0.3); }
+
+.icon { display: block; }
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  width: 32px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: transparent;
+  cursor: pointer;
+}
+.icon-btn:hover { border-color: rgba(255,255,255,0.3); }
+
+.ml-2 { margin-left: 8px; }
+.mr-8 { margin-right: 16px; }
+
+.select-lg {
+  height: 44px;
+  padding: 0 10px;
+  font-size: 1.05rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.05);
+  color: inherit;
+}
+
+.file-wrap { display: inline-flex; align-items: center; }
+
+.list { margin-top: 10px; }
+.list.compact .list-row { padding-top: 8px; padding-bottom: 8px; }
+.list-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.list-row.header { font-weight: 600; opacity: 0.8; }
+.list-row .grow { min-width: 220px; }
+.list-row .col { min-width: 90px; }
+.list-row .col.center { display: flex; justify-content: center; }
+
+.title { font-weight: 600; }
+.sub { font-size: 12px; opacity: 0.8; }
+
+.linklike {
+  background: none !important;
+  border: none !important;
+  padding: 0;
+  text-decoration: underline;
+  cursor: pointer;
+  color: inherit;
+}
+
+button.danger {
+  background: transparent;
+  border: 1px solid rgba(255, 50, 50, 0.5);
+}
+button.danger:hover { border-color: rgba(255, 80, 80, 0.9); }
+
+/* sizing: inputs & selects match height */
+/* sizing: inputs & selects match EXACT 40px including padding + border */
+.alpha-theme input.alpha-input,
+.alpha-theme .alpha-input[type="text"],
+.alpha-theme .alpha-input[type="email"],
+.alpha-theme .alpha-input[type="password"],
+.alpha-theme .alpha-input[type="search"],
+.alpha-theme select.alpha-select,
+.alpha-theme .alpha-select {
+  height: 40px !important;        /* total box height */
+  box-sizing: border-box !important;
+  padding: 8px 10px !important;    /* included in the 40px now */
+  line-height: 24px;               /* keeps text vertically comfy */
+}
+
+/* optional: file input tries to match as well */
+.alpha-theme input[type="file"].alpha-input {
+  height: 40px !important;
+  box-sizing: border-box !important;
+  padding: 6px 10px !important;
+}
+
+/* file input wrapper so clear icon can sit beside it */
+.file-stack { position: relative; display: flex; align-items: center; gap: 8px; margin-right: 36px; }
+.file-stack .file { width: 220px; }
+
+/* lilac circular icon buttons; icon itself is white via SVG fill/stroke */
+.btn-icon.lilac {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  width: auto;
+  height: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.btn-icon.lilac svg {
+  width: 24px;
+  height: 24px;
+  stroke: #fff;
+}
+
+/* Header with logo + title (compact) */
+.alpha-header--dash { display:flex; align-items:center; justify-content:space-between; }
+.alpha-header-left { display:flex; align-items:center; gap:10px; }
+.alpha-logo { width:55px; height:55px; object-fit:contain; }  /* compact logo */
+
+/* Thin top bar card */
+.alpha-card--bar { padding:10px 14px; margin-bottom:12px; }
+
+/* Center helper */
+.center { text-align:center; }
+
+/* Roles “table-like” layout */
+.table.like .t-head,
+.table.like .t-row {
+  display:grid;
+  grid-template-columns: 1fr 220px 60px 60px 120px 80px; /* Role | Created | KB | JD | Link | Delete */
+  gap: 12px;
+  align-items:center;
+}
+.table.like .t-head { font-weight:700; opacity:0.9; padding:10px 12px; }
+.table.like .t-row { padding:12px; border-top:1px solid rgba(255,255,255,0.06); }
+.table.like .t-empty { padding:14px; }
+
+/* File input + clear icon stacked */
+.file-stack .file-clear { position: absolute; right: -36px; }
+
+.signout-btn {
+  background: var(--alpha-primary) !important;
+  color: #fff !important;
+  border: 1px solid var(--alpha-primary) !important;
+  border-radius: 18px !important;
+  padding: 6px 12px !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+}
+.signout-btn:hover {
+  background: var(--alpha-primary-strong) !important;
+  border-color: var(--alpha-primary-strong) !important;
+}
+
+/* === Icon-only buttons override (trash, etc.) ============================ */
+.alpha-theme button.btn-icon,
+.alpha-theme button.btn-icon.lilac {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+}
+
+.alpha-theme button.btn-icon:hover,
+.alpha-theme button.btn-icon.lilac:hover {
+  background: transparent !important;
+  filter: none !important;
+}
+
+.alpha-theme button.btn-icon > svg {
+  width: 24px !important;
+  height: 24px !important;
+  display: block;
+}
+
+/* Neutralize any remaining lilac styles on old class name */
+.btn-icon.lilac {
+  background: transparent !important;
+  border: none !important;
+}
+
+/* ---- Force expanded table rows to stay dark even if the row adds inline white/gray bg ---- */
+.alpha-theme tr[style*="background: rgb(249, 250, 251)"],
+.alpha-theme tr[style*="background:#fff"],
+.alpha-theme tr[style*="background: #fff"],
+.alpha-theme tr[style*="background: white"],
+.alpha-theme tr[style*="background-color: rgb(249, 250, 251)"],
+.alpha-theme tr[style*="background-color:#fff"],
+.alpha-theme tr[style*="background-color: #fff"],
+.alpha-theme tr[style*="background-color: white"] {
+  background: var(--alpha-surface) !important;
+  color: var(--alpha-text) !important;
+}
+
+/* Ensure all text inside stays readable */
+.alpha-theme tr[style*="background: rgb(249, 250, 251)"] *,
+.alpha-theme tr[style*="background:#fff"] *,
+.alpha-theme tr[style*="background: #fff"] *,
+.alpha-theme tr[style*="background: white"] *,
+.alpha-theme tr[style*="background-color: rgb(249, 250, 251)"] *,
+.alpha-theme tr[style*="background-color:#fff"] *,
+.alpha-theme tr[style*="background-color: #fff"] *,
+.alpha-theme tr[style*="background-color: white"] * {
+  color: var(--alpha-text) !important;
+  -webkit-text-fill-color: var(--alpha-text) !important;
+  opacity: 1 !important;
+}
+
+/* Keep borders and hover consistent on dark */
+.alpha-theme table tr td,
+.alpha-theme table tr th {
+  border-color: var(--alpha-border) !important;
+}
+.alpha-theme table tr:hover {
+  background: rgba(255,255,255,0.06) !important;
+}
+
+/* === Admin page scoped overrides (do not affect other pages) ============ */
+.admin-page .alpha-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.admin-page .alpha-actions {
+  display: inline-flex;
+  gap: 12px;
+  align-items: center;
+}
+.admin-page .row {
+  display: flex;
+  flex-wrap: nowrap; /* keep controls on one line on wide screens */
+  gap: 10px;
+  align-items: center;
+}
+
+/* Uniform control sizing for Admin rows */
+.admin-page .row .alpha-input,
+.admin-page .row select.alpha-select,
+.admin-page .row input.alpha-input,
+.admin-page .row input[type="file"].alpha-input {
+  width: 240px !important;
+  max-width: 240px !important;
+  flex: 0 0 240px !important;
+  display: inline-block;
+}
+.admin-page .row .alpha-select {
+  width: 240px !important;
+  max-width: 240px !important;
+  flex: 0 0 240px !important;
+}
+/* Keep buttons/icons compact in the row */
+.admin-page .row button,
+.admin-page .row .btn-icon {
+  flex: 0 0 auto !important;
+}
+/* Ensure file picker matches input sizing */
+.admin-page .file-stack .file {
+  width: 320px !important;
+  max-width: 320px !important;
+  flex: 0 0 320px !important;
+}
+.admin-page .section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: flex-start;
+  margin-bottom: 10px;
+}
+.admin-page .section-title { font-size: 18px; font-weight: 700; margin-top: 12px; }
+.admin-page .section { margin-top: 12px; }
+.admin-page .toggle-row { margin-top: 8px; }
+.admin-page .toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.15);
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.admin-page .toggle:hover { border-color: rgba(255,255,255,0.3); }
+.admin-page .icon { display: block; }
+.admin-page .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  width: 32px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: transparent;
+  cursor: pointer;
+}
+.admin-page .icon-btn:hover { border-color: rgba(255,255,255,0.3); }
+.admin-page .ml-2 { margin-left: 8px; }
+.admin-page .mr-8 { margin-right: 16px; }
+.admin-page .select-lg {
+  height: 44px;
+  padding: 0 10px;
+  font-size: 1.05rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.05);
+  color: inherit;
+}
+.admin-page .file-wrap { display: inline-flex; align-items: center; }
+.admin-page .list { margin-top: 10px; }
+.admin-page .list.compact .list-row { padding-top: 8px; padding-bottom: 8px; }
+.admin-page .list-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.admin-page .list-row.header { font-weight: 600; opacity: 0.8; }
+.admin-page .list-row .grow { min-width: 220px; }
+.admin-page .list-row .col { min-width: 90px; }
+.admin-page .list-row .col.center { display: flex; justify-content: center; }
+.admin-page .title { font-weight: 600; }
+.admin-page .sub { font-size: 12px; opacity: 0.8; }
+.admin-page .linklike {
+  background: none !important;
+  border: none !important;
+  padding: 0;
+  text-decoration: underline;
+  cursor: pointer;
+  color: inherit;
+}
+.admin-page button.danger {
+  background: transparent;
+  border: 1px solid rgba(255, 50, 50, 0.5);
+}
+.admin-page button.danger:hover { border-color: rgba(255, 80, 80, 0.9); }
+.admin-page input.alpha-input,
+.admin-page .alpha-input[type="text"],
+.admin-page .alpha-input[type="email"],
+.admin-page .alpha-input[type="password"],
+.admin-page .alpha-input[type="search"],
+.admin-page select.alpha-select,
+.admin-page .alpha-select {
+  height: 40px !important;
+  box-sizing: border-box !important;
+  padding: 8px 10px !important;
+  line-height: 24px;
+}
+.admin-page input[type="file"].alpha-input {
+  height: 40px !important;
+  box-sizing: border-box !important;
+  padding: 6px 10px !important;
+}
+.admin-page .file-stack { position: relative; display: flex; align-items: center; gap: 8px; margin-right: 36px; }
+.admin-page .file-stack .file { width: 220px; }
+.admin-page .btn-icon.lilac {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  width: auto;
+  height: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.admin-page .btn-icon.lilac svg {
+  width: 24px;
+  height: 24px;
+  stroke: #fff;
+}
+.admin-page .alpha-header--dash { display:flex; align-items:center; justify-content:space-between; }
+.admin-page .alpha-header-left { display:flex; align-items:center; gap:10px; }
+.admin-page .alpha-logo { width:55px; height:55px; object-fit:contain; }
+.admin-page .alpha-card--bar { padding:10px 14px; margin-bottom:12px; }
+.admin-page .center { text-align:center; }
+.admin-page .table.like .t-head,
+.admin-page .table.like .t-row {
+  display:grid;
+  grid-template-columns: 1fr 220px 60px 60px 120px 80px; /* Role | Created | KB | JD | Link | Delete */
+  gap: 12px;
+  align-items:center;
+}
+.admin-page .table.like .t-head { font-weight:700; opacity:0.9; padding:10px 12px; }
+.admin-page .table.like .t-row { padding:12px; border-top:1px solid rgba(255,255,255,0.06); }
+.admin-page .table.like .t-empty { padding:14px; }
+.admin-page .file-stack .file-clear { position: absolute; right: -36px; }
+.admin-page .signout-btn {
+  background: var(--alpha-primary) !important;
+  color: #fff !important;
+  border: 1px solid var(--alpha-primary) !important;
+  border-radius: 18px !important;
+  padding: 6px 12px !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+}
+.admin-page .signout-btn:hover {
+  background: var(--alpha-primary-strong) !important;
+  border-color: var(--alpha-primary-strong) !important;
+}
+.admin-page .alpha-theme button.btn-icon,
+.admin-page .alpha-theme button.btn-icon.lilac {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+}
+.admin-page .alpha-theme button.btn-icon:hover,
+.admin-page .alpha-theme button.btn-icon.lilac:hover {
+  background: transparent !important;
+  filter: none !important;
+}
+.admin-page .alpha-theme button.btn-icon > svg {
+  width: 24px !important;
+  height: 24px !important;
+  display: block;
+}
+.admin-page .btn-icon.lilac {
+  background: transparent !important;
+  border: none !important;
+}
+
+/* Make the JD file input wider than standard inputs */
+.admin-page .row input.alpha-input.file {
+  width: 320px !important;
+  max-width: 320px !important;
+  flex: 0 0 320px !important;
+}
+
+/* Admin Sign In: input width and spacing under title */
+.admin-page .alpha-form form {
+  margin-top: 48px;
+}
+.admin-page .alpha-form h2 {
+  margin-bottom: 12px;
+}
+.admin-page .alpha-form label {
+  display: block;
+  margin: 10px 0 6px;
+}
+.admin-page .alpha-form input.alpha-input {
+  width: 600px !important;
+  max-width: 600px !important;
+  flex: 0 0 600px !important;
+  display: block; /* stack to new line under label */
+}
+.admin-page .alpha-form button[type="submit"] {
+  margin-top: 12px;
+}
+.admin-page .alpha-form a,
+.admin-page .alpha-form .btn-ghost {
+  display: inline-block;
+  margin-top: 10px;
+}
+
+/* Responsive fallback: allow wrap on small screens */
+@media (max-width: 700px) {
+  .admin-page .row { flex-wrap: wrap; }
+  .admin-page .row .alpha-input,
+  .admin-page .row select.alpha-select,
+  .admin-page .file-stack .file {
+    flex: 1 1 100% !important;
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+}
+.admin-page tr[style*="background: rgb(249, 250, 251)"],
+.admin-page tr[style*="background:#fff"],
+.admin-page tr[style*="background: #fff"],
+.admin-page tr[style*="background: white"],
+.admin-page tr[style*="background-color: rgb(249, 250, 251)"],
+.admin-page tr[style*="background-color:#fff"],
+.admin-page tr[style*="background-color: #fff"],
+.admin-page tr[style*="background-color: white"] {
+  background: var(--alpha-surface) !important;
+  color: var(--alpha-text) !important;
+}
+.admin-page tr[style*="background: rgb(249, 250, 251)"] *,
+.admin-page tr[style*="background:#fff"] *,
+.admin-page tr[style*="background: #fff"] *,
+.admin-page tr[style*="background: white"] *,
+.admin-page tr[style*="background-color: rgb(249, 250, 251)"] *,
+.admin-page tr[style*="background-color:#fff"] *,
+.admin-page tr[style*="background-color: #fff"] *,
+.admin-page tr[style*="background-color: white"] * {
+  color: var(--alpha-text) !important;
+  -webkit-text-fill-color: var(--alpha-text) !important;
+  opacity: 1 !important;
+}
+.admin-page table tr td,
+.admin-page table tr th {
+  border-color: var(--alpha-border) !important;
+}
+.admin-page table tr:hover {
+  background: rgba(255,255,255,0.06) !important;
+}
+.admin-page .admin-auth input.alpha-input { margin-bottom: 8px; }
