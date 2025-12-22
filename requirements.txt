@@ -3,10 +3,10 @@ openai
 pandas
 pillow
 PyMuPDF
-pdf2image
 pytesseract
-poppler-utils
-tesseract
-Sendgrid
+sendgrid
 requests
-pytest
+sqlalchemy
+psycopg2-binary
+bcrypt
+anthropic
