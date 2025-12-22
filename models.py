@@ -1,6 +1,7 @@
 import os
 import bcrypt
-from sqlalchemy import Column, Integer, String, Text, Boolean
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, String, Text, text
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from database import Base, engine, get_db
 
 # User model
@@ -28,6 +29,28 @@ class Upload(Base):
     upload_time = Column(String(100))
     user_email = Column(String(255), index=True)
     analysis_data = Column(Text)
+
+# Upload file audit model
+class UploadFile(Base):
+    __tablename__ = "upload_files"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    upload_id = Column(PGUUID(as_uuid=True), nullable=True)
+    user_email = Column(Text, nullable=False)
+    tool_name = Column(Text, nullable=False)
+    original_filename = Column(Text, nullable=False)
+    content_type = Column(Text, nullable=True)
+    byte_size = Column(BigInteger, nullable=True)
+    bucket = Column(Text, nullable=False)
+    storage_path = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+# Admin access mapping (Supabase Auth)
+class AdminUser(Base):
+    __tablename__ = "admin_users"
+
+    user_id = Column(PGUUID(as_uuid=True), primary_key=True)
+    role = Column(String(50), nullable=False)
 
 # Function to get uploads from the DB
 def get_uploads(db):

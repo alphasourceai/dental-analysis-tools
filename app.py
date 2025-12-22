@@ -11,7 +11,15 @@ import hmac
 import time
 import logging
 from database import get_db, Base, engine, SessionLocal
-from models import get_admin_by_username, verify_password, Admin, create_admin, User, Upload
+from models import get_admin_by_username, Admin, create_admin, User, Upload
+from supabase_utils import (
+    get_admin_user_count,
+    get_current_admin_user,
+    is_admin_user,
+    persist_upload_file,
+    sign_in_admin,
+    update_upload_file_upload_id,
+)
 from datetime import datetime
 from analysis_utils import (
     extract_text_from_pdf,
@@ -259,8 +267,10 @@ if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = {}
 if 'is_admin_logged_in' not in st.session_state:
     st.session_state.is_admin_logged_in = False
-if 'admin_data' not in st.session_state:
-    st.session_state.admin_data = None
+if 'admin_session' not in st.session_state:
+    st.session_state.admin_session = None
+if 'admin_user' not in st.session_state:
+    st.session_state.admin_user = None
 
 # ---- Page Navigation (no sidebar, using session state) ----
 if 'page' not in st.session_state:
@@ -462,6 +472,14 @@ if st.session_state.page == "Analyzer":
                                     file_content = file.read()
                                     file_name = file.name
                                     file_type = file.type
+
+                                    upload_file_id = persist_upload_file(
+                                        file_bytes=file_content,
+                                        user_email=email,
+                                        tool_name=tool_name,
+                                        original_filename=file_name,
+                                        content_type=file_type,
+                                    )
                                     
                                     # Reset file pointer for processing
                                     file.seek(0)
@@ -525,6 +543,8 @@ if st.session_state.page == "Analyzer":
                                         upload_db.commit()
                                         st.session_state.debug_log.append(f"✅ Database commit successful!")
                                         logging.info(f"✅ Upload committed successfully: {file.name} - {tool_name}")
+
+                                        update_upload_file_upload_id(upload_file_id, new_upload.id)
                                         
                                         st.session_state.debug_log.append(f"✅ Upload saved to database: {file.name}")
                                     except json.JSONDecodeError as e:
@@ -550,6 +570,23 @@ if st.session_state.page == "Analyzer":
 
 # Admin Setup Page (for initial production setup)
 elif st.session_state.page == "Admin Setup":
+    st.markdown("""
+        <div class="title-container" style="margin-top: 1.5rem;">
+            <h1>Admin Setup</h1>
+        </div>
+    """, unsafe_allow_html=True)
+    st.info("Admin setup is now managed in Supabase Auth. Ask Jason to add your auth user_id to admin_users.")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Back to Analyzer", key="setup_to_analyzer_deprecated", use_container_width=True):
+            st.session_state.page = "Analyzer"
+            st.rerun()
+    with col2:
+        if st.button("Go to Admin Login", key="setup_to_login_deprecated", use_container_width=True):
+            st.session_state.page = "Admin Dashboard"
+            st.rerun()
+    st.stop()
+
     # Initialize session state for attempt tracking
     if 'setup_failed_attempts' not in st.session_state:
         st.session_state.setup_failed_attempts = 0
@@ -771,6 +808,19 @@ elif st.session_state.page == "Admin Setup":
 
 # Admin Dashboard Content
 elif st.session_state.page == "Admin Dashboard":
+    admin_access_token = None
+    if st.session_state.admin_session:
+        admin_access_token = st.session_state.admin_session.get("access_token")
+    if admin_access_token:
+        admin_user = get_current_admin_user(admin_access_token)
+        if admin_user:
+            st.session_state.admin_user = admin_user
+            st.session_state.is_admin_logged_in = is_admin_user(admin_user.get("id"))
+        else:
+            st.session_state.admin_session = None
+            st.session_state.admin_user = None
+            st.session_state.is_admin_logged_in = False
+
     # Check if admin is logged in
     if not st.session_state.is_admin_logged_in:
         # Show login form
@@ -780,6 +830,10 @@ elif st.session_state.page == "Admin Dashboard":
             </div>
         """, unsafe_allow_html=True)
         st.markdown("<p style='text-align: center; margin-bottom: 2rem; margin-top: 1.5rem;'>Please log in to access the admin dashboard.</p>", unsafe_allow_html=True)
+
+        admin_user_count = get_admin_user_count()
+        if admin_user_count == 0:
+            st.info("Ask Jason to add your auth user_id to admin_users.")
         
         # Login form
         with st.form("admin_login_form"):
@@ -793,7 +847,7 @@ elif st.session_state.page == "Admin Dashboard":
                 </div>
             """, unsafe_allow_html=True)
             
-            username = st.text_input("Username", key="admin_username")
+            email = st.text_input("Email", key="admin_email")
             password = st.text_input("Password", type="password", key="admin_password")
             
             col1, col2, col3 = st.columns([1, 1, 1])
@@ -801,40 +855,38 @@ elif st.session_state.page == "Admin Dashboard":
                 submit_button = st.form_submit_button("Login", use_container_width=True)
             
             if submit_button:
-                # Validate credentials against database
-                try:
-                    db = next(get_db())
-                    try:
-                        admin = get_admin_by_username(db, username)
-                        
-                        if admin and verify_password(password, admin.password_hash):
-                            # Set structured admin session data
-                            st.session_state.is_admin_logged_in = True
-                            st.session_state.admin_data = {
-                                "username": username,
-                                "authenticated": True,
-                                "must_change_password": admin.must_change_password
-                            }
-                            # Clear sensitive form values from session state
-                            if "admin_username" in st.session_state:
-                                del st.session_state["admin_username"]
-                            if "admin_password" in st.session_state:
-                                del st.session_state["admin_password"]
-                            st.success("Login successful! Redirecting...")
-                            st.rerun()
-                        else:
-                            # Clear sensitive form values even on failed attempts
-                            if "admin_username" in st.session_state:
-                                del st.session_state["admin_username"]
-                            if "admin_password" in st.session_state:
-                                del st.session_state["admin_password"]
-                            st.error("Invalid username or password. Please try again.")
-                    finally:
-                        db.close()
-                except StopIteration:
-                    st.error("Database connection error. Please try again later.")
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
+                auth_result, error = sign_in_admin(email, password)
+                if error:
+                    if "admin_password" in st.session_state:
+                        del st.session_state["admin_password"]
+                    st.error(f"Login failed: {error}")
+                else:
+                    st.session_state.admin_session = {
+                        "access_token": auth_result["access_token"],
+                        "refresh_token": auth_result.get("refresh_token"),
+                    }
+                    st.session_state.admin_user = auth_result.get("user")
+
+                    if is_admin_user(st.session_state.admin_user.get("id")):
+                        st.session_state.is_admin_logged_in = True
+                        if "admin_email" in st.session_state:
+                            del st.session_state["admin_email"]
+                        if "admin_password" in st.session_state:
+                            del st.session_state["admin_password"]
+                        st.success("Login successful! Redirecting...")
+                        st.rerun()
+                    else:
+                        st.session_state.is_admin_logged_in = False
+                        st.error("Not authorized")
+
+        if st.session_state.admin_user and not st.session_state.is_admin_logged_in:
+            col1, col2, col3 = st.columns([1, 1, 1])
+            with col2:
+                if st.button("Logout", key="admin_logout_unauthorized", use_container_width=True):
+                    st.session_state.admin_session = None
+                    st.session_state.admin_user = None
+                    st.session_state.is_admin_logged_in = False
+                    st.rerun()
         
         # Back to analyzer button
         st.markdown("<br>", unsafe_allow_html=True)
@@ -852,41 +904,10 @@ st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
 
 # Admin links (only on Analyzer page)
 if st.session_state.page == "Analyzer":
-    # Check if any admins exist in the database
-    show_setup = False
-    db_error = False
-    try:
-        db = next(get_db())
-        try:
-            admin_count = db.query(Admin).count()
-            show_setup = (admin_count == 0)
-        finally:
-            db.close()
-    except StopIteration:
-        db_error = True
-    except Exception as e:
-        db_error = True
-    
-    if db_error:
-        # Fail closed - show dashboard button with error message
-        col1, col2, col3 = st.columns([1,1,1])
-        with col2:
-            if st.button("Admin Dashboard", key="admin_link_error", use_container_width=True):
-                st.session_state.page = "Admin Dashboard"
-                st.rerun()
-    elif show_setup:
-        # Only show setup button if no admins exist yet
-        col1, col2, col3 = st.columns([1,1,1])
-        with col2:
-            if st.button("Admin Setup", key="admin_setup_link", use_container_width=True):
-                st.session_state.page = "Admin Setup"
-                st.rerun()
-    else:
-        # Show dashboard button if admins exist
-        col1, col2, col3 = st.columns([1,1,1])
-        with col2:
-            if st.button("Admin Dashboard", key="admin_link", use_container_width=True):
-                st.session_state.page = "Admin Dashboard"
-                st.rerun()
+    col1, col2, col3 = st.columns([1,1,1])
+    with col2:
+        if st.button("Admin Dashboard", key="admin_link", use_container_width=True):
+            st.session_state.page = "Admin Dashboard"
+            st.rerun()
 
 st.markdown("<p style='text-align: center; margin-top: 1rem;'>Built by <a href='https://alphasourceai.com' target='_blank'>AlphaSource AI</a></p>", unsafe_allow_html=True)
