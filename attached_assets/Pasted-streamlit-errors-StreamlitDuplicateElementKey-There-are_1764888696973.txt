@@ -1,0 +1,35 @@
+streamlit.errors.StreamlitDuplicateElementKey: There are multiple elements with the same key='logout_button'. To fix this, please make sure that the key argument is unique for each element you create.
+
+Traceback:
+File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/streamlit/runtime/scriptrunner/exec_code.py", line 129, in exec_func_with_error_handling
+    result = func()
+             ^^^^^^
+File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/streamlit/runtime/scriptrunner/script_runner.py", line 669, in code_to_exec
+    exec(code, module.__dict__)  # noqa: S102
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/home/runner/workspace/app.py", line 1338, in <module>
+    display_admin_dashboard()  # This calls the function defined in admin_dashboard.py
+    ^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/home/runner/workspace/admin_dashboard.py", line 36, in display_admin_dashboard
+    display_document_analysis()
+File "/home/runner/workspace/admin_dashboard.py", line 283, in display_document_analysis
+    from app import analyze_with_all_models, send_followup_email, send_email, extract_text_from_pdf
+File "/home/runner/workspace/app.py", line 1338, in <module>
+    display_admin_dashboard()  # This calls the function defined in admin_dashboard.py
+    ^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/home/runner/workspace/admin_dashboard.py", line 22, in display_admin_dashboard
+    if st.button("Logout", key="logout_button", type="secondary"):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/streamlit/runtime/metrics_util.py", line 447, in wrapped_func
+    result = non_optional_func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/streamlit/elements/widgets/button.py", line 266, in button
+    return self.dg._button(
+           ^^^^^^^^^^^^^^^^
+File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/streamlit/elements/widgets/button.py", line 1120, in _button
+    element_id = compute_and_register_element_id(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/streamlit/elements/lib/utils.py", line 265, in compute_and_register_element_id
+    _register_element_id(ctx, element_type, element_id)
+File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/streamlit/elements/lib/utils.py", line 145, in _register_element_id
+    raise StreamlitDuplicateElementKey(user_key)

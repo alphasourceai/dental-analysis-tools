@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="format-detection" content="telephone=no,address=no,email=no,date=no,url=no">
+    <meta name="color-scheme" content="dark only">
+    <meta name="supported-color-schemes" content="dark">
+    <title>Welcome to the alphaScreen Interview Agent Pre-Release Beta Test</title>
+    <!--[if mso]>
+      <xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml>
+    <![endif]-->
+    <style>
+      @media (max-width: 640px) {
+        .container { width: 100% !important; max-width: 100% !important; }
+        .px-24 { padding-left: 16px !important; padding-right: 16px !important; }
+      }
+    </style>
+  </head>
+  <body style="margin:0;padding:0;background:#0A1547;">
+    <div style="display:none!important;max-height:0;overflow:hidden;opacity:0;visibility:hidden;">
+      Welcome to the alphaScreen Interview Agent beta. Your feedback will shape what we ship next.
+    </div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%!important;min-width:100%!important;background:#0A1547;">
+      <tr>
+        <td align="center">
+          <table role="presentation" cellpadding="0" cellspacing="0" width="640" class="container" style="width:640px;max-width:640px;">
+            <tr>
+              <td class="px-24" style="padding:32px 24px 16px 24px;">
+                <a href="https://www.alphasourceai.com" target="_blank" style="text-decoration:none;border:0;outline:0;display:inline-block;">
+                  <img src="https://rytlclkkcvvnkoncfaid.supabase.co/storage/v1/object/public/email-assets/Color%20logo%20-%20no%20background.png"
+                    alt="alphaSource AI" width="3"
+                    style="display:block;max-width:300px;width:300px;height:auto;border:0;outline:none;text-decoration:none;">
+                </a>
+              </td>
+            </tr>
+
+            <tr>
+              <td class="px-24" style="padding:8px 24px 24px 24px;">
+                <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border-radius:16px;background:#0F1E5D;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 24px rgba(0,0,0,0.25);">
+                  <tr>
+                    <td style="padding:28px 28px 8px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#E6EBFF;font-size:22px;line-height:28px;font-weight:800;">
+                      Welcome to the alphaScreen Beta Test
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#C9D3FF;font-size:14px;line-height:22px;">
+                      Hi {{FIRST_NAME}},<br><br>
+                      Thanks for helping us test <strong>alphaScreen Interview Agent</strong>. This is an early beta release, and your feedback will directly influence what we build next.
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:0 28px 10px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#E6EBFF;font-size:16px;line-height:22px;font-weight:800;">
+                      What it does (quickly)
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#C9D3FF;font-size:14px;line-height:22px;">
+                      alphaScreen helps teams turn job descriptions into structured interview flows, collect candidate responses, and deliver comprehensive, unbiased candidate evaluations powered by AI.
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:0 28px 10px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#E6EBFF;font-size:16px;line-height:22px;font-weight:800;">
+                      What you’ll need to test
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#C9D3FF;font-size:14px;line-height:22px;">
+                      Please have these ready (real or sample):
+                      <ul style="margin:10px 0 0 18px;padding:0;color:#C9D3FF;">
+                        <li><strong>Job description</strong> (PDF/Word) — used to create a role</li>
+                        <li><strong>Resume</strong> (PDF/Word) — used during the candidate interview flow</li>
+                      </ul>
+                      <div style="margin-top:12px;color:#C9D3FF;">
+                        <strong>Recommended for testing:</strong><br>
+                        For the cleanest experience, we recommend using <strong>one email address as the client (employer)</strong> and a <strong>different email address as the candidate (interviewee)</strong>.<br>
+                        This mirrors real-world usage and helps avoid role or session overlap while testing.
+                      </div>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:0 28px 10px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#E6EBFF;font-size:16px;line-height:22px;font-weight:800;">
+                      Recommended test flow
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#C9D3FF;font-size:14px;line-height:22px;">
+                      <ol style="margin:10px 0 0 18px;padding:0;color:#C9D3FF;">
+                        <li>Sign in and create a role by uploading a job description.</li>
+                        <li>On the role, use <strong>“Copy Link”</strong> — this is the candidate interview link for that role.</li>
+                        <li>Open that link in a new browser/incognito window (or send it to someone) and complete the interview, uploading a resume when prompted.</li>
+                        <li>Return to your dashboard to review the results.</li>
+                      </ol>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:0 28px 10px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#E6EBFF;font-size:16px;line-height:22px;font-weight:800;">
+                      NDA splash (why it’s there)
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#C9D3FF;font-size:14px;line-height:22px;">
+                      On first sign-in, you may see a short NDA acknowledgement. This is simply because you’re accessing an early beta product. Once acknowledged, you won’t see it again.
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:0 28px 10px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#E6EBFF;font-size:16px;line-height:22px;font-weight:800;">
+                      Feedback
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#C9D3FF;font-size:14px;line-height:22px;">
+                      Please use the <strong>Feedback</strong> tab inside the dashboard to report bugs, confusing behavior, or feature ideas. If something blocks you, include what you were doing, what you expected, and what happened (screenshots help).
+                    </td>
+                  </tr>
+
+                  <tr>
+  <td style="padding:0 28px 18px 28px;
+             font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+             color:#C9D3FF;
+             font-size:14px;
+             line-height:22px;">
+    <strong>Your data & privacy</strong><br>
+    All information you upload or submit during testing is handled securely and used solely to evaluate and improve the alphaScreen platform. We do not share beta data with third parties, and access is restricted to the alphaSource team.
+  </td>
+</tr>
+                  <tr>
+  <td style="padding:6px 28px 18px 28px;
+             font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+             color:#C9D3FF;
+             font-size:14px;
+             line-height:22px;">
+    Thanks again for helping us test alphaScreen — we really appreciate your time and honest feedback.<br><br>
+    Jason<br>
+    <span style="color:#6B77C9;">alphaSource | alphaScreen</span>
+  </td>
+</tr>
+
+                  <tr>
+                    <td align="left" style="padding:10px 28px 28px 28px;">
+                      <!--[if mso]>
+                      <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="https://www.alphasourceai.com/account" arcsize="12%" strokecolor="#00CFC8" strokeweight="1px" fillcolor="#00CFC8" style="height:44px;v-text-anchor:middle;width:260px;">
+                        <w:anchorlock/>
+                        <center style="color:#0A1547;font-family:Segoe UI, Arial, sans-serif;font-size:14px;font-weight:700;">
+                          Go to Client Dashboard
+                        </center>
+                      </v:roundrect>
+                      <![endif]-->
+                      <!--[if !mso]><!-- -->
+                      <a href="https://www.alphasourceai.com/account" target="_blank"
+                         style="display:inline-block;background:#AD8BF7;color:#0A1547;text-decoration:none;
+                                font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;font-weight:700;
+                                font-size:14px;line-height:14px;padding:15px 22px;border-radius:10px;
+                                border:1px solid rgba(255,255,255,0.12);min-width:260px;text-align:center;">
+                        Go to Client Dashboard
+                      </a>
+                      <!--<![endif]-->
+                    </td>
+                  </tr>
+<tr>
+  <td style="padding:0 28px 18px 28px;
+             font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+             color:#FFFFFF;
+             font-size:12px;
+             line-height:18px;">
+    ** Desktop or laptop recommended — mobile optimization is not complete yet.
+  </td>
+</tr>
+                  <tr>
+                    <td style="padding:0 28px 28px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#6B77C9;font-size:12px;line-height:18px;">
+                      Need help? Email <a href="mailto:info@alphasourceai.com" style="color:#C9D3FF;text-decoration:none;">info@alphasourceai.com</a>
+                    </td>
+                  </tr>
+
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td class="px-24" style="padding:8px 24px 40px 24px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#6B77C9;font-size:11px;line-height:16px;text-align:left;">
+                © alphaSource AI · All rights reserved.
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

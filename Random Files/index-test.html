@@ -1,0 +1,1588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configure Your Virtual Interviewer - Client Setup</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #262a33;
+	            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #262a33;
+            border-radius: 20px;
+          
+            overflow: hidden;
+        }
+
+        .header {
+            background: #262a33;
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            font-weight: 300;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .progress-bar {
+            background: rgba(255,255,255,0.2);
+            height: 8px;
+            border-radius: 4px;
+            margin-top: 20px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            background: #27ae60;
+            height: 100%;
+            width: 20%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .step-indicator {
+            display: flex;
+            justify-content: center;
+            margin-top: 15px;
+            gap: 10px;
+        }
+
+        .step {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.3);
+            transition: all 0.3s ease;
+        }
+
+        .step.active {
+            background: #27ae60;
+            transform: scale(1.2);
+        }
+
+        .step.completed {
+            background: #2ecc71;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .step-content {
+            display: none;
+        }
+
+        .step-content.active {
+            display: block;
+            animation: fadeIn 0.5s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        .form-group label {
+            display: block;
+            font-weight: 600;
+            color: #42a5f5;
+            margin-bottom: 8px;
+            font-size: 1.1rem;
+        }
+
+        .form-group input, .form-group select, .form-group textarea {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e6ed;
+            border-radius: 10px;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+            outline: none;
+            border-color: #1e88e5;
+            box-shadow: 0 0 0 3px rgba(30, 136, 229, 0.1);
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .role-template-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .role-card {
+            background: linear-gradient(135deg, #fff 0%, #f8f9fa 100%);
+            border: 3px solid #e9ecef;
+            border-radius: 15px;
+            padding: 25px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-align: center;
+        }
+
+        .role-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            border-color: #1e88e5;
+        }
+
+        .role-card.selected {
+            border-color: #1e88e5;
+            background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+            transform: scale(1.02);
+        }
+
+        .role-icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+            display: block;
+        }
+
+        .role-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+
+        .role-description {
+            color: #6c757d;
+            font-size: 0.95rem;
+            line-height: 1.4;
+        }
+
+        .skill-selector {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .skill-category {
+            margin-bottom: 25px;
+        }
+
+        .skill-category h3 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .skill-item {
+            display: flex;
+            align-items: center;
+            background: white;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 10px;
+            border: 2px solid transparent;
+            transition: all 0.3s ease;
+        }
+
+        .skill-item:hover {
+            border-color: #1e88e5;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .skill-checkbox {
+            width: 20px;
+            height: 20px;
+            accent-color: #1e88e5;
+            margin-right: 15px;
+        }
+
+        .skill-name {
+            font-weight: 500;
+            color: #2c3e50;
+        }
+
+        .skill-description {
+            font-size: 0.9rem;
+            color: #6c757d;
+            margin-left: 35px;
+        }
+
+        .other-field {
+            display: none;
+            margin-left: 35px;
+            margin-top: 10px;
+        }
+
+        .other-field input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        .cultural-fit-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .culture-card {
+            background: linear-gradient(135deg, #42a5f5 0%, #1976d2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 15px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: 3px solid transparent;
+        }
+
+        .culture-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+        }
+
+        .culture-card.selected {
+            border-color: #2c3e50;
+            transform: scale(1.05);
+        }
+
+        .deal-breaker-section {
+            background: #ffebee;
+            border-left: 5px solid #e57373;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .deal-breaker-section h3 {
+            color: #d32f2f;
+            margin-bottom: 15px;
+        }
+
+        .certification-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 15px;
+        }
+
+        .cert-card {
+            background: white;
+            border: 2px solid #e9ecef;
+            border-radius: 10px;
+            padding: 15px;
+            transition: all 0.3s ease;
+        }
+
+        .cert-card:hover {
+            border-color: #1e88e5;
+            transform: translateY(-2px);
+        }
+
+        .cert-card.required {
+            border-color: #e57373;
+            background: #ffebee;
+        }
+
+        .cert-card.preferred {
+            border-color: #81c784;
+            background: #e8f5e8;
+        }
+
+        .cert-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .navigation {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 40px;
+            padding-top: 30px;
+            border-top: 2px solid #e0e6ed;
+        }
+
+        .nav-btn {
+            background: linear-gradient(135deg, #1e88e5 0%, #1976d2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .nav-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(30, 136, 229, 0.3);
+        }
+
+        .nav-btn:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .nav-btn.secondary {
+            background: transparent;
+            color: #7f8c8d;
+            border: 2px solid #bdc3c7;
+        }
+
+
+     
+        .summary-card {
+            background: linear-gradient(135deg, #252a34 0%, #1976d2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 15px;
+            margin-bottom: 20px;
+        }
+
+        .summary-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .stat-item {
+            text-align: center;
+            background: rgba(255,255,255,0.1);
+            padding: 15px;
+            border-radius: 10px;
+        }
+
+        .stat-number {
+            font-size: 2rem;
+            font-weight: bold;
+            display: block;
+        }
+
+        .stat-label {
+            opacity: 0.9;
+            font-size: 0.9rem;
+        }
+
+        .interview-format-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .format-card {
+            background: white;
+            border: 3px solid #e9ecef;
+            border-radius: 15px;
+            padding: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-align: center;
+        }
+
+        .format-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.1);
+            border-color: #1e88e5;
+        }
+
+        .format-card.selected {
+            border-color: #1e88e5;
+            background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+        }
+
+        .submission-success {
+            background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 15px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .summary-section {
+            background: white;
+            padding: 25px;
+            border-radius: 15px;
+            margin-bottom: 20px;
+            border: 2px solid #e9ecef;
+        }
+
+        .summary-section h4 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+            border-bottom: 2px solid #f8f9fa;
+            padding-bottom: 10px;
+        }
+
+        .summary-item {
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .summary-item strong {
+            color: #2c3e50;
+        }
+
+        .skills-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .skill-tag {
+            background: #e3f2fd;
+            color: #1976d2;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .cultures-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .culture-tag {
+            background: #e8f5e8;
+            color: #2e7d32;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Configure Your Virtual Interviewer</h1>
+            <p>Customize evaluation criteria for dental or medical office positions</p>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressBar"></div>
+            </div>
+            <div class="step-indicator">
+                <div class="step active"></div>
+                <div class="step"></div>
+                <div class="step"></div>
+                <div class="step"></div>
+                <div class="step"></div>
+            </div>
+        </div>
+
+        <div class="content">
+            <!-- Netlify Forms Detection -->
+            <form name="healthcare-interviewer" netlify hidden>
+                <input type="text" name="interviewer-name" />
+                <input type="email" name="contact-email" />
+                <input type="text" name="selected-role" />
+                <input type="text" name="practice-name" />
+                <input type="text" name="location" />
+                <input type="text" name="experience-level" />
+                <input type="text" name="employment-type" />
+                <input type="text" name="interview-format" />
+                <input type="text" name="difficulty-level" />
+                <input type="text" name="interview-tone" />
+                <textarea name="selected-skills"></textarea>
+                <textarea name="cultural-values"></textarea>
+                <textarea name="deal-breakers"></textarea>
+                <textarea name="custom-questions"></textarea>
+                <textarea name="full-summary"></textarea>
+            </form>
+            <!-- Step 1: Role Selection -->
+            <div class="step-content active" id="step1">
+                <h2 style="color: #ffffff; margin-bottom: 30px;">🏥 Select Position Type</h2>
+                
+                <div class="role-template-grid">
+                    <div class="role-card" onclick="selectRole(this, 'dental-assistant')">
+                        <span class="role-icon">🦷</span>
+                        <div class="role-title">Dental Assistant</div>
+                        <div class="role-description">Chairside assistance, patient care, sterilization, administrative duties</div>
+                    </div>
+                    
+                    <div class="role-card" onclick="selectRole(this, 'dental-hygienist')">
+                        <span class="role-icon">🪥</span>
+                        <div class="role-title">Dental Hygienist</div>
+                        <div class="role-description">Cleanings, patient education, periodontal therapy, radiographs</div>
+                    </div>
+                    
+                    <div class="role-card" onclick="selectRole(this, 'dental-receptionist')">
+                        <span class="role-icon">📞</span>
+                        <div class="role-title">Dental Receptionist</div>
+                        <div class="role-description">Front desk, scheduling, insurance, patient communication</div>
+                    </div>
+                    
+                    <div class="role-card" onclick="selectRole(this, 'treatment-coordinator')">
+                        <span class="role-icon">📋</span>
+                        <div class="role-title">Treatment Coordinator</div>
+                        <div class="role-description">Treatment planning, patient education, case presentation, insurance coordination</div>
+                    </div>
+                    
+                    <div class="role-card" onclick="selectRole(this, 'practice-manager')">
+                        <span class="role-icon">👔</span>
+                        <div class="role-title">Practice Manager</div>
+                        <div class="role-description">Operations management, staff supervision, financial oversight</div>
+                    </div>
+                    
+                    <div class="role-card" onclick="selectRole(this, 'medical-assistant')">
+                        <span class="role-icon">🩺</span>
+                        <div class="role-title">Medical Assistant</div>
+                        <div class="role-description">Clinical support, patient vitals, administrative tasks</div>
+                    </div>
+                    
+                    <div class="role-card" onclick="selectRole(this, 'medical-receptionist')">
+                        <span class="role-icon">🏥</span>
+                        <div class="role-title">Medical Receptionist</div>
+                        <div class="role-description">Patient check-in, appointment scheduling, insurance verification</div>
+                    </div>
+                    
+                    <div class="role-card" onclick="selectRole(this, 'medical-billing')">
+                        <span class="role-icon">💳</span>
+                        <div class="role-title">Medical Billing Specialist</div>
+                        <div class="role-description">Insurance claims, billing codes, payment processing</div>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="practiceName">Practice/Clinic Name</label>
+                        <input type="text" id="practiceName" placeholder="e.g., Sunshine Dental Group">
+                    </div>
+                    <div class="form-group">
+                        <label for="location">Location</label>
+                        <input type="text" id="location" placeholder="e.g., Denver, CO">
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="experienceLevel">Experience Level Required</label>
+                        <select id="experienceLevel">
+                            <option value="">Select Experience Level</option>
+                            <option value="entry">Entry Level (0-1 year)</option>
+                            <option value="some">Some Experience (1-3 years)</option>
+                            <option value="experienced">Experienced (3-5 years)</option>
+                            <option value="senior">Senior Level (5+ years)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="employmentType">Employment Type</label>
+                        <select id="employmentType">
+                            <option value="">Select Type</option>
+                            <option value="fulltime">Full-time</option>
+                            <option value="parttime">Part-time</option>
+                            <option value="temp">Temporary</option>
+                            <option value="temp-to-perm">Temp-to-Permanent</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 2: Technical Skills & Certifications -->
+            <div class="step-content" id="step2">
+                <h2 style="color: #ffffff; margin-bottom: 30px;">📋 Required Skills & Certifications</h2>
+                
+                <div class="skill-selector">
+                    <div class="skill-category" id="clinical-skills">
+                        <h3>🏥 Clinical Skills</h3>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="vitals">
+                            <div>
+                                <label for="vitals" class="skill-name">Taking Vital Signs</label>
+                                <div class="skill-description">Blood pressure, temperature, pulse, respirations</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="injections">
+                            <div>
+                                <label for="injections" class="skill-name">Injections & Immunizations</label>
+                                <div class="skill-description">IM, SQ injections, vaccine administration</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="phlebotomy">
+                            <div>
+                                <label for="phlebotomy" class="skill-name">Phlebotomy</label>
+                                <div class="skill-description">Blood draws, specimen collection</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="ekg">
+                            <div>
+                                <label for="ekg" class="skill-name">EKG Administration</label>
+                                <div class="skill-description">12-lead EKGs, rhythm strips</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="clinical-other" onchange="toggleOtherField('clinical-other')">
+                            <div>
+                                <label for="clinical-other" class="skill-name">Other Clinical Skills</label>
+                                <div class="skill-description">Specify additional clinical requirements</div>
+                            </div>
+                        </div>
+                        <div class="other-field" id="clinical-other-field">
+                            <input type="text" placeholder="Please specify other clinical skills...">
+                        </div>
+                    </div>
+
+                    <div class="skill-category" id="dental-skills">
+                        <h3>🦷 Dental-Specific Skills</h3>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="radiographs">
+                            <div>
+                                <label for="radiographs" class="skill-name">Digital Radiographs</label>
+                                <div class="skill-description">Bitewings, periapicals, panoramic X-rays</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="impressions">
+                            <div>
+                                <label for="impressions" class="skill-name">Taking Impressions</label>
+                                <div class="skill-description">Alginate, digital impressions</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="scaling">
+                            <div>
+                                <label for="scaling" class="skill-name">Scaling & Root Planing</label>
+                                <div class="skill-description">Periodontal therapy, deep cleanings</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="sterilization">
+                            <div>
+                                <label for="sterilization" class="skill-name">Sterilization Protocols</label>
+                                <div class="skill-description">Autoclave, instrument processing</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="dental-other" onchange="toggleOtherField('dental-other')">
+                            <div>
+                                <label for="dental-other" class="skill-name">Other Dental Skills</label>
+                                <div class="skill-description">Specify additional dental requirements</div>
+                            </div>
+                        </div>
+                        <div class="other-field" id="dental-other-field">
+                            <input type="text" placeholder="Please specify other dental skills...">
+                        </div>
+                    </div>
+
+                    <div class="skill-category">
+                        <h3>💻 Software & Technology</h3>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="dentrix">
+                            <div>
+                                <label for="dentrix" class="skill-name">Dentrix</label>
+                                <div class="skill-description">Practice management software</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="eaglesoft">
+                            <div>
+                                <label for="eaglesoft" class="skill-name">Eaglesoft</label>
+                                <div class="skill-description">Dental practice management</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="epic">
+                            <div>
+                                <label for="epic" class="skill-name">Epic EMR</label>
+                                <div class="skill-description">Electronic medical records</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="cerner">
+                            <div>
+                                <label for="cerner" class="skill-name">Cerner EMR</label>
+                                <div class="skill-description">Electronic health records</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="software-other" onchange="toggleOtherField('software-other')">
+                            <div>
+                                <label for="software-other" class="skill-name">Other Software/Technology</label>
+                                <div class="skill-description">Specify additional software requirements</div>
+                            </div>
+                        </div>
+                        <div class="other-field" id="software-other-field">
+                            <input type="text" placeholder="Please specify other software/technology...">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="certification-grid">
+                    <div class="cert-card required">
+                        <h4>Required Certifications</h4>
+                        <div class="cert-item">
+                            <input type="checkbox" id="cpr">
+                            <label for="cpr">CPR/AED Certification</label>
+                        </div>
+                        <div class="cert-item">
+                            <input type="checkbox" id="bls">
+                            <label for="bls">Basic Life Support (BLS)</label>
+                        </div>
+                        <div class="cert-item">
+                            <input type="checkbox" id="ma-cert">
+                            <label for="ma-cert">Medical Assistant Certification</label>
+                        </div>
+                        <div class="cert-item">
+                            <input type="checkbox" id="required-cert-other" onchange="toggleOtherField('required-cert-other')">
+                            <label for="required-cert-other">Other Required Certification</label>
+                        </div>
+                        <div class="other-field" id="required-cert-other-field">
+                            <input type="text" placeholder="Please specify other required certifications...">
+                        </div>
+                    </div>
+
+                    <div class="cert-card preferred">
+                        <h4>Preferred Certifications</h4>
+                        <div class="cert-item">
+                            <input type="checkbox" id="phlebotomy-cert">
+                            <label for="phlebotomy-cert">Phlebotomy Certification</label>
+                        </div>
+                        <div class="cert-item">
+                            <input type="checkbox" id="xray-cert">
+                            <label for="xray-cert">X-Ray Certification</label>
+                        </div>
+                        <div class="cert-item">
+                            <input type="checkbox" id="dental-assist-cert">
+                            <label for="dental-assist-cert">Dental Assistant Certification</label>
+                        </div>
+                        <div class="cert-item">
+                            <input type="checkbox" id="preferred-cert-other" onchange="toggleOtherField('preferred-cert-other')">
+                            <label for="preferred-cert-other">Other Preferred Certification</label>
+                        </div>
+                        <div class="other-field" id="preferred-cert-other-field">
+                            <input type="text" placeholder="Please specify other preferred certifications...">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 3: Soft Skills & Cultural Assessment -->
+            <div class="step-content" id="step3">
+                <h2 style="color: #ffffff; margin-bottom: 30px;">🤝 Soft Skills & Cultural Assessment</h2>
+                
+                <div class="skill-selector">
+                    <div class="skill-category">
+                        <h3>💬 Communication Skills</h3>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="patient-communication">
+                            <div>
+                                <label for="patient-communication" class="skill-name">Patient Communication</label>
+                                <div class="skill-description">Explaining procedures, active listening, empathy</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="multilingual">
+                            <div>
+                                <label for="multilingual" class="skill-name">Multilingual Abilities</label>
+                                <div class="skill-description">Spanish, other languages for diverse patient base</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="phone-skills">
+                            <div>
+                                <label for="phone-skills" class="skill-name">Phone Etiquette</label>
+                                <div class="skill-description">Professional phone manner, appointment scheduling</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="communication-other" onchange="toggleOtherField('communication-other')">
+                            <div>
+                                <label for="communication-other" class="skill-name">Other Communication Skills</label>
+                                <div class="skill-description">Specify additional communication requirements</div>
+                            </div>
+                        </div>
+                        <div class="other-field" id="communication-other-field">
+                            <input type="text" placeholder="Please specify other communication skills...">
+                        </div>
+                    </div>
+
+                    <div class="skill-category">
+                        <h3>🎯 Work Style Preferences</h3>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="teamwork">
+                            <div>
+                                <label for="teamwork" class="skill-name">Team Collaboration</label>
+                                <div class="skill-description">Working effectively with colleagues</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="multitasking">
+                            <div>
+                                <label for="multitasking" class="skill-name">Multitasking</label>
+                                <div class="skill-description">Managing multiple priorities simultaneously</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="attention-detail">
+                            <div>
+                                <label for="attention-detail" class="skill-name">Attention to Detail</label>
+                                <div class="skill-description">Accuracy in documentation and procedures</div>
+                            </div>
+                        </div>
+                        
+                        <div class="skill-item">
+                            <input type="checkbox" class="skill-checkbox" id="workstyle-other" onchange="toggleOtherField('workstyle-other')">
+                            <div>
+                                <label for="workstyle-other" class="skill-name">Other Work Style Preferences</label>
+                                <div class="skill-description">Specify additional work style requirements</div>
+                            </div>
+                        </div>
+                        <div class="other-field" id="workstyle-other-field">
+                            <input type="text" placeholder="Please specify other work style preferences...">
+                        </div>
+                    </div>
+                </div>
+
+                <h3 style="color: #ffffff; margin: 30px 0 20px 0;">🏢 Practice Culture & Values</h3>
+                <div class="cultural-fit-grid">
+                    <div class="culture-card" onclick="toggleCulture(this)" data-culture="patient-first">
+                        <h4>Patient-First Approach</h4>
+                        <p>Prioritizing patient comfort and satisfaction</p>
+                    </div>
+                    
+                    <div class="culture-card" onclick="toggleCulture(this)" data-culture="collaborative">
+                        <h4>Collaborative Environment</h4>
+                        <p>Team-based decision making and support</p>
+                    </div>
+                    
+                    <div class="culture-card" onclick="toggleCulture(this)" data-culture="innovative">
+                        <h4>Innovation-Focused</h4>
+                        <p>Embracing new technologies and methods</p>
+                    </div>
+                    
+                    <div class="culture-card" onclick="toggleCulture(this)" data-culture="work-life-balance">
+                        <h4>Work-Life Balance</h4>
+                        <p>Supporting employee well-being</p>
+                    </div>
+                    
+                    <div class="culture-card" onclick="toggleCulture(this)" data-culture="growth-oriented">
+                        <h4>Growth-Oriented</h4>
+                        <p>Continuous learning and development</p>
+                    </div>
+                    
+                    <div class="culture-card" onclick="toggleCulture(this)" data-culture="high-volume">
+                        <h4>High-Volume Practice</h4>
+                        <p>Fast-paced, efficiency-focused environment</p>
+                    </div>
+                </div>
+
+                <div class="deal-breaker-section">
+                    <h3>🚫 Deal Breakers (Optional)</h3>
+                    <p>Describe any characteristics or behaviors that would automatically exclude a candidate:</p>
+                    <div class="form-group">
+                        <textarea id="dealbreakers" rows="4" placeholder="e.g., History of reliability issues, poor communication skills, unwillingness to learn, unprofessional behavior..."></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 4: Interview Configuration -->
+            <div class="step-content" id="step4">
+                <h2 style="color: #ffffff; margin-bottom: 30px;">⚙️ Interview Configuration</h2>
+                
+                <h3 style="color: #42a5f5; margin-bottom: 20px;">📋 Interview Format</h3>
+                <div class="interview-format-grid">
+                    <div class="format-card" onclick="selectFormat(this)" data-format="comprehensive">
+                        <h4>Comprehensive Interview</h4>
+                        <p>45-60 minutes</p>
+                        <p>Technical + Behavioral + Scenario questions</p>
+                    </div>
+                    
+                    <div class="format-card" onclick="selectFormat(this)" data-format="focused">
+                        <h4>Focused Assessment</h4>
+                        <p>25-35 minutes</p>
+                        <p>Key skills and cultural fit only</p>
+                    </div>
+                    
+                    <div class="format-card" onclick="selectFormat(this)" data-format="screening">
+                        <h4>Initial Screening</h4>
+                        <p>15-20 minutes</p>
+                        <p>Basic qualifications and interest</p>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="difficulty-level">Question Difficulty</label>
+                        <select id="difficulty-level">
+                            <option value="beginner">Beginner Level</option>
+                            <option value="intermediate" selected>Intermediate Level</option>
+                            <option value="advanced">Advanced Level</option>
+                            <option value="mixed">Mixed Difficulty</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="interview-tone">Interview Tone</label>
+                        <select id="interview-tone">
+                            <option value="friendly" selected>Friendly & Conversational</option>
+                            <option value="professional">Professional & Formal</option>
+                            <option value="supportive">Supportive & Encouraging</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="custom-questions">Custom Questions (Optional)</label>
+                    <textarea id="custom-questions" rows="4" placeholder="Add any specific questions you'd like included in the interview..."></textarea>
+                </div>
+            </div>
+
+            <!-- Step 5: Review & Submit -->
+            <div class="step-content" id="step5">
+                <h2 style="color: #ffffff; margin-bottom: 30px;">📊 Review & Submit</h2>
+                
+                <div class="summary-card">
+                    <h3>Interview Configuration Summary</h3>
+                    <div class="summary-stats">
+                        <div class="stat-item">
+                            <span class="stat-number" id="selected-skills-count">0</span>
+                            <span class="stat-label">Selected Skills</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-number" id="culture-factors-count">0</span>
+                            <span class="stat-label">Culture Factors</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-number" id="estimated-duration">30</span>
+                            <span class="stat-label">Minutes</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="background: #f8f9fa; padding: 25px; border-radius: 15px; margin-bottom: 30px;">
+                    <h3 style="color: #2c3e50; margin-bottom: 20px;">📋 Configuration Details</h3>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 30px;">
+                        <div>
+                            <h4 style="color: #1e88e5; margin-bottom: 15px;">Position Details</h4>
+                            <p><strong>Role:</strong> <span id="summary-role">Not selected</span></p>
+                            <p><strong>Practice:</strong> <span id="summary-practice">Not specified</span></p>
+                            <p><strong>Location:</strong> <span id="summary-location">Not specified</span></p>
+                            <p><strong>Experience Level:</strong> <span id="summary-experience">Not specified</span></p>
+                        </div>
+                        
+                        <div>
+                            <h4 style="color: #1e88e5; margin-bottom: 15px;">Interview Format</h4>
+                            <p><strong>Type:</strong> <span id="summary-format">Not selected</span></p>
+                            <p><strong>Difficulty:</strong> <span id="summary-difficulty">Intermediate</span></p>
+                            <p><strong>Tone:</strong> <span id="summary-tone">Friendly & Conversational</span></p>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 25px;">
+                        <h4 style="color: #1e88e5; margin-bottom: 15px;">Selected Skills & Certifications</h4>
+                        <div id="skills-summary">
+                            <p style="color: #6c757d; font-style: italic;">No skills selected yet</p>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 25px;">
+                        <h4 style="color: #1e88e5; margin-bottom: 15px;">Cultural Values</h4>
+                        <div id="culture-summary">
+                            <p style="color: #6c757d; font-style: italic;">No culture factors selected yet</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="interviewer-name">Your Name</label>
+                        <input type="text" id="interviewer-name" placeholder="Enter your name">
+                    </div>
+                    <div class="form-group">
+                        <label for="contact-email">Contact Email</label>
+                        <input type="email" id="contact-email" placeholder="your.email@practice.com">
+                    </div>
+                </div>
+
+                <div style="text-align: center; margin-top: 30px;">
+                    <button class="nav-btn" onclick="submitCriteria()" style="background: #42a5f5; font-size: 1.2rem; padding: 20px 40px;">
+                        📧 Submit Interview Criteria
+                    </button>
+                </div>
+            </div>
+
+            <!-- Success Page -->
+            <div class="step-content" id="success" style="display: none;">
+                <div class="submission-success">
+                    <h2>✅ Interview Criteria Submitted Successfully!</h2>
+                    <p>Your requirements have been sent to AlphaSource for review</p>
+                </div>
+
+                <div class="summary-section">
+                    <h4>📋 Submitted Configuration</h4>
+                    <div id="final-summary"></div>
+                </div>
+
+                <div style="background: white; padding: 25px; border-radius: 15px; margin-top: 20px;">
+                    <h3 style="color: #2c3e50; margin-bottom: 20px;">📧 Next Steps</h3>
+                    <ol style="color: #6c757d; line-height: 1.8;">
+                        <li>AlphaSource will review your interview criteria within 24 hours</li>
+                        <li>We'll create a customized virtual interviewer based on your specifications</li>
+                        <li>You'll receive an interview link to share with candidates</li>
+                        <li>Access detailed candidate reports and rankings through our dashboard</li>
+                    </ol>
+                    
+                    <div style="text-align: center; margin-top: 30px;">
+                        <button class="nav-btn" onclick="createAnother()" style="background: linear-gradient(135deg, #1e88e5 0%, #1976d2 100%);">
+                            ➕ Create Another Configuration
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="navigation">
+                <button class="nav-btn secondary" id="prevBtn" onclick="changeStep(-1)" disabled>← Previous</button>
+                <button class="nav-btn" id="nextBtn" onclick="changeStep(1)">Next →</button>
+            </div>
+        </div>
+    </div>
+
+  
+
+    <script>
+        let currentStep = 1;
+        let selectedRole = '';
+        let selectedCultures = new Set();
+        let selectedFormat = '';
+
+        function toggleOtherField(fieldId) {
+            const checkbox = document.getElementById(fieldId);
+            const field = document.getElementById(fieldId + '-field');
+            
+            if (checkbox && field) {
+                if (checkbox.checked) {
+                    field.style.display = 'block';
+                } else {
+                    field.style.display = 'none';
+                    const input = field.querySelector('input');
+                    if (input) input.value = '';
+                }
+            }
+        }
+
+        function selectRole(element, role) {
+            document.querySelectorAll('.role-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+            
+            element.classList.add('selected');
+            selectedRole = role;
+            
+            updateSkillsForRole(role);
+        }
+
+        function updateSkillsForRole(role) {
+            const clinicalSkills = document.getElementById('clinical-skills');
+            const dentalSkills = document.getElementById('dental-skills');
+            
+            if (role === 'dental-assistant' || role === 'dental-hygienist') {
+                if (clinicalSkills) clinicalSkills.style.display = 'block';
+                if (dentalSkills) dentalSkills.style.display = 'block';
+            } else if (role === 'dental-receptionist' || role === 'treatment-coordinator') {
+                if (clinicalSkills) clinicalSkills.style.display = 'none';
+                if (dentalSkills) dentalSkills.style.display = 'block';
+            } else if (role === 'practice-manager') {
+                if (clinicalSkills) clinicalSkills.style.display = 'block';
+                if (dentalSkills) dentalSkills.style.display = 'block';
+            } else {
+                if (clinicalSkills) clinicalSkills.style.display = 'block';
+                if (dentalSkills) dentalSkills.style.display = 'none';
+            }
+        }
+
+        function toggleCulture(element) {
+            const culture = element.getAttribute('data-culture');
+            if (selectedCultures.has(culture)) {
+                selectedCultures.delete(culture);
+                element.classList.remove('selected');
+            } else {
+                selectedCultures.add(culture);
+                element.classList.add('selected');
+            }
+        }
+
+        function selectFormat(element) {
+            document.querySelectorAll('.format-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+            element.classList.add('selected');
+            selectedFormat = element.getAttribute('data-format');
+            
+            const durations = { 'comprehensive': 60, 'focused': 30, 'screening': 20 };
+            const durationEl = document.getElementById('estimated-duration');
+            if (durationEl) durationEl.textContent = durations[selectedFormat] || 30;
+        }
+
+        function changeStep(direction) {
+            if (direction === 1 && !validateCurrentStep()) return;
+            
+            currentStep += direction;
+            if (currentStep < 1) currentStep = 1;
+            if (currentStep > 5) currentStep = 5;
+            
+            showStep(currentStep);
+            updateProgress();
+            updateNavigation();
+        }
+
+        function validateCurrentStep() {
+            if (currentStep === 1) {
+                if (!selectedRole) {
+                    alert('Please select a position type');
+                    return false;
+                }
+                const practiceName = document.getElementById('practiceName');
+                if (!practiceName || !practiceName.value) {
+                    alert('Please enter practice name');
+                    return false;
+                }
+            } else if (currentStep === 4) {
+                if (!selectedFormat) {
+                    alert('Please select an interview format');
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        function showStep(step) {
+            document.querySelectorAll('.step-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            
+            const stepEl = document.getElementById('step' + step);
+            if (stepEl) stepEl.classList.add('active');
+            
+            if (step === 5) updateSummary();
+        }
+
+        function updateProgress() {
+            const progress = (currentStep / 5) * 100;
+            const progressBar = document.getElementById('progressBar');
+            if (progressBar) progressBar.style.width = progress + '%';
+            
+            document.querySelectorAll('.step').forEach((step, index) => {
+                step.classList.remove('active', 'completed');
+                if (index + 1 < currentStep) {
+                    step.classList.add('completed');
+                } else if (index + 1 === currentStep) {
+                    step.classList.add('active');
+                }
+            });
+        }
+
+        function updateNavigation() {
+            const prevBtn = document.getElementById('prevBtn');
+            const nextBtn = document.getElementById('nextBtn');
+            
+            if (prevBtn) prevBtn.disabled = currentStep === 1;
+            if (nextBtn) {
+                if (currentStep === 5) {
+                    nextBtn.style.display = 'none';
+                } else {
+                    nextBtn.style.display = 'block';
+                    nextBtn.textContent = currentStep === 4 ? 'Review →' : 'Next →';
+                }
+            }
+        }
+
+        function updateSummary() {
+            const roleNames = {
+                'dental-assistant': 'Dental Assistant',
+                'dental-hygienist': 'Dental Hygienist',
+                'dental-receptionist': 'Dental Receptionist',
+                'treatment-coordinator': 'Treatment Coordinator',
+                'practice-manager': 'Practice Manager',
+                'medical-assistant': 'Medical Assistant',
+                'medical-receptionist': 'Medical Receptionist',
+                'medical-billing': 'Medical Billing Specialist'
+            };
+            
+            // Update basic info
+            const summaryRole = document.getElementById('summary-role');
+            if (summaryRole) summaryRole.textContent = roleNames[selectedRole] || 'Not selected';
+            
+            const summaryPractice = document.getElementById('summary-practice');
+            if (summaryPractice) {
+                const practiceName = document.getElementById('practiceName');
+                summaryPractice.textContent = practiceName ? practiceName.value || 'Not specified' : 'Not specified';
+            }
+            
+            const summaryLocation = document.getElementById('summary-location');
+            if (summaryLocation) {
+                const location = document.getElementById('location');
+                summaryLocation.textContent = location ? location.value || 'Not specified' : 'Not specified';
+            }
+            
+            const summaryExperience = document.getElementById('summary-experience');
+            if (summaryExperience) {
+                const experienceLevel = document.getElementById('experienceLevel');
+                summaryExperience.textContent = experienceLevel ? experienceLevel.options[experienceLevel.selectedIndex].text || 'Not specified' : 'Not specified';
+            }
+            
+            const summaryFormat = document.getElementById('summary-format');
+            if (summaryFormat) summaryFormat.textContent = selectedFormat ? selectedFormat.charAt(0).toUpperCase() + selectedFormat.slice(1) : 'Not selected';
+            
+            const summaryDifficulty = document.getElementById('summary-difficulty');
+            if (summaryDifficulty) {
+                const difficultyLevel = document.getElementById('difficulty-level');
+                summaryDifficulty.textContent = difficultyLevel ? difficultyLevel.options[difficultyLevel.selectedIndex].text : 'Intermediate';
+            }
+            
+            const summaryTone = document.getElementById('summary-tone');
+            if (summaryTone) {
+                const interviewTone = document.getElementById('interview-tone');
+                summaryTone.textContent = interviewTone ? interviewTone.options[interviewTone.selectedIndex].text : 'Friendly & Conversational';
+            }
+            
+            // Collect skills
+            const selectedSkills = [];
+            document.querySelectorAll('.skill-checkbox:checked').forEach(checkbox => {
+                if (!checkbox.id.includes('-other')) {
+                    const skillNameElement = checkbox.parentElement.querySelector('.skill-name');
+                    if (skillNameElement) selectedSkills.push(skillNameElement.textContent);
+                }
+            });
+            
+            // Add certifications
+            const certCheckboxes = ['cpr', 'bls', 'ma-cert', 'phlebotomy-cert', 'xray-cert', 'dental-assist-cert'];
+            certCheckboxes.forEach(id => {
+                const checkbox = document.getElementById(id);
+                if (checkbox && checkbox.checked) {
+                    const label = checkbox.nextElementSibling;
+                    if (label) selectedSkills.push(label.textContent);
+                }
+            });
+            
+            // Update skills summary
+            const skillsCountEl = document.getElementById('selected-skills-count');
+            if (skillsCountEl) skillsCountEl.textContent = selectedSkills.length;
+            
+            const skillsSummaryEl = document.getElementById('skills-summary');
+            if (skillsSummaryEl) {
+                if (selectedSkills.length > 0) {
+                    skillsSummaryEl.innerHTML = '<div class="skills-list">' + 
+                        selectedSkills.map(skill => '<span class="skill-tag">' + skill + '</span>').join('') + '</div>';
+                } else {
+                    skillsSummaryEl.innerHTML = '<p style="color: #6c757d; font-style: italic;">No skills selected</p>';
+                }
+            }
+            
+            // Update culture summary
+            const cultureCountEl = document.getElementById('culture-factors-count');
+            if (cultureCountEl) cultureCountEl.textContent = selectedCultures.size;
+            
+            const cultureSummaryEl = document.getElementById('culture-summary');
+            if (cultureSummaryEl) {
+                const cultureNames = {
+                    'patient-first': 'Patient-First Approach',
+                    'collaborative': 'Collaborative Environment',
+                    'innovative': 'Innovation-Focused',
+                    'work-life-balance': 'Work-Life Balance',
+                    'growth-oriented': 'Growth-Oriented',
+                    'high-volume': 'High-Volume Practice'
+                };
+                
+                if (selectedCultures.size > 0) {
+                    const cultureList = Array.from(selectedCultures).map(culture => cultureNames[culture] || culture);
+                    cultureSummaryEl.innerHTML = '<div class="cultures-list">' + 
+                        cultureList.map(culture => '<span class="culture-tag">' + culture + '</span>').join('') + '</div>';
+                } else {
+                    cultureSummaryEl.innerHTML = '<p style="color: #6c757d; font-style: italic;">No culture factors selected</p>';
+                }
+            }
+        }
+
+        function generateDetailedSummary() {
+            const roleNames = {
+                'dental-assistant': 'Dental Assistant',
+                'dental-hygienist': 'Dental Hygienist',
+                'dental-receptionist': 'Dental Receptionist',
+                'treatment-coordinator': 'Treatment Coordinator',
+                'practice-manager': 'Practice Manager',
+                'medical-assistant': 'Medical Assistant',
+                'medical-receptionist': 'Medical Receptionist',
+                'medical-billing': 'Medical Billing Specialist'
+            };
+
+            const cultureNames = {
+                'patient-first': 'Patient-First Approach',
+                'collaborative': 'Collaborative Environment',
+                'innovative': 'Innovation-Focused',
+                'work-life-balance': 'Work-Life Balance',
+                'growth-oriented': 'Growth-Oriented',
+                'high-volume': 'High-Volume Practice'
+            };
+
+            const practiceName = document.getElementById('practiceName');
+            const location = document.getElementById('location');
+            const experienceLevel = document.getElementById('experienceLevel');
+            const employmentType = document.getElementById('employmentType');
+            const difficultyLevel = document.getElementById('difficulty-level');
+            const interviewTone = document.getElementById('interview-tone');
+
+            let summary = '<div class="summary-item"><strong>Position:</strong> ' + (roleNames[selectedRole] || 'Not selected') + '</div>' +
+                '<div class="summary-item"><strong>Practice Name:</strong> ' + (practiceName ? practiceName.value || 'Not specified' : 'Not specified') + '</div>' +
+                '<div class="summary-item"><strong>Location:</strong> ' + (location ? location.value || 'Not specified' : 'Not specified') + '</div>' +
+                '<div class="summary-item"><strong>Experience Level:</strong> ' + (experienceLevel ? experienceLevel.options[experienceLevel.selectedIndex].text || 'Not specified' : 'Not specified') + '</div>' +
+                '<div class="summary-item"><strong>Employment Type:</strong> ' + (employmentType ? employmentType.options[employmentType.selectedIndex].text || 'Not specified' : 'Not specified') + '</div>' +
+                '<div class="summary-item"><strong>Interview Format:</strong> ' + (selectedFormat ? selectedFormat.charAt(0).toUpperCase() + selectedFormat.slice(1) : 'Not selected') + '</div>' +
+                '<div class="summary-item"><strong>Difficulty Level:</strong> ' + (difficultyLevel ? difficultyLevel.options[difficultyLevel.selectedIndex].text : 'Intermediate') + '</div>' +
+                '<div class="summary-item"><strong>Interview Tone:</strong> ' + (interviewTone ? interviewTone.options[interviewTone.selectedIndex].text : 'Friendly & Conversational') + '</div>';
+
+            // Add selected skills
+            const selectedSkills = [];
+            document.querySelectorAll('.skill-checkbox:checked').forEach(checkbox => {
+                if (!checkbox.id.includes('-other')) {
+                    const skillNameElement = checkbox.parentElement.querySelector('.skill-name');
+                    if (skillNameElement) selectedSkills.push(skillNameElement.textContent);
+                }
+            });
+            
+            // Add certifications
+            const certCheckboxes = ['cpr', 'bls', 'ma-cert', 'phlebotomy-cert', 'xray-cert', 'dental-assist-cert'];
+            certCheckboxes.forEach(id => {
+                const checkbox = document.getElementById(id);
+                if (checkbox && checkbox.checked) {
+                    const label = checkbox.nextElementSibling;
+                    if (label) selectedSkills.push(label.textContent);
+                }
+            });
+
+            // Add "Other" entries
+            const otherIds = ['clinical-other', 'dental-other', 'software-other', 'communication-other', 'workstyle-other', 'required-cert-other', 'preferred-cert-other'];
+            otherIds.forEach(id => {
+                const checkbox = document.getElementById(id);
+                if (checkbox && checkbox.checked) {
+                    const field = document.getElementById(id + '-field');
+                    if (field) {
+                        const input = field.querySelector('input');
+                        if (input && input.value.trim()) {
+                            const prefix = id.replace('-other', '').replace('-', ' ');
+                            selectedSkills.push('Other ' + prefix + ': ' + input.value.trim());
+                        }
+                    }
+                }
+            });
+
+            if (selectedSkills.length > 0) {
+                summary += '<div style="margin-top: 15px;"><strong>Required Skills & Certifications:</strong><div class="skills-list" style="margin-top: 8px;">' + 
+                    selectedSkills.map(skill => '<span class="skill-tag">' + skill + '</span>').join('') + '</div></div>';
+            }
+
+            // Add selected cultures
+            if (selectedCultures.size > 0) {
+                const cultureList = Array.from(selectedCultures).map(culture => cultureNames[culture] || culture);
+                summary += '<div style="margin-top: 15px;"><strong>Cultural Values:</strong><div class="cultures-list" style="margin-top: 8px;">' + 
+                    cultureList.map(culture => '<span class="culture-tag">' + culture + '</span>').join('') + '</div></div>';
+            }
+
+            // Add deal breakers if specified
+            const dealbreakers = document.getElementById('dealbreakers');
+            if (dealbreakers && dealbreakers.value.trim()) {
+                summary += '<div style="margin-top: 15px;"><strong>Deal Breakers:</strong><div style="margin-top: 8px; color: #6c757d;">' + dealbreakers.value.trim() + '</div></div>';
+            }
+
+            // Add custom questions if specified
+            const customQuestions = document.getElementById('custom-questions');
+            if (customQuestions && customQuestions.value.trim()) {
+                summary += '<div style="margin-top: 15px;"><strong>Custom Questions:</strong><div style="margin-top: 8px; color: #6c757d;">' + customQuestions.value.trim() + '</div></div>';
+            }
+
+            return summary;
+        }
+
+        function submitCriteria() {
+            const interviewerName = document.getElementById('interviewer-name');
+            const contactEmail = document.getElementById('contact-email');
+            
+            if (!interviewerName || !interviewerName.value || !contactEmail || !contactEmail.value) {
+                alert('Please enter your name and contact email');
+                return;
+            }
+            
+            // Show loading state
+            const submitBtn = event.target;
+            if (submitBtn) {
+                submitBtn.textContent = '📤 Submitting...';
+                submitBtn.disabled = true;
+            }
+            
+            // Generate detailed summary
+            const detailedSummary = generateDetailedSummary();
+            
+            // Collect selected skills
+            const selectedSkills = [];
+            document.querySelectorAll('.skill-checkbox:checked').forEach(checkbox => {
+                if (!checkbox.id.includes('-other')) {
+                    const skillNameElement = checkbox.parentElement.querySelector('.skill-name');
+                    if (skillNameElement) selectedSkills.push(skillNameElement.textContent);
+                }
+            });
+            
+            // Add certifications
+            const certCheckboxes = ['cpr', 'bls', 'ma-cert', 'phlebotomy-cert', 'xray-cert', 'dental-assist-cert'];
+            certCheckboxes.forEach(id => {
+                const checkbox = document.getElementById(id);
+                if (checkbox && checkbox.checked) {
+                    const label = checkbox.nextElementSibling;
+                    if (label) selectedSkills.push(label.textContent);
+                }
+            });
+            
+            // Add "Other" entries
+            const otherIds = ['clinical-other', 'dental-other', 'software-other', 'communication-other', 'workstyle-other', 'required-cert-other', 'preferred-cert-other'];
+            otherIds.forEach(id => {
+                const checkbox = document.getElementById(id);
+                if (checkbox && checkbox.checked) {
+                    const field = document.getElementById(id + '-field');
+                    if (field) {
+                        const input = field.querySelector('input');
+                        if (input && input.value.trim()) {
+                            selectedSkills.push(`Other ${id.replace('-other', '').replace('-', ' ')}: ${input.value.trim()}`);
+                        }
+                    }
+                }
+            });
+            
+            // Create form data string for Netlify
+            const formData = new URLSearchParams();
+            formData.append('form-name', 'healthcare-interviewer');
+            formData.append('interviewer-name', interviewerName.value);
+            formData.append('contact-email', contactEmail.value);
+            formData.append('selected-role', selectedRole);
+            formData.append('practice-name', document.getElementById('practiceName').value || 'Not specified');
+            formData.append('location', document.getElementById('location').value || 'Not specified');
+            formData.append('experience-level', document.getElementById('experienceLevel').value || 'Not specified');
+            formData.append('employment-type', document.getElementById('employmentType').value || 'Not specified');
+            formData.append('interview-format', selectedFormat || 'Not selected');
+            formData.append('difficulty-level', document.getElementById('difficulty-level').value || 'Intermediate');
+            formData.append('interview-tone', document.getElementById('interview-tone').value || 'Friendly');
+            formData.append('selected-skills', selectedSkills.join(', ') || 'None selected');
+            formData.append('cultural-values', Array.from(selectedCultures).join(', ') || 'None selected');
+            formData.append('deal-breakers', document.getElementById('dealbreakers').value || 'None specified');
+            formData.append('custom-questions', document.getElementById('custom-questions').value || 'None specified');
+            formData.append('full-summary', detailedSummary.replace(/<[^>]*>/g, ''));
+            
+            // Submit to Netlify
+            fetch('/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: formData.toString()
+            })
+            .then(response => {
+                if (response.ok) {
+                    // Show success page
+                    const step5 = document.getElementById('step5');
+                    const success = document.getElementById('success');
+                    const navigation = document.querySelector('.navigation');
+                    
+                    if (step5) step5.style.display = 'none';
+                    if (success) success.style.display = 'block';
+                    if (navigation) navigation.style.display = 'none';
+                    
+                    // Populate final summary
+                    const finalSummary = document.getElementById('final-summary');
+                    if (finalSummary) finalSummary.innerHTML = detailedSummary;
+                    
+                    console.log('Form submitted successfully to Netlify');
+                } else {
+                    throw new Error('Network response was not ok');
+                }
+            })
+            .catch((error) => {
+                console.error('Form submission failed:', error);
+                alert('Failed to submit form. Please try again or contact support.');
+                
+                // Reset button
+                if (submitBtn) {
+                    submitBtn.textContent = '📧 Submit Interview Criteria';
+                    submitBtn.disabled = false;
+                }
+            });
+        }
+
+        function createAnother() {
+            if (confirm('Are you sure you want to create another configuration? Your current setup will be lost.')) {
+                location.reload();
+            }
+        }
+
+       
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            updateProgress();
+            updateNavigation();
+        });
+    </script>
+</body>
+</html>
