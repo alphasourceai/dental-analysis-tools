@@ -68,6 +68,69 @@ def _normalize_uuid(value):
     return None
 
 
+def _extract_error_payload(exc):
+    if isinstance(exc, dict):
+        return exc
+    if getattr(exc, "args", None):
+        for arg in exc.args:
+            if isinstance(arg, dict):
+                return arg
+    return None
+
+
+def _extract_error_status(payload):
+    if not payload:
+        return None
+    for key in ("statusCode", "status_code", "status"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+    return None
+
+
+def _extract_error_message(payload):
+    if not payload:
+        return ""
+    for key in ("message", "error", "msg", "details"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _is_bucket_already_exists_error(exc):
+    payload = _extract_error_payload(exc)
+    status_code = _extract_error_status(payload)
+    message = _extract_error_message(payload)
+    if status_code is None:
+        status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if not message:
+        message = str(exc)
+    if status_code == 409:
+        return True
+    return "already exists" in message.lower()
+
+
+def ensure_bucket_exists(bucket_name):
+    client = _get_supabase_admin_client()
+    if not client:
+        return False
+    try:
+        client.storage.create_bucket(bucket_name, options={"public": False})
+        logging.info("Supabase bucket ensured (created): %s", bucket_name)
+        return True
+    except Exception as exc:
+        if _is_bucket_already_exists_error(exc):
+            logging.info("Supabase bucket ensured (exists): %s", bucket_name)
+            return True
+        logging.error("Supabase bucket creation failed for %s: %s", bucket_name, str(exc))
+        return False
+
+
 def _ensure_storage_buckets():
     global _buckets_checked
     if _buckets_checked:
@@ -75,19 +138,12 @@ def _ensure_storage_buckets():
     client = _get_supabase_admin_client()
     if not client:
         return
-    try:
-        buckets = client.storage.list_buckets()
-        if hasattr(buckets, "data"):
-            buckets = buckets.data
-        if isinstance(buckets, dict):
-            buckets = buckets.get("data") or buckets.get("buckets") or []
-        existing = {bucket.get("name") for bucket in buckets if isinstance(bucket, dict)}
-        for bucket_name in REQUIRED_BUCKETS:
-            if bucket_name not in existing:
-                client.storage.create_bucket(bucket_name, options={"public": False})
+    results = [ensure_bucket_exists(bucket_name) for bucket_name in REQUIRED_BUCKETS]
+    if all(results):
         _buckets_checked = True
-    except Exception as exc:
-        logging.error(f"Supabase bucket initialization failed: {str(exc)}")
+        logging.info("Supabase bucket initialization complete")
+    else:
+        logging.error("Supabase bucket initialization incomplete")
 
 
 def persist_upload_file(file_bytes, user_email, tool_name, original_filename, content_type=None, upload_id=None):
@@ -102,11 +158,13 @@ def persist_upload_file(file_bytes, user_email, tool_name, original_filename, co
     storage_path = f"consulting-uploads/{user_email}/{date_prefix}/{tool_name}/{unique_name}"
 
     try:
+        logging.info("Supabase Storage upload attempt: %s -> %s", original_filename, storage_path)
         client.storage.from_("consulting-uploads").upload(
             storage_path,
             file_bytes,
             {"content-type": content_type, "upsert": False},
         )
+        logging.info("Supabase Storage upload succeeded: %s -> %s", original_filename, storage_path)
     except Exception as exc:
         logging.error(f"Supabase Storage upload failed for {original_filename}: {str(exc)}")
         return None
@@ -129,6 +187,7 @@ def persist_upload_file(file_bytes, user_email, tool_name, original_filename, co
             )
         )
         db.commit()
+        logging.info("Supabase upload metadata saved: %s", upload_file_id)
         return upload_file_id
     except Exception as exc:
         logging.error(f"Error saving upload_files record for {original_filename}: {str(exc)}")
