@@ -1,19 +1,13 @@
 import streamlit as st
 import json
-import os
-from sqlalchemy.orm import Session
-from models import get_db, get_users, get_uploads, delete_user, get_uploads_by_email, create_admin, update_admin_password, get_admin_by_username, get_all_admins, delete_admin, Admin, User, Upload
+from models import get_db, get_users, get_uploads, delete_user, get_uploads_by_email, User, Upload
 from database import SessionLocal
 import logging
 from datetime import datetime
+from supabase_utils import persist_upload_file, update_upload_file_upload_id
 
 # Admin Dashboard Page
 def display_admin_dashboard():
-    # Check if admin must change password
-    if st.session_state.get("admin_data", {}).get("must_change_password", False):
-        display_force_password_change()
-        return
-    
     # Header with logout button
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -21,8 +15,8 @@ def display_admin_dashboard():
     with col2:
         if st.button("Logout", key="logout_button", type="secondary"):
             st.session_state.is_admin_logged_in = False
-            if "admin_data" in st.session_state:
-                del st.session_state["admin_data"]
+            st.session_state.admin_session = None
+            st.session_state.admin_user = None
             st.session_state.page = "Analyzer"
             st.rerun()
     
@@ -384,11 +378,21 @@ def display_document_analysis():
                 for tool_name, file in uploaded_files.items():
                     if file is not None:
                         with st.spinner(f"Analyzing {tool_name}..."):
+                            file.seek(0)
                             # Read file content
                             file_content = file.read()
-                            file.seek(0)
                             file_name = file.name
                             file_type = file.type
+
+                            upload_file_id = persist_upload_file(
+                                file_bytes=file_content,
+                                user_email=email,
+                                tool_name=tool_name,
+                                original_filename=file_name,
+                                content_type=file_type,
+                            )
+
+                            file.seek(0)
                             
                             # Extract text from file
                             if file_type == "application/pdf":
@@ -427,6 +431,8 @@ def display_document_analysis():
                                 upload_db.add(new_upload)
                                 upload_db.commit()
                                 logging.info(f"Upload saved (admin): {file_name}")
+
+                                update_upload_file_upload_id(upload_file_id, new_upload.id)
                             except Exception as e:
                                 logging.error(f"Error saving upload: {str(e)}")
                                 upload_db.rollback()
@@ -441,164 +447,4 @@ def display_document_analysis():
 
 def display_admin_management():
     st.markdown("<h3 style='margin-top: 1.5rem;'>Admin Management</h3>", unsafe_allow_html=True)
-    
-    # Get current admin info
-    current_admin = st.session_state.get("admin_data", {})
-    current_username = current_admin.get("username", "")
-    
-    # Change Password Section
-    st.markdown("#### Change Your Password")
-    with st.form("change_password_form"):
-        new_password = st.text_input("New Password", type="password")
-        confirm_password = st.text_input("Confirm New Password", type="password")
-        submit_change = st.form_submit_button("Change Password")
-        
-        if submit_change:
-            if not new_password or not confirm_password:
-                st.error("Please fill in all fields")
-            elif new_password != confirm_password:
-                st.error("Passwords do not match")
-            elif len(new_password) < 8:
-                st.error("Password must be at least 8 characters long")
-            else:
-                db = next(get_db())
-                try:
-                    if update_admin_password(db, current_username, new_password):
-                        st.success("Password changed successfully!")
-                    else:
-                        st.error("Failed to change password")
-                finally:
-                    db.close()
-    
-    st.divider()
-    
-    # Create New Admin Section
-    st.markdown("#### Create New Admin User")
-    st.info("New admins will be required to change their temporary password on first login")
-    
-    with st.form("create_admin_form"):
-        new_admin_username = st.text_input("Username")
-        new_admin_email = st.text_input("Email")
-        temp_password = st.text_input("Temporary Password", type="password")
-        submit_create = st.form_submit_button("Create Admin")
-        
-        if submit_create:
-            if not new_admin_username or not new_admin_email or not temp_password:
-                st.error("Please fill in all fields")
-            elif len(temp_password) < 8:
-                st.error("Password must be at least 8 characters long")
-            else:
-                db = next(get_db())
-                try:
-                    existing_admin = get_admin_by_username(db, new_admin_username)
-                    if existing_admin:
-                        st.error(f"Admin user '{new_admin_username}' already exists")
-                    else:
-                        create_admin(db, new_admin_username, temp_password, new_admin_email, must_change_password=True)
-                        st.success(f"Admin user '{new_admin_username}' created successfully! They must change their password on first login.")
-                        logging.info(f"New admin created: {new_admin_username} by {current_username}")
-                except Exception as e:
-                    st.error(f"Error creating admin: {str(e)}")
-                    logging.error(f"Error creating admin: {str(e)}")
-                finally:
-                    db.close()
-    
-    st.divider()
-    
-    # List existing admins
-    st.markdown("#### Existing Admin Accounts")
-    db = next(get_db())
-    try:
-        admins = get_all_admins(db)
-        admin_count = len(admins)
-        
-        if admins:
-            for idx, admin in enumerate(admins):
-                col1, col2, col3 = st.columns([4, 2, 1])
-                
-                with col1:
-                    status = "⚠️ Must change password" if admin.must_change_password else "✅ Active"
-                    is_current = "(You)" if admin.username == current_username else ""
-                    st.write(f"**{admin.username}** {is_current}")
-                    st.caption(f"{admin.email or 'No email'} - {status}")
-                
-                with col2:
-                    pass
-                
-                with col3:
-                    is_self = admin.username == current_username
-                    is_last = admin_count <= 1
-                    
-                    if is_self:
-                        st.button("🗑️", key=f"del_admin_{idx}", disabled=True, help="Cannot delete your own account")
-                    elif is_last:
-                        st.button("🗑️", key=f"del_admin_{idx}", disabled=True, help="Cannot delete the last admin")
-                    else:
-                        if st.button("🗑️", key=f"del_admin_{idx}", help=f"Delete {admin.username}"):
-                            st.session_state[f'confirm_delete_admin_{admin.username}'] = True
-                
-                if st.session_state.get(f'confirm_delete_admin_{admin.username}'):
-                    st.warning(f"Are you sure you want to delete admin **{admin.username}**? This action cannot be undone.")
-                    confirm_col1, confirm_col2 = st.columns(2)
-                    with confirm_col1:
-                        if st.button("Yes, Delete", key=f"confirm_yes_admin_{idx}", type="primary"):
-                            delete_db = next(get_db())
-                            try:
-                                success, message = delete_admin(delete_db, admin.username, current_username)
-                                if success:
-                                    st.success(message)
-                                    logging.info(f"Admin '{admin.username}' deleted by {current_username}")
-                                    del st.session_state[f'confirm_delete_admin_{admin.username}']
-                                    st.rerun()
-                                else:
-                                    st.error(message)
-                            except Exception as e:
-                                st.error(f"Error deleting admin: {str(e)}")
-                                logging.error(f"Error deleting admin {admin.username}: {str(e)}")
-                            finally:
-                                delete_db.close()
-                    with confirm_col2:
-                        if st.button("Cancel", key=f"confirm_no_admin_{idx}"):
-                            del st.session_state[f'confirm_delete_admin_{admin.username}']
-                            st.rerun()
-                
-                st.divider()
-        else:
-            st.write("No admin accounts found")
-    finally:
-        db.close()
-
-def display_force_password_change():
-    st.markdown("<h1 style='margin-top: 1.5rem;'>Password Change Required</h1>", unsafe_allow_html=True)
-    st.warning("You must change your password before accessing the dashboard.")
-    
-    current_admin = st.session_state.get("admin_data", {})
-    current_username = current_admin.get("username", "")
-    
-    with st.form("force_password_change_form"):
-        new_password = st.text_input("New Password", type="password")
-        confirm_password = st.text_input("Confirm New Password", type="password")
-        submit = st.form_submit_button("Change Password")
-        
-        if submit:
-            if not new_password or not confirm_password:
-                st.error("Please fill in all fields")
-            elif new_password != confirm_password:
-                st.error("Passwords do not match")
-            elif len(new_password) < 8:
-                st.error("Password must be at least 8 characters long")
-            else:
-                db = next(get_db())
-                try:
-                    if update_admin_password(db, current_username, new_password, must_change=False):
-                        logging.info(f"Forced password change completed for admin: {current_username}")
-                        st.success("Password changed successfully! Redirecting to dashboard...")
-                        st.session_state.admin_data["must_change_password"] = False
-                        st.rerun()
-                    else:
-                        st.error("Failed to change password")
-                except Exception as e:
-                    logging.error(f"Error during forced password change for {current_username}: {str(e)}")
-                    st.error(f"Error: {str(e)}")
-                finally:
-                    db.close()
+    st.info("Admin access is managed through Supabase Auth and the admin_users table.")
