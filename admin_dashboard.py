@@ -14,6 +14,23 @@ def normalize_email(raw_email: str) -> str:
 
 # Admin Dashboard Page
 def display_admin_dashboard():
+    st.markdown("""
+    <style>
+    /* Admin-only expander summary styling to match dashboard background */
+    details > summary {
+        background-color: #061551 !important;
+        color: #EBFEFF !important;
+    }
+    details > summary:hover,
+    details > summary:focus,
+    details > summary:active,
+    details > summary:focus-visible {
+        background-color: #061551 !important;
+        color: #EBFEFF !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     # Header with logout button
     col1, col2 = st.columns([3, 1])
     with col1:
