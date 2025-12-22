@@ -15,6 +15,18 @@ class User(Base):
     office_name = Column(String(255))
     org_type = Column(String(50))
 
+# Client submission snapshot model
+class ClientSubmission(Base):
+    __tablename__ = "client_submissions"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    user_email = Column(Text, nullable=False, index=True)
+    first_name = Column(String(255))
+    last_name = Column(String(255))
+    office_name = Column(String(255))
+    org_type = Column(String(50))
+    submitted_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+
 # Function to get users from the DB
 def get_users(db):
     return db.query(User).all()
@@ -29,6 +41,7 @@ class Upload(Base):
     upload_time = Column(String(100))
     user_email = Column(String(255), index=True)
     analysis_data = Column(Text)
+    submission_id = Column(PGUUID(as_uuid=True), nullable=True, index=True)
 
 # Upload file audit model
 class UploadFile(Base):
@@ -95,6 +108,7 @@ def create_admin(db, username: str, password: str, email: str = "", must_change_
 # Function to delete a user and their uploads
 def delete_user(db, user_email: str):
     """Delete a user and all their uploads"""
+    db.query(ClientSubmission).filter(ClientSubmission.user_email == user_email).delete()
     db.query(Upload).filter(Upload.user_email == user_email).delete()
     db.query(User).filter(User.email == user_email).delete()
     db.commit()

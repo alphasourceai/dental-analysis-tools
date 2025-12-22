@@ -11,7 +11,7 @@ import hmac
 import time
 import logging
 from database import get_db, Base, engine, SessionLocal
-from models import get_admin_by_username, Admin, create_admin, User, Upload
+from models import get_admin_by_username, Admin, create_admin, User, Upload, ClientSubmission
 from supabase_utils import (
     get_admin_user_count,
     get_current_admin_user,
@@ -33,6 +33,11 @@ from admin_dashboard import display_admin_dashboard
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def normalize_email(raw_email: str) -> str:
+    if not raw_email:
+        return ""
+    return raw_email.strip().lower()
 
 # ---- API Keys ----
 # API keys are loaded from environment variables (Replit Secrets)
@@ -422,33 +427,50 @@ if st.session_state.page == "Analyzer":
                     st.rerun()
                 
                 if st.session_state.analyzing:
+                    normalized_email = normalize_email(email)
+                    logging.info("Normalized email: %s", normalized_email)
                     user_info_dict = {
                         "first_name": first_name,
                         "last_name": last_name,
                         "office_name": office_name,
-                        "email": email,
+                        "email": normalized_email,
                         "org_type": org_type,
                     }
                     
                     # Save user to database FIRST, then close the session before AI analysis
                     db = SessionLocal()
                     try:
-                        # Check if user already exists by email
-                        existing_user = db.query(User).filter(User.email == email).first()
+                        existing_user = db.query(User).filter(User.email == normalized_email).first()
                         if not existing_user:
-                            # Create new user
                             new_user = User(
                                 first_name=first_name,
                                 last_name=last_name,
-                                email=email,
+                                email=normalized_email,
                                 office_name=office_name,
                                 org_type=org_type
                             )
                             db.add(new_user)
                             db.commit()
-                            logging.info(f"New user created: {email}")
+                            logging.info("User upsert: created for %s", normalized_email)
                         else:
-                            logging.info(f"Existing user found: {email}")
+                            updated = False
+                            if existing_user.first_name != first_name:
+                                existing_user.first_name = first_name
+                                updated = True
+                            if existing_user.last_name != last_name:
+                                existing_user.last_name = last_name
+                                updated = True
+                            if existing_user.office_name != office_name:
+                                existing_user.office_name = office_name
+                                updated = True
+                            if existing_user.org_type != org_type:
+                                existing_user.org_type = org_type
+                                updated = True
+                            if updated:
+                                db.commit()
+                                logging.info("User upsert: updated for %s", normalized_email)
+                            else:
+                                logging.info("User upsert: existing for %s", normalized_email)
                     except Exception as e:
                         logging.error(f"Error saving user to database: {str(e)}")
                         db.rollback()
@@ -463,6 +485,8 @@ if st.session_state.page == "Analyzer":
                     
                     # Process each uploaded document
                     st.session_state.debug_log.append("🔍 Starting upload processing loop...")
+                    upload_ids = []
+                    all_emails_sent = True
                     for tool_name, file in uploaded_files.items():
                             if file is not None:
                                 st.session_state.debug_log.append(f"🔍 Processing file: {file.name} ({tool_name})")
@@ -475,7 +499,7 @@ if st.session_state.page == "Analyzer":
 
                                     upload_file_id = persist_upload_file(
                                         file_bytes=file_content,
-                                        user_email=email,
+                                        user_email=normalized_email,
                                         tool_name=tool_name,
                                         original_filename=file_name,
                                         content_type=file_type,
@@ -501,9 +525,32 @@ if st.session_state.page == "Analyzer":
                                     
                                     st.session_state.debug_log.append(f"📧 Sending emails for {file.name}...")
                                     # Send emails (pass file content instead of file object)
-                                    send_followup_email(user_info_dict, tool_name, results)
-                                    send_email(user_info_dict, file_content, file_name, file_type, results, tool_name)
-                                    st.session_state.debug_log.append(f"✅ Emails sent for {file.name}")
+                                    email_success = True
+                                    try:
+                                        send_followup_email(user_info_dict, tool_name, results)
+                                    except Exception as exc:
+                                        email_success = False
+                                        logging.error(
+                                            "Follow-up email failed for %s (%s): %s",
+                                            normalized_email,
+                                            file_name,
+                                            str(exc),
+                                        )
+                                    try:
+                                        send_email(user_info_dict, file_content, file_name, file_type, results, tool_name)
+                                    except Exception as exc:
+                                        email_success = False
+                                        logging.error(
+                                            "Admin email failed for %s (%s): %s",
+                                            normalized_email,
+                                            file_name,
+                                            str(exc),
+                                        )
+                                    if email_success:
+                                        st.session_state.debug_log.append(f"✅ Emails sent for {file.name}")
+                                    else:
+                                        all_emails_sent = False
+                                        st.session_state.debug_log.append(f"❌ Email send failed for {file.name}")
                                     
                                     # Save upload to database with FRESH session (after long AI analysis)
                                     st.session_state.debug_log.append(f"💾 Opening new database session for {file.name}...")
@@ -528,7 +575,7 @@ if st.session_state.page == "Analyzer":
                                             file_name=file.name,
                                             tool_name=tool_name,
                                             upload_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                            user_email=email,
+                                            user_email=normalized_email,
                                             analysis_data=analysis_json
                                         )
                                         st.session_state.debug_log.append(f"✅ Upload object created")
@@ -545,6 +592,7 @@ if st.session_state.page == "Analyzer":
                                         logging.info(f"✅ Upload committed successfully: {file.name} - {tool_name}")
 
                                         update_upload_file_upload_id(upload_file_id, new_upload.id)
+                                        upload_ids.append(new_upload.id)
                                         
                                         st.session_state.debug_log.append(f"✅ Upload saved to database: {file.name}")
                                     except json.JSONDecodeError as e:
@@ -562,6 +610,50 @@ if st.session_state.page == "Analyzer":
                                     finally:
                                         # Always close the upload database session
                                         upload_db.close()
+                    
+                    if upload_ids and all_emails_sent:
+                        submission_db = SessionLocal()
+                        try:
+                            submission = ClientSubmission(
+                                user_email=normalized_email,
+                                first_name=first_name,
+                                last_name=last_name,
+                                office_name=office_name,
+                                org_type=org_type,
+                            )
+                            submission_db.add(submission)
+                            submission_db.commit()
+                            submission_db.refresh(submission)
+                            logging.info(
+                                "Submission snapshot created: %s for %s",
+                                submission.id,
+                                normalized_email,
+                            )
+                            
+                            submission_db.query(Upload).filter(Upload.id.in_(upload_ids)).update(
+                                {"submission_id": submission.id},
+                                synchronize_session=False
+                            )
+                            submission_db.commit()
+                            logging.info(
+                                "Linked %d uploads to submission_id %s",
+                                len(upload_ids),
+                                submission.id,
+                            )
+                        except Exception as e:
+                            logging.error(
+                                "Error creating submission snapshot for %s: %s",
+                                normalized_email,
+                                str(e),
+                            )
+                            submission_db.rollback()
+                        finally:
+                            submission_db.close()
+                    elif upload_ids and not all_emails_sent:
+                        logging.warning(
+                            "Submission snapshot skipped for %s due to email failure",
+                            normalized_email,
+                        )
                     
                     # Reset analyzing state and mark analysis as complete
                     st.session_state.analyzing = False

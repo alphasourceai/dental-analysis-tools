@@ -1,10 +1,16 @@
 import streamlit as st
 import json
-from models import get_db, get_users, get_uploads, delete_user, get_uploads_by_email, User, Upload
+from sqlalchemy import func
+from models import get_db, delete_user, User, Upload, ClientSubmission
 from database import SessionLocal
 import logging
 from datetime import datetime
 from supabase_utils import persist_upload_file, update_upload_file_upload_id
+
+def normalize_email(raw_email: str) -> str:
+    if not raw_email:
+        return ""
+    return raw_email.strip().lower()
 
 # Admin Dashboard Page
 def display_admin_dashboard():
@@ -82,116 +88,202 @@ def display_client_submissions():
     """, unsafe_allow_html=True)
     
     st.markdown("<h3 style='margin-top: 1.5rem;'>Client Submissions</h3>", unsafe_allow_html=True)
+    search_term = st.text_input("Search by email", placeholder="Search by email")
+    normalized_search = search_term.strip().lower() if search_term else ""
     
-    # Fetch users from database first
     db = next(get_db())
     try:
-        users = get_users(db)
+        query = db.query(
+            ClientSubmission.user_email.label("email"),
+            func.count(ClientSubmission.id).label("submission_count"),
+            func.max(ClientSubmission.submitted_at).label("last_submitted_at"),
+        )
+        if normalized_search:
+            query = query.filter(ClientSubmission.user_email.ilike(f"%{normalized_search}%"))
+        clients = query.group_by(ClientSubmission.user_email).order_by(
+            func.max(ClientSubmission.submitted_at).desc()
+        ).all()
         
-        if not users:
-            st.write("No client data available")
+        total_submissions = sum(row.submission_count for row in clients)
+        logging.info(
+            "Dashboard query counts: clients=%d, submissions=%d",
+            len(clients),
+            total_submissions,
+        )
+        
+        if not clients:
+            st.write("No client submissions available")
             return
         
-        # Build combined data structure
-        combined_data = []
-        for user in users:
-            uploads = get_uploads_by_email(db, user.email)
-            
-            # Combine first and last name
-            full_name = f"{user.first_name} {user.last_name}".strip()
-            
-            if uploads:
-                for upload in uploads:
-                    combined_data.append({
-                        'name': full_name,
-                        'email': user.email,
-                        'office_name': user.office_name,
-                        'org_type': user.org_type,
-                        'file_name': upload.file_name,
-                        'tool_name': upload.tool_name,
-                        'upload_time': upload.upload_time,
-                        'analysis_data': upload.analysis_data,
-                        'first_name': user.first_name,
-                        'last_name': user.last_name
-                    })
-            else:
-                combined_data.append({
-                    'name': full_name,
-                    'email': user.email,
-                    'office_name': user.office_name,
-                    'org_type': user.org_type,
-                    'file_name': None,
-                    'tool_name': None,
-                    'upload_time': None,
-                    'analysis_data': None,
-                    'first_name': user.first_name,
-                    'last_name': user.last_name
-                })
-        
-        # Table headers (outside the user loop)
-        header_cols = st.columns([3.2, 3.0, 2.4, 1.8, 1.2, 1.2, 1.2])
+        header_cols = st.columns([3.6, 1.4, 2.2, 0.8])
         with header_cols[0]:
-            st.markdown("**Name**")
-        with header_cols[1]:
             st.markdown("**Email**")
+        with header_cols[1]:
+            st.markdown("**Submissions**")
         with header_cols[2]:
-            st.markdown("**Office/Group**")
+            st.markdown("**Last Submitted**")
         with header_cols[3]:
-            st.markdown("**Org Type**")
+            st.markdown("**Delete**")
         
         st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
         
-        # Display table with action buttons (outside the user loop)
-        for idx, data in enumerate(combined_data):
+        for client in clients:
+            client_key = client.email.replace("@", "_at_").replace(".", "_")
             with st.container():
-                cols = st.columns([3.2, 3.0, 2.4, 1.8, 1.2, 1.2, 1.2])
-                
+                cols = st.columns([3.6, 1.4, 2.2, 0.8])
                 with cols[0]:
-                    st.write(data['name'])
+                    st.write(client.email)
                 with cols[1]:
-                    st.write(data['email'])
+                    st.write(client.submission_count)
                 with cols[2]:
-                    st.write(data['office_name'])
+                    if client.last_submitted_at:
+                        st.write(client.last_submitted_at.strftime("%Y-%m-%d %H:%M:%S"))
+                    else:
+                        st.write("-")
                 with cols[3]:
-                    st.write(data['org_type'])
-                with cols[4]:
-                    if data['analysis_data']:
-                        if st.button("📥", key=f"download_btn_{idx}"):
-                            st.session_state[f'show_summary_{idx}'] = True
-                            st.rerun()
-                    else:
-                        st.write("-")
-                with cols[5]:
-                    if data['analysis_data']:
-                        if st.button("📄", key=f"view_btn_{idx}"):
-                            st.session_state[f'show_analysis_{idx}'] = True
-                            st.rerun()
-                    else:
-                        st.write("-")
-                with cols[6]:
-                    if st.button("🗑️", key=f"delete_btn_{idx}"):
-                        st.session_state[f'confirm_delete_{idx}'] = data['email']
+                    if st.button("🗑️", key=f"delete_btn_{client_key}"):
+                        st.session_state[f"confirm_delete_{client_key}"] = client.email
                         st.rerun()
                 
-                # Show admin summary modal
-                if st.session_state.get(f'show_summary_{idx}', False):
-                    st.markdown("---")
-                    st.markdown(f"**Admin Summary for {data['file_name']} ({data['tool_name']})**")
+                if st.session_state.get(f"confirm_delete_{client_key}"):
+                    st.warning(f"Are you sure you want to delete all records for {client.email}?")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Yes, Delete", key=f"confirm_yes_{client_key}", type="primary"):
+                            try:
+                                delete_user(db, client.email)
+                                st.success(f"Deleted all records for {client.email}")
+                                del st.session_state[f"confirm_delete_{client_key}"]
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error deleting user: {str(e)}")
+                    with col2:
+                        if st.button("Cancel", key=f"confirm_no_{client_key}"):
+                            del st.session_state[f"confirm_delete_{client_key}"]
+                            st.rerun()
+                
+                with st.expander(f"View submissions for {client.email}", expanded=False):
+                    submission_rows = db.query(
+                        ClientSubmission,
+                        func.count(Upload.id).label("upload_count"),
+                    ).outerjoin(
+                        Upload, Upload.submission_id == ClientSubmission.id
+                    ).filter(
+                        ClientSubmission.user_email == client.email
+                    ).group_by(
+                        ClientSubmission.id
+                    ).order_by(
+                        ClientSubmission.submitted_at.desc()
+                    ).all()
                     
-                    try:
-                        analysis = json.loads(data['analysis_data'])
+                    if not submission_rows:
+                        st.write("No submissions available for this client.")
+                        continue
+                    
+                    submission_ids = [row[0].id for row in submission_rows]
+                    uploads_by_submission = {}
+                    if submission_ids:
+                        uploads = db.query(Upload).filter(
+                            Upload.submission_id.in_(submission_ids)
+                        ).order_by(Upload.upload_time.desc()).all()
+                        for upload in uploads:
+                            uploads_by_submission.setdefault(upload.submission_id, []).append(upload)
+                    
+                    sub_header_cols = st.columns([2.2, 2.2, 2.4, 1.6, 1.4])
+                    with sub_header_cols[0]:
+                        st.markdown("**Submitted At**")
+                    with sub_header_cols[1]:
+                        st.markdown("**Name**")
+                    with sub_header_cols[2]:
+                        st.markdown("**Office/Group**")
+                    with sub_header_cols[3]:
+                        st.markdown("**Org Type**")
+                    with sub_header_cols[4]:
+                        st.markdown("**Uploads**")
+                    
+                    for submission_row in submission_rows:
+                        submission = submission_row[0]
+                        upload_count = submission_row[1]
+                        full_name = f"{submission.first_name} {submission.last_name}".strip()
+                        submission_label = (
+                            submission.submitted_at.strftime("%Y-%m-%d %H:%M:%S")
+                            if submission.submitted_at else "-"
+                        )
                         
-                        # Generate admin summary email content
-                        admin_summary = f"""
-Tool: {data['tool_name']}
-File Name: {data['file_name']}
+                        cols = st.columns([2.2, 2.2, 2.4, 1.6, 1.4])
+                        with cols[0]:
+                            st.write(submission_label)
+                        with cols[1]:
+                            st.write(full_name if full_name.strip() else "-")
+                        with cols[2]:
+                            st.write(submission.office_name or "-")
+                        with cols[3]:
+                            st.write(submission.org_type or "-")
+                        with cols[4]:
+                            st.write(upload_count)
+                        
+                        uploads_for_submission = uploads_by_submission.get(submission.id, [])
+                        with st.expander(
+                            f"Uploads for {submission_label} ({len(uploads_for_submission)})",
+                            expanded=False,
+                        ):
+                            if not uploads_for_submission:
+                                st.write("No uploads linked to this submission.")
+                                continue
+                            
+                            upload_header_cols = st.columns([3.0, 2.0, 2.2, 1.0, 1.0])
+                            with upload_header_cols[0]:
+                                st.markdown("**File Name**")
+                            with upload_header_cols[1]:
+                                st.markdown("**Tool**")
+                            with upload_header_cols[2]:
+                                st.markdown("**Upload Time**")
+                            with upload_header_cols[3]:
+                                st.markdown("**Summary**")
+                            with upload_header_cols[4]:
+                                st.markdown("**Analysis**")
+                            
+                            for upload in uploads_for_submission:
+                                upload_key = f"{submission.id}_{upload.id}"
+                                upload_cols = st.columns([3.0, 2.0, 2.2, 1.0, 1.0])
+                                with upload_cols[0]:
+                                    st.write(upload.file_name or "-")
+                                with upload_cols[1]:
+                                    st.write(upload.tool_name or "-")
+                                with upload_cols[2]:
+                                    st.write(upload.upload_time or "-")
+                                with upload_cols[3]:
+                                    if upload.analysis_data:
+                                        if st.button("📥", key=f"download_btn_{upload_key}"):
+                                            st.session_state[f"show_summary_{upload_key}"] = True
+                                            st.rerun()
+                                    else:
+                                        st.write("-")
+                                with upload_cols[4]:
+                                    if upload.analysis_data:
+                                        if st.button("📄", key=f"view_btn_{upload_key}"):
+                                            st.session_state[f"show_analysis_{upload_key}"] = True
+                                            st.rerun()
+                                    else:
+                                        st.write("-")
+                                
+                                if st.session_state.get(f"show_summary_{upload_key}", False):
+                                    st.markdown("---")
+                                    st.markdown(
+                                        f"**Admin Summary for {upload.file_name} ({upload.tool_name})**"
+                                    )
+                                    try:
+                                        analysis = json.loads(upload.analysis_data)
+                                        admin_summary = f"""
+Tool: {upload.tool_name}
+File Name: {upload.file_name}
 
 Submitted by:
-First Name: {data['first_name']}
-Last Name: {data['last_name']}
-Office/Group: {data['office_name']}
-Email: {data['email']}
-Organization Type: {data['org_type']}
+First Name: {submission.first_name}
+Last Name: {submission.last_name}
+Office/Group: {submission.office_name}
+Email: {submission.user_email}
+Organization Type: {submission.org_type}
 
 Total Issues Identified: {analysis['total_issue_count']}
 
@@ -204,67 +296,72 @@ Total Issues Identified: {analysis['total_issue_count']}
 === Anthropic Claude Analysis ===
 {analysis['raw_analyses']['AnthropicAI Analysis']}
 """
+                                        
+                                        st.download_button(
+                                            label="📥 Download Admin Summary",
+                                            data=admin_summary,
+                                            file_name=f"admin_summary_{submission.user_email}_{upload.file_name}.txt",
+                                            mime="text/plain",
+                                            key=f"download_summary_{upload_key}"
+                                        )
+                                        
+                                        st.text_area(
+                                            "Admin Summary",
+                                            admin_summary,
+                                            height=400,
+                                            key=f"summary_text_{upload_key}",
+                                            disabled=True
+                                        )
+                                        
+                                        if st.button("Close", key=f"close_summary_{upload_key}"):
+                                            st.session_state[f"show_summary_{upload_key}"] = False
+                                            st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Error displaying admin summary: {str(e)}")
+                                
+                                if st.session_state.get(f"show_analysis_{upload_key}", False):
+                                    st.markdown("---")
+                                    st.markdown(
+                                        f"**Analysis for {upload.file_name} ({upload.tool_name})**"
+                                    )
+                                    try:
+                                        analysis = json.loads(upload.analysis_data)
+                                        st.markdown(f"**Total Issues Identified:** {analysis['total_issue_count']}")
+                                        
+                                        st.markdown("**OpenAI Analysis:**")
+                                        st.text_area(
+                                            "",
+                                            analysis['raw_analyses']['OpenAI Analysis'],
+                                            height=200,
+                                            key=f"openai_{upload_key}",
+                                            disabled=True
+                                        )
+                                        
+                                        st.markdown("**xAI Analysis:**")
+                                        st.text_area(
+                                            "",
+                                            analysis['raw_analyses']['xAI Analysis'],
+                                            height=200,
+                                            key=f"xai_{upload_key}",
+                                            disabled=True
+                                        )
+                                        
+                                        st.markdown("**Anthropic Analysis:**")
+                                        st.text_area(
+                                            "",
+                                            analysis['raw_analyses']['AnthropicAI Analysis'],
+                                            height=200,
+                                            key=f"anthropic_{upload_key}",
+                                            disabled=True
+                                        )
+                                        
+                                        if st.button("Close", key=f"close_{upload_key}"):
+                                            st.session_state[f"show_analysis_{upload_key}"] = False
+                                            st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Error displaying analysis: {str(e)}")
                         
-                        st.download_button(
-                            label="📥 Download Admin Summary",
-                            data=admin_summary,
-                            file_name=f"admin_summary_{data['email']}_{data['file_name']}.txt",
-                            mime="text/plain",
-                            key=f"download_summary_{idx}"
-                        )
-                        
-                        st.text_area("Admin Summary", admin_summary, height=400, key=f"summary_text_{idx}", disabled=True)
-                        
-                        if st.button("Close", key=f"close_summary_{idx}"):
-                            st.session_state[f'show_summary_{idx}'] = False
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Error displaying admin summary: {str(e)}")
-                
-                # Show analysis modal
-                if st.session_state.get(f'show_analysis_{idx}', False):
-                    st.markdown("---")
-                    st.markdown(f"**Analysis for {data['file_name']} ({data['tool_name']})**")
-                    
-                    try:
-                        analysis = json.loads(data['analysis_data'])
-                        
-                        st.markdown(f"**Total Issues Identified:** {analysis['total_issue_count']}")
-                        
-                        st.markdown("**OpenAI Analysis:**")
-                        st.text_area("", analysis['raw_analyses']['OpenAI Analysis'], height=200, key=f"openai_{idx}", disabled=True)
-                        
-                        st.markdown("**xAI Analysis:**")
-                        st.text_area("", analysis['raw_analyses']['xAI Analysis'], height=200, key=f"xai_{idx}", disabled=True)
-                        
-                        st.markdown("**Anthropic Analysis:**")
-                        st.text_area("", analysis['raw_analyses']['AnthropicAI Analysis'], height=200, key=f"anthropic_{idx}", disabled=True)
-                        
-                        if st.button("Close", key=f"close_{idx}"):
-                            st.session_state[f'show_analysis_{idx}'] = False
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Error displaying analysis: {str(e)}")
-                
-                # Confirm deletion
-                if st.session_state.get(f'confirm_delete_{idx}'):
-                    st.warning(f"Are you sure you want to delete all records for {data['email']}?")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("Yes, Delete", key=f"confirm_yes_{idx}", type="primary"):
-                            try:
-                                delete_user(db, data['email'])
-                                st.success(f"Deleted all records for {data['email']}")
-                                del st.session_state[f'confirm_delete_{idx}']
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error deleting user: {str(e)}")
-                    with col2:
-                        if st.button("Cancel", key=f"confirm_no_{idx}"):
-                            del st.session_state[f'confirm_delete_{idx}']
-                            st.rerun()
-                
-                st.divider()
+                        st.divider()
     finally:
         db.close()
 
@@ -344,29 +441,50 @@ def display_document_analysis():
                 st.rerun()
             
             if st.session_state.admin_analyzing:
+                normalized_email = normalize_email(email)
+                logging.info("Normalized email: %s", normalized_email)
                 user_info_dict = {
                     "first_name": first_name,
                     "last_name": last_name,
                     "office_name": office_name,
-                    "email": email,
+                    "email": normalized_email,
                     "org_type": org_type,
                 }
                 
                 # Save user to database
                 db = SessionLocal()
                 try:
-                    existing_user = db.query(User).filter(User.email == email).first()
+                    existing_user = db.query(User).filter(User.email == normalized_email).first()
                     if not existing_user:
                         new_user = User(
                             first_name=first_name,
                             last_name=last_name,
-                            email=email,
+                            email=normalized_email,
                             office_name=office_name,
                             org_type=org_type
                         )
                         db.add(new_user)
                         db.commit()
-                        logging.info(f"New user created (admin): {email}")
+                        logging.info("User upsert: created for %s (admin)", normalized_email)
+                    else:
+                        updated = False
+                        if existing_user.first_name != first_name:
+                            existing_user.first_name = first_name
+                            updated = True
+                        if existing_user.last_name != last_name:
+                            existing_user.last_name = last_name
+                            updated = True
+                        if existing_user.office_name != office_name:
+                            existing_user.office_name = office_name
+                            updated = True
+                        if existing_user.org_type != org_type:
+                            existing_user.org_type = org_type
+                            updated = True
+                        if updated:
+                            db.commit()
+                            logging.info("User upsert: updated for %s (admin)", normalized_email)
+                        else:
+                            logging.info("User upsert: existing for %s (admin)", normalized_email)
                 except Exception as e:
                     logging.error(f"Error saving user: {str(e)}")
                     db.rollback()
@@ -375,6 +493,8 @@ def display_document_analysis():
                 
                 # Process each uploaded document
                 analysis_results = {}
+                upload_ids = []
+                all_emails_sent = True
                 for tool_name, file in uploaded_files.items():
                     if file is not None:
                         with st.spinner(f"Analyzing {tool_name}..."):
@@ -386,7 +506,7 @@ def display_document_analysis():
 
                             upload_file_id = persist_upload_file(
                                 file_bytes=file_content,
-                                user_email=email,
+                                user_email=normalized_email,
                                 tool_name=tool_name,
                                 original_filename=file_name,
                                 content_type=file_type,
@@ -409,8 +529,29 @@ def display_document_analysis():
                             analysis_results[tool_name] = results
                             
                             # Send emails
-                            send_followup_email(user_info_dict, tool_name, results)
-                            send_email(user_info_dict, file_content, file_name, file_type, results, tool_name)
+                            email_success = True
+                            try:
+                                send_followup_email(user_info_dict, tool_name, results)
+                            except Exception as exc:
+                                email_success = False
+                                logging.error(
+                                    "Follow-up email failed for %s (%s): %s",
+                                    normalized_email,
+                                    file_name,
+                                    str(exc),
+                                )
+                            try:
+                                send_email(user_info_dict, file_content, file_name, file_type, results, tool_name)
+                            except Exception as exc:
+                                email_success = False
+                                logging.error(
+                                    "Admin email failed for %s (%s): %s",
+                                    normalized_email,
+                                    file_name,
+                                    str(exc),
+                                )
+                            if not email_success:
+                                all_emails_sent = False
                             
                             # Save upload to database
                             upload_db = SessionLocal()
@@ -425,7 +566,7 @@ def display_document_analysis():
                                     file_name=file_name,
                                     tool_name=tool_name,
                                     upload_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    user_email=email,
+                                    user_email=normalized_email,
                                     analysis_data=analysis_json
                                 )
                                 upload_db.add(new_upload)
@@ -433,11 +574,56 @@ def display_document_analysis():
                                 logging.info(f"Upload saved (admin): {file_name}")
 
                                 update_upload_file_upload_id(upload_file_id, new_upload.id)
+                                upload_ids.append(new_upload.id)
                             except Exception as e:
                                 logging.error(f"Error saving upload: {str(e)}")
                                 upload_db.rollback()
                             finally:
                                 upload_db.close()
+                
+                if upload_ids and all_emails_sent:
+                    submission_db = SessionLocal()
+                    try:
+                        submission = ClientSubmission(
+                            user_email=normalized_email,
+                            first_name=first_name,
+                            last_name=last_name,
+                            office_name=office_name,
+                            org_type=org_type,
+                        )
+                        submission_db.add(submission)
+                        submission_db.commit()
+                        submission_db.refresh(submission)
+                        logging.info(
+                            "Submission snapshot created: %s for %s (admin)",
+                            submission.id,
+                            normalized_email,
+                        )
+                        
+                        submission_db.query(Upload).filter(Upload.id.in_(upload_ids)).update(
+                            {"submission_id": submission.id},
+                            synchronize_session=False
+                        )
+                        submission_db.commit()
+                        logging.info(
+                            "Linked %d uploads to submission_id %s (admin)",
+                            len(upload_ids),
+                            submission.id,
+                        )
+                    except Exception as e:
+                        logging.error(
+                            "Error creating submission snapshot for %s (admin): %s",
+                            normalized_email,
+                            str(e),
+                        )
+                        submission_db.rollback()
+                    finally:
+                        submission_db.close()
+                elif upload_ids and not all_emails_sent:
+                    logging.warning(
+                        "Submission snapshot skipped for %s due to email failure (admin)",
+                        normalized_email,
+                    )
                 
                 st.session_state.admin_analyzing = False
                 st.success("Analysis complete! Results have been emailed to the client and admin team.")
