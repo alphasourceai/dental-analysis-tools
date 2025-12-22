@@ -15,3 +15,7 @@ secrets.toml
 *.key
 
 .DS_Store
+Random Files/
+attached_assets/
+store.json
+__pycache__/
