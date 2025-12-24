@@ -4,7 +4,7 @@ import os
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 from urllib.parse import quote
 
 import requests
@@ -361,7 +361,7 @@ def verify_upload_token(raw_token: str) -> Dict[str, Any]:
     }
 
 
-def _load_session(raw_session_token: str) -> Tuple[UploadPortalSession, UploadPortalRequest]:
+def _load_session(raw_session_token: str) -> Dict[str, Any]:
     if not raw_session_token:
         raise PortalError("invalid_session", "Session token required", status=401)
     token_hash = _hash_token(raw_session_token)
@@ -380,10 +380,17 @@ def _load_session(raw_session_token: str) -> Tuple[UploadPortalSession, UploadPo
         if not request_row:
             _log_event("portal_request_missing", session_id=session_row.id)
             raise PortalError("invalid_session", "Session invalid", status=401)
+        session_id = session_row.id
+        request_id = request_row.id
+        requester_email = request_row.requester_email
         session_row.last_used_at = now
         db.commit()
         db.refresh(session_row)
-        return session_row, request_row
+        return {
+            "session_id": session_id,
+            "request_id": request_id,
+            "requester_email": requester_email,
+        }
     except PortalError:
         db.rollback()
         raise
@@ -429,17 +436,19 @@ def create_signed_upload_url(raw_session_token: str, original_filename: str,
     if not content_type or content_type.lower().strip() not in _allowed_content_types():
         raise PortalError("invalid_content_type", "Unsupported content type", status=400)
 
-    session_row, request_row = _load_session(raw_session_token)
+    session_data = _load_session(raw_session_token)
+    request_id = session_data["request_id"]
+    session_id = session_data["session_id"]
     safe_filename = _sanitize_filename(original_filename)
-    object_name = _build_object_name(str(request_row.id), safe_filename)
+    object_name = _build_object_name(str(request_id), safe_filename)
     _validate_object_name(object_name)
     signed_url = _call_signer_service(object_name, content_type or "application/octet-stream")
 
     db = SessionLocal()
     try:
         file_row = UploadPortalFile(
-            request_id=request_row.id,
-            session_id=session_row.id,
+            request_id=request_id,
+            session_id=session_id,
             user_id=None,
             user_email=None,
             gcs_bucket=_gcs_bucket(),
@@ -455,24 +464,26 @@ def create_signed_upload_url(raw_session_token: str, original_filename: str,
         db.refresh(file_row)
     except Exception:
         db.rollback()
-        _log_event("portal_file_record_failed", request_id=request_row.id, session_id=session_row.id)
+        _log_event("portal_file_record_failed", request_id=request_id, session_id=session_id)
         raise PortalError("db_write_failed", "Unable to create upload record", status=500)
     finally:
         db.close()
 
-    _log_event("portal_signed_url_issued", request_id=request_row.id, session_id=session_row.id, byte_size=byte_size)
+    _log_event("portal_signed_url_issued", request_id=request_id, session_id=session_id, byte_size=byte_size)
     return {"upload_id": str(file_row.id), "signed_url": signed_url}
 
 
 def complete_upload(raw_session_token: str, upload_id: str) -> Dict[str, Any]:
-    session_row, request_row = _load_session(raw_session_token)
+    session_data = _load_session(raw_session_token)
+    request_id = session_data["request_id"]
+    session_id = session_data["session_id"]
 
-    normalized_email = normalize_email(request_row.requester_email)
+    normalized_email = normalize_email(session_data["requester_email"])
     db = SessionLocal()
     try:
         file_row = (
             db.query(UploadPortalFile)
-            .filter(UploadPortalFile.id == upload_id, UploadPortalFile.session_id == session_row.id)
+            .filter(UploadPortalFile.id == upload_id, UploadPortalFile.session_id == session_id)
             .first()
         )
         if not file_row:
@@ -486,7 +497,7 @@ def complete_upload(raw_session_token: str, upload_id: str) -> Dict[str, Any]:
             .first()
         )
         if not user:
-            _log_event("portal_unknown_user", requester_email=normalized_email, request_id=request_row.id)
+            _log_event("portal_unknown_user", requester_email=normalized_email, request_id=request_id)
             raise PortalError("unknown_user_email", "No matching user found", status=404)
 
         file_row.user_id = user.id
@@ -498,12 +509,12 @@ def complete_upload(raw_session_token: str, upload_id: str) -> Dict[str, Any]:
         raise
     except Exception:
         db.rollback()
-        _log_event("portal_complete_failed", request_id=request_row.id)
+        _log_event("portal_complete_failed", request_id=request_id)
         raise PortalError("db_write_failed", "Unable to finalize upload", status=500)
     finally:
         db.close()
 
-    _log_event("portal_upload_completed", request_id=request_row.id, session_id=session_row.id)
+    _log_event("portal_upload_completed", request_id=request_id, session_id=session_id)
     return {"upload_id": upload_id, "status": "completed"}
 
 
