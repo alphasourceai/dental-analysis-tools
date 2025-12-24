@@ -1,6 +1,6 @@
 import os
 import bcrypt
-from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, String, Text, text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from database import Base, engine, get_db
 
@@ -8,7 +8,7 @@ from database import Base, engine, get_db
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     first_name = Column(String(255), index=True)
     last_name = Column(String(255), index=True)
     email = Column(String(255), unique=True, index=True)
@@ -64,6 +64,46 @@ class AdminUser(Base):
 
     user_id = Column(PGUUID(as_uuid=True), primary_key=True)
     role = Column(String(50), nullable=False)
+
+# Upload portal request model
+class UploadPortalRequest(Base):
+    __tablename__ = "upload_portal_requests"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    requester_email = Column(Text, nullable=False, index=True)
+    token_hash = Column(Text, nullable=False, unique=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    request_ip = Column(Text, nullable=True)
+
+# Upload portal session model
+class UploadPortalSession(Base):
+    __tablename__ = "upload_portal_sessions"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    request_id = Column(PGUUID(as_uuid=True), ForeignKey("upload_portal_requests.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash = Column(Text, nullable=False, unique=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+
+# Upload portal file model
+class UploadPortalFile(Base):
+    __tablename__ = "upload_portal_files"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    request_id = Column(PGUUID(as_uuid=True), ForeignKey("upload_portal_requests.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(PGUUID(as_uuid=True), ForeignKey("upload_portal_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    user_email = Column(Text, nullable=True, index=True)
+    gcs_bucket = Column(Text, nullable=False)
+    object_name = Column(Text, nullable=False)
+    original_filename = Column(Text, nullable=False)
+    content_type = Column(Text, nullable=True)
+    byte_size = Column(BigInteger, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
 
 # Function to get uploads from the DB
 def get_uploads(db):

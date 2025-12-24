@@ -6,6 +6,7 @@ from database import SessionLocal
 import logging
 from datetime import datetime
 from supabase_utils import persist_upload_file, update_upload_file_upload_id
+from upload_portal import PortalError, create_upload_request, list_recent_uploads
 
 def normalize_email(raw_email: str) -> str:
     if not raw_email:
@@ -44,7 +45,9 @@ def display_admin_dashboard():
             st.rerun()
     
     # Tab navigation
-    tab1, tab2, tab3 = st.tabs(["Client Submissions", "Document Analysis", "Admin Management"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Client Submissions", "Document Analysis", "Admin Management", "Secure Uploads"]
+    )
     
     with tab1:
         display_client_submissions()
@@ -54,6 +57,45 @@ def display_admin_dashboard():
     
     with tab3:
         display_admin_management()
+
+    with tab4:
+        display_upload_requests()
+
+
+def display_upload_requests():
+    st.markdown("<h3 style='margin-top: 1.5rem;'>Secure Upload Requests</h3>", unsafe_allow_html=True)
+    st.markdown(
+        "<p>Send a single-use magic link for clients to upload PHI securely.</p>",
+        unsafe_allow_html=True,
+    )
+
+    with st.form("upload_request_form"):
+        client_email = st.text_input("Client email")
+        submit_request = st.form_submit_button("Send Magic Link")
+
+    if submit_request:
+        try:
+            result = create_upload_request(client_email)
+            st.success("Magic link sent successfully.")
+            st.markdown("**Upload Request Details**")
+            st.write(f"Request ID: {result.get('request_id')}")
+            st.write(f"Expires At (UTC): {result.get('expires_at')}")
+        except PortalError as exc:
+            st.error(f"Unable to create upload request: {exc.message}")
+        except Exception as exc:
+            st.error(f"Unexpected error: {exc}")
+
+    st.divider()
+    st.markdown("**Recent Secure Uploads**")
+    try:
+        uploads = list_recent_uploads(limit=25)
+        items = uploads.get("items", [])
+        if not items:
+            st.info("No secure uploads recorded yet.")
+        else:
+            st.dataframe(items, use_container_width=True)
+    except PortalError:
+        st.info("Secure uploads table is not available yet. Complete database setup to view uploads.")
 
 def display_client_submissions():
     # Add compact styling CSS - targets first tab's content area only

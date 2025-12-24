@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AlphaSource Secure Upload</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Raleway:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/uploads/styles.css" />
+  </head>
+  <body>
+    <div class="backdrop">
+      <div class="glow glow-one"></div>
+      <div class="glow glow-two"></div>
+    </div>
+    <main class="portal">
+      <header class="portal-header">
+        <span class="pill">Secure Upload Portal</span>
+        <h1>Client Document Upload</h1>
+        <p>
+          This HIPAA-aligned portal uses a one-time email link. Your upload session
+          is short-lived and encrypted.
+        </p>
+      </header>
+
+      <section class="card status-card">
+        <div id="status" class="status">Validating your link…</div>
+        <div id="error" class="notice error" hidden></div>
+      </section>
+
+      <section class="card upload-card" id="upload-card" hidden>
+        <div class="upload-header">
+          <div>
+            <h2>Upload Files</h2>
+            <p class="muted">Accepted types: PDF, CSV, XLS, XLSX.</p>
+          </div>
+          <button class="ghost-button" id="sign-out">End Session</button>
+        </div>
+
+        <label class="file-picker">
+          <input
+            id="file-input"
+            type="file"
+            multiple
+            accept=".pdf,.csv,.xls,.xlsx,application/pdf,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          />
+          <span>Choose files</span>
+        </label>
+
+        <div id="file-list" class="file-list"></div>
+
+        <button id="upload-button" class="primary-button" disabled>Upload selected files</button>
+        <div id="success" class="notice success" hidden>Upload complete. Thank you!</div>
+      </section>
+
+      <footer class="portal-footer">
+        <span>AlphaSource AI · Secure client intake</span>
+        <span>Questions? Reply to the email that sent your link.</span>
+      </footer>
+    </main>
+
+    <script src="/uploads/app.js"></script>
+  </body>
+</html>
