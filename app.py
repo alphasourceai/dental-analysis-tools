@@ -30,9 +30,11 @@ from analysis_utils import (
     extract_compelling_insights
 )
 from admin_dashboard import display_admin_dashboard
+from upload_portal_routes import register_upload_portal_routes
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+register_upload_portal_routes()
 
 def normalize_email(raw_email: str) -> str:
     if not raw_email:
