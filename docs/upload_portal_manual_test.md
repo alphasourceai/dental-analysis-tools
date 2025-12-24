@@ -1,5 +1,11 @@
 # Client Upload Portal Manual Test Checklist
 
+## Local Sanity Checks
+- `GET http://localhost:8501/api/upload-portal/health` returns JSON.
+- `GET http://localhost:8501/uploads` returns the portal HTML.
+- `GET http://localhost:8501/uploads/styles.css` returns `text/css`.
+- `GET http://localhost:8501/uploads/app.js` returns `application/javascript`.
+
 ## Admin: Create Upload Request
 - Confirm `PORTAL_BASE_URL`, `PORTAL_SIGNER_SERVICE_URL`, `PORTAL_SIGNER_API_KEY`, `GCS_BUCKET_NAME`,
   `SENDGRID_API_KEY`, and `FROM_EMAIL` are set.

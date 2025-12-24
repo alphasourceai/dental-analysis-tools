@@ -1,18 +1,9 @@
 import streamlit as st
 
-# ## UPLOAD_PORTAL_MOUNT
-# Mount upload portal routes onto Streamlit's Tornado server.
-try:
-    from streamlit.web.server.server import Server
-    from upload_portal_routes import register_upload_portal_routes
+from upload_portal_routes import ensure_upload_portal_routes_mounted
 
-    _server = Server.get_current()
-    _tornado = getattr(_server, "_tornado", None)
-    if _tornado is not None:
-        register_upload_portal_routes(_tornado)
-except Exception:
-    # Avoid breaking Streamlit if internals differ; errors show up in Render logs.
-    pass
+# Mount upload portal routes once Streamlit's Tornado server is ready.
+ensure_upload_portal_routes_mounted()
 
 import pandas as pd
 import requests
@@ -45,7 +36,6 @@ from analysis_utils import (
     extract_compelling_insights
 )
 from admin_dashboard import display_admin_dashboard
-from upload_portal_routes import register_upload_portal_routes
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
