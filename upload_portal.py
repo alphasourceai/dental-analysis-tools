@@ -308,6 +308,10 @@ def verify_upload_token(raw_token: str) -> Dict[str, Any]:
 
     token_hash = _hash_token(raw_token)
     now = _utcnow()
+    request_id: Optional[str] = None
+    session_id: Optional[str] = None
+    session_expires_at: Optional[str] = None
+    session_token: Optional[str] = None
 
     db = SessionLocal()
     try:
@@ -315,11 +319,12 @@ def verify_upload_token(raw_token: str) -> Dict[str, Any]:
         if not request_row:
             _log_event("portal_token_invalid")
             raise PortalError("invalid_token", "Upload link is invalid", status=404)
+        request_id = str(request_row.id)
         if request_row.used_at:
-            _log_event("portal_token_used", request_id=request_row.id)
+            _log_event("portal_token_used", request_id=request_id)
             raise PortalError("token_used", "Upload link already used", status=409)
         if request_row.expires_at and request_row.expires_at < now:
-            _log_event("portal_token_expired", request_id=request_row.id)
+            _log_event("portal_token_expired", request_id=request_id)
             raise PortalError("token_expired", "Upload link expired", status=410)
 
         request_row.used_at = now
@@ -336,21 +341,23 @@ def verify_upload_token(raw_token: str) -> Dict[str, Any]:
         db.add(session_row)
         db.commit()
         db.refresh(session_row)
+        session_id = str(session_row.id)
+        session_expires_at = session_expires.isoformat()
     except PortalError:
         db.rollback()
         raise
     except Exception:
         db.rollback()
-        _log_event("portal_verify_failed")
+        _log_event("portal_verify_failed", request_id=request_id, session_id=session_id)
         raise PortalError("db_write_failed", "Unable to verify link", status=500)
     finally:
         db.close()
 
-    _log_event("portal_verified", request_id=request_row.id, session_id=session_row.id)
+    _log_event("portal_verified", request_id=request_id, session_id=session_id)
     return {
         "session_token": session_token,
-        "session_expires_at": session_row.expires_at.isoformat(),
-        "request_id": str(request_row.id),
+        "session_expires_at": session_expires_at,
+        "request_id": request_id,
     }
 
 
