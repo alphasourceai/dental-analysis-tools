@@ -23,6 +23,9 @@ Default origins should include `https://alphasourceai.com` and `https://www.alph
 
 Default content types (when `PORTAL_ALLOWED_CONTENT_TYPES` is unset): PDF, CSV, XLS, XLSX.
 
+## Optional Upload Portal Email Env Vars
+- `UPLOAD_PORTAL_SENDGRID_TEMPLATE_ID` (SendGrid dynamic template ID for magic link emails)
+
 ## Render Start Command
 No change required. Keep the existing Streamlit start command:
 ```
