@@ -22,6 +22,7 @@ OBJECT_NAME_PATTERN = re.compile(
 DEFAULT_ALLOWED_CONTENT_TYPES = {
     "application/pdf",
     "text/csv",
+    "text/plain",
     "application/vnd.ms-excel",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
@@ -188,7 +189,7 @@ def _send_magic_link_email(email: str, token: str, expires_at: datetime) -> None
         raise PortalError("config_missing", "Email configuration missing", status=500)
 
     portal_url = _portal_base_url().rstrip("/")
-    link = f"{portal_url}/uploads?token={quote(token)}"
+    link = f"{portal_url}/?upload_token={quote(token)}"
     expiration = expires_at.strftime("%Y-%m-%d %H:%M UTC")
     subject = "Secure upload link"
     plain_text = (

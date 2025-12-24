@@ -1,10 +1,6 @@
 import streamlit as st
 
-from upload_portal_routes import ensure_upload_portal_routes_mounted
-
-# Mount upload portal routes once Streamlit's Tornado server is ready.
-ensure_upload_portal_routes_mounted()
-
+import mimetypes
 import pandas as pd
 import requests
 from PIL import Image
@@ -36,6 +32,7 @@ from analysis_utils import (
     extract_compelling_insights
 )
 from admin_dashboard import display_admin_dashboard
+from upload_portal import PortalError, complete_upload, create_signed_upload_url, verify_upload_token
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -44,6 +41,148 @@ def normalize_email(raw_email: str) -> str:
     if not raw_email:
         return ""
     return raw_email.strip().lower()
+
+def _get_query_params() -> dict:
+    if hasattr(st, "query_params"):
+        try:
+            return dict(st.query_params)
+        except Exception:
+            return st.experimental_get_query_params()
+    return st.experimental_get_query_params()
+
+def _get_single_query_param(params: dict, key: str) -> str:
+    if not params:
+        return ""
+    value = params.get(key)
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else ""
+    return value or ""
+
+def _guess_content_type(filename: str) -> str:
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or "application/octet-stream"
+
+def _portal_max_file_size_mb() -> int:
+    try:
+        return int(os.getenv("PORTAL_MAX_FILE_SIZE_MB", "50"))
+    except ValueError:
+        return 50
+
+def _reset_portal_state(raw_token: str) -> None:
+    if st.session_state.get("portal_upload_token") == raw_token:
+        return
+    st.session_state.portal_upload_token = raw_token
+    st.session_state.portal_session_token = None
+    st.session_state.portal_session_expires_at = None
+    st.session_state.portal_request_id = None
+    st.session_state.portal_upload_completed = False
+    st.session_state.portal_upload_in_progress = False
+    if "portal_upload_file" in st.session_state:
+        del st.session_state["portal_upload_file"]
+
+def _display_portal_error(exc: PortalError) -> None:
+    message = exc.message
+    if exc.detail:
+        message = f"{message} ({exc.detail})"
+    st.error(message)
+
+def _render_upload_portal(raw_token: str) -> None:
+    st.markdown("""
+        <div class="title-container" style="margin-top: 1.5rem;">
+            <h1>Secure Upload Portal</h1>
+        </div>
+    """, unsafe_allow_html=True)
+    st.markdown(
+        "<p style='text-align: center; margin-bottom: 1.5rem;'>"
+        "Upload your documents securely. This link is single-use and expires shortly."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+
+    if not raw_token:
+        st.error("Upload link is missing or invalid. Please request a new link.")
+        st.stop()
+
+    _reset_portal_state(raw_token)
+
+    session_token = st.session_state.get("portal_session_token")
+    if not session_token:
+        try:
+            result = verify_upload_token(raw_token)
+        except PortalError as exc:
+            _display_portal_error(exc)
+            st.stop()
+        else:
+            st.session_state.portal_session_token = result.get("session_token")
+            st.session_state.portal_session_expires_at = result.get("session_expires_at")
+            st.session_state.portal_request_id = result.get("request_id")
+            session_token = st.session_state.portal_session_token
+
+    if st.session_state.get("portal_upload_completed"):
+        st.success("Upload complete. You can close this tab.")
+        st.stop()
+
+    expires_at = st.session_state.get("portal_session_expires_at")
+    if expires_at:
+        st.caption(f"Session expires at {expires_at} UTC.")
+
+    st.markdown("### Upload your file")
+    st.caption(f"Allowed types: PDF, CSV, TXT, XLS/XLSX. Max size: {_portal_max_file_size_mb()} MB.")
+
+    uploaded_file = st.file_uploader(
+        "Choose a file",
+        type=["pdf", "csv", "txt", "xls", "xlsx"],
+        key="portal_upload_file",
+    )
+
+    if not uploaded_file:
+        st.info("Select a file to continue.")
+        return
+
+    upload_disabled = st.session_state.get("portal_upload_in_progress", False)
+    upload_clicked = st.button("Upload File", type="primary", disabled=upload_disabled)
+
+    if upload_clicked:
+        st.session_state.portal_upload_in_progress = True
+        try:
+            raw_content_type = uploaded_file.type or _guess_content_type(uploaded_file.name)
+            content_type = (raw_content_type or "").strip().lower()
+            if not content_type:
+                raise PortalError("invalid_content_type", "Unable to detect file type", status=400)
+
+            file_bytes = uploaded_file.getvalue()
+            byte_size = len(file_bytes)
+            signed = create_signed_upload_url(
+                session_token,
+                uploaded_file.name,
+                content_type,
+                byte_size,
+            )
+            signed_url = signed.get("signed_url", "")
+            upload_id = signed.get("upload_id", "")
+            if not signed_url or not upload_id:
+                raise PortalError("signer_failed", "Signed upload URL missing", status=502)
+
+            with st.spinner("Uploading to secure storage..."):
+                response = requests.put(
+                    signed_url,
+                    data=file_bytes,
+                    headers={"Content-Type": content_type},
+                    timeout=60,
+                )
+            if response.status_code not in (200, 201, 204):
+                raise PortalError("upload_failed", "Unable to upload file", status=502)
+
+            complete_upload(session_token, upload_id)
+            st.session_state.portal_upload_completed = True
+            st.success("Upload complete. You can close this tab.")
+            st.stop()
+        except PortalError as exc:
+            _display_portal_error(exc)
+        except requests.RequestException:
+            st.error("Unable to upload the file. Please try again.")
+        finally:
+            st.session_state.portal_upload_in_progress = False
 
 # ---- API Keys ----
 # API keys are loaded from environment variables (Replit Secrets)
@@ -270,6 +409,16 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+# ---- Upload Portal Route ----
+_query_params = _get_query_params()
+_upload_token = _get_single_query_param(_query_params, "upload_token")
+_page_param = _get_single_query_param(_query_params, "page").lower()
+if _page_param == "uploads" and not _upload_token:
+    _upload_token = _get_single_query_param(_query_params, "token")
+if _upload_token or _page_param == "uploads":
+    _render_upload_portal(_upload_token)
+    st.stop()
 
 # ---- Initialize Session State ----
 if 'analysis_complete' not in st.session_state:
