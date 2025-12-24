@@ -182,11 +182,18 @@ def _validate_object_name(object_name: str) -> None:
         raise PortalError("invalid_object_path", "Invalid object path", status=400)
 
 
-def _send_magic_link_email(email: str, token: str, expires_at: datetime) -> None:
+def _send_magic_link_email(
+    email: str,
+    token: str,
+    expires_at: datetime,
+    request_id: Optional[str] = None,
+) -> None:
     from_email = _get_env("FROM_EMAIL")
     api_key = _get_env("SENDGRID_API_KEY")
     if not from_email or not api_key:
         raise PortalError("config_missing", "Email configuration missing", status=500)
+
+    template_id = _get_env("UPLOAD_PORTAL_SENDGRID_TEMPLATE_ID").strip()
 
     portal_url = _portal_base_url().rstrip("/")
     link = f"{portal_url}/?upload_token={quote(token)}"
@@ -237,17 +244,32 @@ def _send_magic_link_email(email: str, token: str, expires_at: datetime) -> None
     from sendgrid import SendGridAPIClient
     from sendgrid.helpers.mail import ClickTracking, Mail, TrackingSettings
 
-    message = Mail(
-        from_email=from_email,
-        to_emails=email,
-        subject=subject,
-        plain_text_content=plain_text,
-        html_content=html_content,
-    )
+    if template_id:
+        message = Mail(
+            from_email=from_email,
+            to_emails=email,
+            subject=subject,
+        )
+        message.template_id = template_id
+        message.dynamic_template_data = {
+            "upload_link": link,
+            "expires_at_utc": expiration,
+        }
+        template_mode = "dynamic"
+    else:
+        message = Mail(
+            from_email=from_email,
+            to_emails=email,
+            subject=subject,
+            plain_text_content=plain_text,
+            html_content=html_content,
+        )
+        template_mode = "inline"
     message.tracking_settings = TrackingSettings()
     message.tracking_settings.click_tracking = ClickTracking(enable=False, enable_text=False)
     try:
         SendGridAPIClient(api_key=api_key).send(message)
+        _log_event("portal_email_sent", template_mode=template_mode, request_id=request_id)
     except Exception as exc:
         _log_event("portal_email_failed")
         raise PortalError("email_failed", "Unable to send email", status=502) from exc
@@ -293,7 +315,7 @@ def create_upload_request(requester_email: str, request_ip: Optional[str] = None
         db.close()
 
     try:
-        _send_magic_link_email(normalized_email, token, expires_at)
+        _send_magic_link_email(normalized_email, token, expires_at, request_id=str(request_row.id))
     except PortalError:
         _log_event("portal_request_email_failed", requester_email=normalized_email, request_id=request_row.id)
         raise
