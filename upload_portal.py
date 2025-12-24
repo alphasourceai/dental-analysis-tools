@@ -402,25 +402,105 @@ def _load_session(raw_session_token: str) -> Dict[str, Any]:
         db.close()
 
 
-def _call_signer_service(object_name: str, content_type: str) -> str:
-    url = _signer_service_url()
+def _normalize_signer_url(raw_url: str) -> str:
+    return raw_url.strip().rstrip("/")
+
+
+def _redact_response_body(body: str, limit: int = 300) -> str:
+    if not body:
+        return ""
+    cleaned = body.replace("\x00", "").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"https?://\S+", "[redacted-url]", cleaned)
+    cleaned = re.sub(r"Bearer\s+\S+", "Bearer [redacted]", cleaned)
+    cleaned = re.sub(
+        r'("?(?:token|api[_-]?key|authorization)"?\s*[:=]\s*)"?[^"\s]+',
+        r'\1"[redacted]"',
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if len(cleaned) > limit:
+        cleaned = cleaned[:limit]
+    return cleaned
+
+
+def _signer_failure_fields(
+    response: Optional[requests.Response],
+    request_id: Optional[str],
+    session_id: Optional[str],
+) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {"request_id": request_id, "session_id": session_id}
+    if response is None:
+        fields["status_code"] = "request_error"
+        fields["response_content_type"] = ""
+        fields["response_body_snippet"] = ""
+        return fields
+    fields["status_code"] = response.status_code
+    fields["response_content_type"] = response.headers.get("Content-Type", "")
+    fields["response_body_snippet"] = _redact_response_body(response.text or "")
+    return fields
+
+
+def _call_signer_service(
+    object_name: str,
+    content_type: str,
+    request_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> str:
+    base_url = _normalize_signer_url(_signer_service_url())
+    if not base_url:
+        raise PortalError(
+            "config_missing",
+            "Missing signer configuration",
+            status=500,
+            detail="PORTAL_SIGNER_SERVICE_URL",
+        )
+    url = f"{base_url}/signed-upload-url"
     api_key = _signer_api_key()
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "bucket": _gcs_bucket(),
-        "object_name": object_name,
-        "content_type": content_type,
-        "method": "PUT",
-    }
-    response = requests.post(url, headers=headers, json=payload, timeout=15)
+    headers = {"Authorization": f"Bearer {api_key}"}
+    payload = {"object_name": object_name, "content_type": content_type}
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+    except requests.RequestException as exc:
+        _log_event("portal_signer_failed", **_signer_failure_fields(None, request_id, session_id))
+        raise PortalError(
+            "signer_failed",
+            "Unable to sign upload",
+            status=502,
+            detail="Signer request failed. Verify signer service URL and network access.",
+        ) from exc
+
     if response.status_code >= 300:
-        _log_event("portal_signer_failed")
-        raise PortalError("signer_failed", "Unable to sign upload", status=502)
-    data = response.json()
-    signed_url = data.get("signed_url") or data.get("signedUrl") or data.get("url")
+        _log_event("portal_signer_failed", **_signer_failure_fields(response, request_id, session_id))
+        raise PortalError(
+            "signer_failed",
+            "Unable to sign upload",
+            status=502,
+            detail=f"Signer service returned {response.status_code}. Check URL and API key.",
+        )
+
+    try:
+        data = response.json()
+    except ValueError:
+        _log_event("portal_signer_failed", **_signer_failure_fields(response, request_id, session_id))
+        raise PortalError(
+            "signer_failed",
+            "Unable to sign upload",
+            status=502,
+            detail="Signer response was not valid JSON.",
+        )
+
+    signed_url = data.get("signed_url")
     if not signed_url:
-        _log_event("portal_signer_missing")
-        raise PortalError("signer_failed", "Signed URL missing", status=502)
+        _log_event("portal_signer_failed", **_signer_failure_fields(response, request_id, session_id))
+        raise PortalError(
+            "signer_failed",
+            "Unable to sign upload",
+            status=502,
+            detail="Signer response missing signed_url.",
+        )
     return signed_url
 
 
@@ -442,7 +522,12 @@ def create_signed_upload_url(raw_session_token: str, original_filename: str,
     safe_filename = _sanitize_filename(original_filename)
     object_name = _build_object_name(str(request_id), safe_filename)
     _validate_object_name(object_name)
-    signed_url = _call_signer_service(object_name, content_type or "application/octet-stream")
+    signed_url = _call_signer_service(
+        object_name,
+        content_type or "application/octet-stream",
+        request_id=str(request_id),
+        session_id=str(session_id),
+    )
 
     db = SessionLocal()
     try:
