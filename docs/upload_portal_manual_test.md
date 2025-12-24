@@ -6,6 +6,29 @@
 - `GET http://localhost:8501/uploads/styles.css` returns `text/css`.
 - `GET http://localhost:8501/uploads/app.js` returns `application/javascript`.
 
+## Signer Service Sanity Check
+Run from the repo root with env vars set (prints a truncated URL):
+
+```bash
+python - <<'PY'
+import os
+import requests
+
+base = os.environ["PORTAL_SIGNER_SERVICE_URL"].strip().rstrip("/")
+resp = requests.post(
+    f"{base}/signed-upload-url",
+    headers={"Authorization": f"Bearer {os.environ['PORTAL_SIGNER_API_KEY']}"},
+    json={
+        "object_name": "upload-portal/local-test-from-docs.txt",
+        "content_type": "text/plain",
+    },
+    timeout=15,
+)
+print("status", resp.status_code)
+print("signed_url_prefix", (resp.json().get("signed_url") or "")[:80])
+PY
+```
+
 ## Admin: Create Upload Request
 - Confirm `PORTAL_BASE_URL`, `PORTAL_SIGNER_SERVICE_URL`, `PORTAL_SIGNER_API_KEY`, `GCS_BUCKET_NAME`,
   `SENDGRID_API_KEY`, and `FROM_EMAIL` are set.
