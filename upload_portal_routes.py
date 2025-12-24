@@ -1,47 +1,41 @@
-import logging
+import os
+import json
+import pathlib
+import tornado.web
 
-from upload_portal_server import get_tornado_routes
+BASE_DIR = pathlib.Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "upload_portal_static"
 
-logger = logging.getLogger("upload_portal")
-_ROUTES_REGISTERED = False
+def _json(handler, payload, status=200):
+    handler.set_header("Content-Type", "application/json")
+    handler.set_status(status)
+    handler.write(json.dumps(payload))
 
+class UploadPortalHealthHandler(tornado.web.RequestHandler):
+    def get(self):
+        _json(self, {"ok": True, "service": "upload-portal"})
 
-def register_upload_portal_routes() -> None:
-    global _ROUTES_REGISTERED
-    if _ROUTES_REGISTERED:
-        return
+class UploadPortalIndexHandler(tornado.web.RequestHandler):
+    def get(self):
+        index_path = STATIC_DIR / "index.html"
+        self.set_header("Content-Type", "text/html; charset=utf-8")
+        self.write(index_path.read_text(encoding="utf-8"))
 
-    try:
-        from streamlit.web.server import server
-    except Exception:
-        logger.info("Upload portal routes not registered: Streamlit server not available")
-        return
+def register_upload_portal_routes(tornado_app, portal_api_prefix="/api/upload-portal"):
+    handlers = []
 
-    try:
-        streamlit_server = server.Server.get_current()
-    except Exception:
-        streamlit_server = None
+    # 1) API (must be exact, must come before any catch-alls)
+    handlers.append((rf"{portal_api_prefix}/health/?", UploadPortalHealthHandler))
 
-    if not streamlit_server:
-        logger.info("Upload portal routes not registered: Streamlit server not initialized")
-        return
+    # 2) Static (must come before /uploads catch-all)
+    handlers.append((
+        r"/uploads/static/(.*)",
+        tornado.web.StaticFileHandler,
+        {"path": str(STATIC_DIR / "static")}
+    ))
 
-    routes = get_tornado_routes()
-    if not routes:
-        logger.warning("Upload portal routes not registered: Tornado unavailable")
-        return
+    # 3) Upload page routes (serve index.html)
+    handlers.append((r"/uploads/?", UploadPortalIndexHandler))
+    handlers.append((r"/uploads/.*", UploadPortalIndexHandler))
 
-    if hasattr(streamlit_server, "add_routes"):
-        streamlit_server.add_routes(routes)
-        _ROUTES_REGISTERED = True
-        logger.info("Upload portal routes registered via Streamlit add_routes")
-        return
-
-    app = getattr(streamlit_server, "_app", None) or getattr(streamlit_server, "_web_app", None)
-    if app and hasattr(app, "add_handlers"):
-        app.add_handlers(r".*$", routes)
-        _ROUTES_REGISTERED = True
-        logger.info("Upload portal routes registered via Streamlit app handlers")
-        return
-
-    logger.warning("Upload portal routes could not be registered: unsupported Streamlit server")
+    tornado_app.add_handlers(r".*$", handlers)
