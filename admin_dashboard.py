@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 from sqlalchemy import func
@@ -33,6 +34,13 @@ def _parse_date_input(value: str) -> datetime.date:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def format_mst(dt: datetime) -> str:
+    if not dt:
+        return None
+    mst = dt.astimezone(ZoneInfo("America/Denver"))
+    return mst.strftime("%m-%d-%Y %H:%M MST")
 
 # Admin Dashboard Page
 def display_admin_dashboard():
@@ -187,8 +195,8 @@ def display_uploads_inbox():
                 )
             items.append(
                 {
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
-                    "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+                    "created_at": format_mst(row.created_at),
+                    "completed_at": format_mst(row.completed_at),
                     "user_email": row.user_email,
                     "user_id": str(row.user_id) if row.user_id else None,
                     "original_filename": row.original_filename,
