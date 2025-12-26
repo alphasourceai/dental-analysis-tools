@@ -42,6 +42,12 @@ def normalize_email(raw_email: str) -> str:
     return raw_email.strip().lower()
 
 
+def _safe_email_html(raw_email: str) -> str:
+    if not raw_email:
+        return ""
+    return raw_email.replace("@", "&#64;")
+
+
 def _token_ttl_minutes() -> int:
     raw = os.getenv("PORTAL_TOKEN_TTL_MINUTES", "60")
     try:
@@ -535,11 +541,15 @@ def display_client_submissions(perf: AdminPerfTracker):
 
         for client in clients:
             client_email = client.email or ""
+            safe_email = _safe_email_html(client_email)
             client_key = client_email.replace("@", "_at_").replace(".", "_")
             st.markdown('<div class="as-card">', unsafe_allow_html=True)
             cols = st.columns([3.6, 1.4, 2.2, 0.8])
             with cols[0]:
-                st.markdown(f"<span class=\"as-email\">{client_email}</span>", unsafe_allow_html=True)
+                if safe_email:
+                    st.markdown(f"<span class=\"as-email\">{safe_email}</span>", unsafe_allow_html=True)
+                else:
+                    st.write("-")
             with cols[1]:
                 st.markdown(
                     f"<span class=\"as-pill\">{client.submission_count}</span>",
@@ -556,13 +566,15 @@ def display_client_submissions(perf: AdminPerfTracker):
                     st.rerun()
 
             if st.session_state.get(f"confirm_delete_{client_key}"):
-                st.warning(f"Are you sure you want to delete all records for {client_email}?")
+                st.warning("Are you sure you want to delete all records for this client?")
+                if safe_email:
+                    st.markdown(f"<span class=\"as-email\">{safe_email}</span>", unsafe_allow_html=True)
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Yes, Delete", key=f"confirm_yes_{client_key}", type="primary"):
                         try:
                             delete_user(db, client_email)
-                            st.success(f"Deleted all records for {client_email}")
+                            st.success("Deleted all records for this client.")
                             del st.session_state[f"confirm_delete_{client_key}"]
                             st.rerun()
                         except Exception as e:
@@ -575,10 +587,11 @@ def display_client_submissions(perf: AdminPerfTracker):
             st.markdown('<div class="as-card-divider"></div>', unsafe_allow_html=True)
 
             with st.expander("View submissions", expanded=False):
-                st.markdown(
-                    f"<div class=\"as-muted\">Client Email</div><div class=\"as-email\">{client_email}</div>",
-                    unsafe_allow_html=True,
-                )
+                if safe_email:
+                    st.markdown(
+                        f"<div class=\"as-muted\">Client Email</div><div class=\"as-email\">{safe_email}</div>",
+                        unsafe_allow_html=True,
+                    )
                 st.markdown('<div class="as-row-divider"></div>', unsafe_allow_html=True)
                 submission_rows = db.query(
                     ClientSubmission,
