@@ -15,11 +15,7 @@ import logging
 from database import get_db, Base, engine, SessionLocal
 from models import get_admin_by_username, Admin, create_admin, User, Upload, ClientSubmission
 from supabase_utils import (
-    get_admin_user_count,
-    get_current_admin_user,
-    is_admin_user,
     persist_upload_file,
-    sign_in_admin,
     update_upload_file_upload_id,
 )
 from datetime import datetime
@@ -1055,96 +1051,7 @@ elif st.session_state.page == "Admin Setup":
 
 # Admin Dashboard Content
 elif st.session_state.page == "Admin Dashboard":
-    admin_access_token = None
-    if st.session_state.admin_session:
-        admin_access_token = st.session_state.admin_session.get("access_token")
-    if admin_access_token:
-        admin_user = get_current_admin_user(admin_access_token)
-        if admin_user:
-            st.session_state.admin_user = admin_user
-            st.session_state.is_admin_logged_in = is_admin_user(admin_user.get("id"))
-        else:
-            st.session_state.admin_session = None
-            st.session_state.admin_user = None
-            st.session_state.is_admin_logged_in = False
-
-    # Check if admin is logged in
-    if not st.session_state.is_admin_logged_in:
-        # Show login form
-        st.markdown("""
-            <div class="title-container" style="margin-top: 1.5rem;">
-                <h1>Admin Dashboard</h1>
-            </div>
-        """, unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; margin-bottom: 2rem; margin-top: 1.5rem;'>Please log in to access the admin dashboard.</p>", unsafe_allow_html=True)
-
-        admin_user_count = get_admin_user_count()
-        if admin_user_count == 0:
-            st.info("Ask Jason to add your auth user_id to admin_users.")
-        
-        # Login form
-        with st.form("admin_login_form"):
-            st.markdown("""
-                <div class="section-header">
-                    <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-                        <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-                    </svg>
-                    <span class="section-title">Login</span>
-                </div>
-            """, unsafe_allow_html=True)
-            
-            email = st.text_input("Email", key="admin_email")
-            password = st.text_input("Password", type="password", key="admin_password")
-            
-            col1, col2, col3 = st.columns([1, 1, 1])
-            with col2:
-                submit_button = st.form_submit_button("Login", use_container_width=True)
-            
-            if submit_button:
-                auth_result, error = sign_in_admin(email, password)
-                if error:
-                    if "admin_password" in st.session_state:
-                        del st.session_state["admin_password"]
-                    st.error(f"Login failed: {error}")
-                else:
-                    st.session_state.admin_session = {
-                        "access_token": auth_result["access_token"],
-                        "refresh_token": auth_result.get("refresh_token"),
-                    }
-                    st.session_state.admin_user = auth_result.get("user")
-
-                    if is_admin_user(st.session_state.admin_user.get("id")):
-                        st.session_state.is_admin_logged_in = True
-                        if "admin_email" in st.session_state:
-                            del st.session_state["admin_email"]
-                        if "admin_password" in st.session_state:
-                            del st.session_state["admin_password"]
-                        st.success("Login successful! Redirecting...")
-                        st.rerun()
-                    else:
-                        st.session_state.is_admin_logged_in = False
-                        st.error("Not authorized")
-
-        if st.session_state.admin_user and not st.session_state.is_admin_logged_in:
-            col1, col2, col3 = st.columns([1, 1, 1])
-            with col2:
-                if st.button("Logout", key="admin_logout_unauthorized", use_container_width=True):
-                    st.session_state.admin_session = None
-                    st.session_state.admin_user = None
-                    st.session_state.is_admin_logged_in = False
-                    st.rerun()
-        
-        # Back to analyzer button
-        st.markdown("<br>", unsafe_allow_html=True)
-        col1, col2, col3 = st.columns([1, 1, 1])
-        with col2:
-            if st.button("Back to Analyzer", key="back_to_analyzer_from_login", use_container_width=True):
-                st.session_state.page = "Analyzer"
-                st.rerun()
-    else:
-        # Admin is logged in, show the dashboard
-        display_admin_dashboard()  # This calls the function defined in admin_dashboard.py
+    display_admin_dashboard()
 
 # ---- Footer ----
 st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
