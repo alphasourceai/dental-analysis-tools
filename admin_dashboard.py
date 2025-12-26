@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 try:
@@ -13,8 +14,27 @@ from sqlalchemy import func
 
 from database import SessionLocal
 from models import ClientSubmission, Upload, UploadPortalFile, User, delete_user, get_db
-from supabase_utils import persist_upload_file, update_upload_file_upload_id
+from supabase_utils import persist_upload_file, update_upload_file_upload_id, sign_in_admin, is_admin_user
 from upload_portal import PortalError, create_upload_request
+
+MST_FALLBACK = timezone(timedelta(hours=-7), name="MST")
+MST_TZ = ZoneInfo("America/Denver") if ZoneInfo else MST_FALLBACK
+
+
+class AdminPerfTracker:
+    def __init__(self) -> None:
+        self.start = time.perf_counter()
+        self.first_db_logged = False
+
+    def log(self, step: str) -> None:
+        elapsed_ms = (time.perf_counter() - self.start) * 1000
+        logging.info("admin_step=%s ms=%.1f", step, elapsed_ms)
+
+    def mark_first_db_query(self) -> None:
+        if not self.first_db_logged:
+            self.first_db_logged = True
+            self.log("first_db_query")
+
 
 def normalize_email(raw_email: str) -> str:
     if not raw_email:
@@ -44,11 +64,8 @@ def format_mst(dt: datetime) -> str:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    if ZoneInfo:
-        mst = dt.astimezone(ZoneInfo("America/Denver"))
-        return mst.strftime("%m-%d-%Y %H:%M MST")
-    utc = dt.astimezone(timezone.utc)
-    return utc.strftime("%m-%d-%Y %H:%M UTC")
+    mst = dt.astimezone(MST_TZ)
+    return mst.strftime("%m-%d-%Y %H:%M MST")
 
 
 def _format_admin_dt(value: object):
@@ -72,11 +89,7 @@ def _format_admin_dt(value: object):
         return str(value)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    if ZoneInfo:
-        mst = dt.astimezone(ZoneInfo("America/Denver"))
-        return mst.strftime("%m-%d-%Y %H:%M MST")
-    utc = dt.astimezone(timezone.utc)
-    return utc.strftime("%m-%d-%Y %H:%M UTC")
+    return format_mst(dt)
 
 
 def _parse_analysis_json(value: object):
@@ -95,126 +108,223 @@ def _parse_analysis_json(value: object):
             return None
     return None
 
+
+def _ensure_admin_state() -> None:
+    if "is_admin_logged_in" not in st.session_state:
+        st.session_state.is_admin_logged_in = False
+    if "admin_session" not in st.session_state:
+        st.session_state.admin_session = None
+    if "admin_user" not in st.session_state:
+        st.session_state.admin_user = None
+
+
+def _render_admin_css() -> None:
+    st.markdown(
+        """
+        <style>
+        details > summary {
+            background-color: #061551 !important;
+            color: #EBFEFF !important;
+        }
+        details > summary:hover,
+        details > summary:focus,
+        details > summary:active,
+        details > summary:focus-visible {
+            background-color: #061551 !important;
+            color: #EBFEFF !important;
+        }
+        [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] p {
+            font-size: 0.8rem !important;
+            line-height: 1.25 !important;
+            margin: 0.2rem 0 !important;
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+        }
+        [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] .stMarkdown strong {
+            font-size: 0.85rem !important;
+            font-weight: 600 !important;
+        }
+        [data-baseweb="tab-panel"]:first-of-type .stButton > button {
+            padding: 0.15rem 0.3rem !important;
+            font-size: 1rem !important;
+            min-height: 1.6rem !important;
+            height: 1.6rem !important;
+            line-height: 1 !important;
+            border-radius: 4px !important;
+        }
+        [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] {
+            padding: 0.15rem 0.4rem !important;
+        }
+        [data-baseweb="tab-panel"]:first-of-type [data-testid="stTextArea"] p,
+        [data-baseweb="tab-panel"]:first-of-type .stAlert p,
+        [data-baseweb="tab-panel"]:first-of-type .stWarning p,
+        [data-baseweb="tab-panel"]:first-of-type .stError p,
+        [data-baseweb="tab-panel"]:first-of-type .stSuccess p,
+        [data-baseweb="tab-panel"]:first-of-type .stInfo p {
+            font-size: 1rem !important;
+            white-space: normal !important;
+        }
+        .as-card {
+            background: rgba(10, 21, 70, 0.65);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 16px;
+            padding: 0.85rem 1rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.25);
+        }
+        .as-subcard {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 0.65rem 0.8rem;
+            margin: 0.65rem 0;
+        }
+        .as-card-divider {
+            border-top: 1px solid rgba(255, 255, 255, 0.12);
+            margin: 0.6rem 0 0.75rem 0;
+        }
+        .as-row-divider {
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            margin: 0.4rem 0 0.9rem 0;
+        }
+        .as-muted {
+            color: #A9B2C9;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-bottom: 0.2rem;
+        }
+        .as-pill {
+            display: inline-block;
+            padding: 0.1rem 0.55rem;
+            border-radius: 999px;
+            background: rgba(0, 207, 200, 0.2);
+            border: 1px solid rgba(0, 207, 200, 0.4);
+            color: #E6FBFF;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .as-email {
+            color: #AD8BF7;
+            font-weight: 600;
+            font-size: 0.95rem;
+            word-break: break-word;
+        }
+        .as-card details {
+            background: rgba(6, 21, 81, 0.35);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 0.35rem 0.6rem;
+            margin-top: 0.5rem;
+        }
+        .as-subcard details {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 0.35rem 0.6rem;
+            margin-top: 0.55rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_admin_login() -> None:
+    st.markdown(
+        """
+        <div class="title-container" style="margin-top: 1.5rem;">
+            <h1>Admin Dashboard</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<p style='text-align: center; margin-bottom: 2rem; margin-top: 1.5rem;'>Please log in to access the admin dashboard.</p>",
+        unsafe_allow_html=True,
+    )
+    st.info("Ask Jason to add your auth user_id to admin_users if you cannot log in.")
+
+    with st.form("admin_login_form"):
+        st.markdown(
+            """
+            <div class="section-header">
+                <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                </svg>
+                <span class="section-title">Login</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        email = st.text_input("Email", key="admin_email")
+        password = st.text_input("Password", type="password", key="admin_password")
+
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            submit_button = st.form_submit_button("Login", use_container_width=True)
+
+        if submit_button:
+            auth_result, error = sign_in_admin(email, password)
+            if error:
+                if "admin_password" in st.session_state:
+                    del st.session_state["admin_password"]
+                st.error(f"Login failed: {error}")
+            else:
+                st.session_state.admin_session = {
+                    "access_token": auth_result["access_token"],
+                    "refresh_token": auth_result.get("refresh_token"),
+                }
+                st.session_state.admin_user = auth_result.get("user")
+
+                if is_admin_user(st.session_state.admin_user.get("id")):
+                    st.session_state.is_admin_logged_in = True
+                    if "admin_email" in st.session_state:
+                        del st.session_state["admin_email"]
+                    if "admin_password" in st.session_state:
+                        del st.session_state["admin_password"]
+                    st.success("Login successful! Redirecting...")
+                    st.rerun()
+                else:
+                    st.session_state.is_admin_logged_in = False
+                    st.error("Not authorized")
+
+    if st.session_state.admin_user and not st.session_state.is_admin_logged_in:
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("Logout", key="admin_logout_unauthorized", use_container_width=True):
+                st.session_state.admin_session = None
+                st.session_state.admin_user = None
+                st.session_state.is_admin_logged_in = False
+                st.rerun()
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("Back to Analyzer", key="back_to_analyzer_from_login", use_container_width=True):
+            st.session_state.page = "Analyzer"
+            st.rerun()
+
+
 # Admin Dashboard Page
 def display_admin_dashboard():
-    st.markdown("""
-    <style>
-    details > summary {
-        background-color: #061551 !important;
-        color: #EBFEFF !important;
-    }
-    details > summary:hover,
-    details > summary:focus,
-    details > summary:active,
-    details > summary:focus-visible {
-        background-color: #061551 !important;
-        color: #EBFEFF !important;
-    }
-    [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] p {
-        font-size: 0.75rem !important;
-        line-height: 1.2 !important;
-        margin: 0.15rem 0 !important;
-        white-space: nowrap !important;
-        overflow: hidden !important;
-        text-overflow: ellipsis !important;
-    }
-    [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] .stMarkdown strong {
-        font-size: 0.8rem !important;
-        font-weight: 600 !important;
-    }
-    [data-baseweb="tab-panel"]:first-of-type .stButton > button {
-        padding: 0.15rem 0.3rem !important;
-        font-size: 1rem !important;
-        min-height: 1.6rem !important;
-        height: 1.6rem !important;
-        line-height: 1 !important;
-        border-radius: 4px !important;
-    }
-    [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] {
-        padding: 0.1rem 0.3rem !important;
-    }
-    [data-baseweb="tab-panel"]:first-of-type [data-testid="stTextArea"] p,
-    [data-baseweb="tab-panel"]:first-of-type .stAlert p,
-    [data-baseweb="tab-panel"]:first-of-type .stWarning p,
-    [data-baseweb="tab-panel"]:first-of-type .stError p,
-    [data-baseweb="tab-panel"]:first-of-type .stSuccess p,
-    [data-baseweb="tab-panel"]:first-of-type .stInfo p {
-        font-size: 1rem !important;
-        white-space: normal !important;
-    }
-    .as-card {
-        background: rgba(255, 255, 255, 0.04);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 14px;
-        padding: 0.75rem 0.9rem;
-        margin-bottom: 0.85rem;
-    }
-    .as-subcard {
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 12px;
-        padding: 0.6rem 0.75rem;
-        margin: 0.6rem 0;
-    }
-    .as-muted {
-        color: #A9B2C9;
-        font-size: 0.75rem;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        margin-bottom: 0.15rem;
-    }
-    .as-pill {
-        display: inline-block;
-        padding: 0.1rem 0.5rem;
-        border-radius: 999px;
-        background: rgba(0, 207, 200, 0.2);
-        border: 1px solid rgba(0, 207, 200, 0.35);
-        color: #E6FBFF;
-        font-size: 0.75rem;
-        font-weight: 600;
-    }
-    .as-card a,
-    .as-card a:visited,
-    .as-subcard a,
-    .as-subcard a:visited {
-        color: #E6EBFF !important;
-        text-decoration: none !important;
-    }
-    .as-card a:hover,
-    .as-subcard a:hover {
-        color: #FFFFFF !important;
-        text-decoration: underline !important;
-    }
+    perf = AdminPerfTracker()
+    perf.log("enter")
 
-    [data-baseweb="tab-panel"]:first-of-type a,
-    [data-baseweb="tab-panel"]:first-of-type a:visited,
-    [data-baseweb="tab-panel"]:first-of-type a:active {
-        color: #E6EBFF !important;
-        text-decoration: none !important;
-    }
-    [data-baseweb="tab-panel"]:first-of-type a:hover {
-        color: #FFFFFF !important;
-        text-decoration: underline !important;
-    }
+    _ensure_admin_state()
+    _render_admin_css()
 
-    .as-card details {
-        background: rgba(6, 21, 81, 0.35);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 10px;
-        padding: 0.35rem 0.6rem;
-        margin-top: 0.5rem;
-    }
-    .as-subcard details {
-        background: rgba(255, 255, 255, 0.02);
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        border-radius: 10px;
-        padding: 0.35rem 0.6rem;
-        margin-top: 0.55rem;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    is_authenticated = bool(st.session_state.get("is_admin_logged_in"))
+    perf.log("auth_checked")
 
-    # Header with logout button
+    if not is_authenticated:
+        _render_admin_login()
+        perf.log("unauth_rendered")
+        st.stop()
+
     col1, col2 = st.columns([3, 1])
     with col1:
         st.markdown("<h1 style='margin-top: 1.5rem;'>Admin Dashboard</h1>", unsafe_allow_html=True)
@@ -225,26 +335,29 @@ def display_admin_dashboard():
             st.session_state.admin_user = None
             st.session_state.page = "Analyzer"
             st.rerun()
-    
-    # Tab navigation
+
+    perf.log("tabs_render_start")
+
     tab1, tab2, tab3, tab4 = st.tabs(
         ["Client Submissions", "Document Analysis", "Admin Management", "Secure Uploads"]
     )
-    
+
     with tab1:
-        display_client_submissions()
-    
+        display_client_submissions(perf)
+
     with tab2:
-        display_document_analysis()
-    
+        display_document_analysis(perf)
+
     with tab3:
         display_admin_management()
 
     with tab4:
-        display_upload_requests()
+        display_upload_requests(perf)
+
+    perf.log("render_done")
 
 
-def display_upload_requests():
+def display_upload_requests(perf: AdminPerfTracker):
     st.markdown("<h3 style='margin-top: 1.5rem;'>Secure Upload Requests</h3>", unsafe_allow_html=True)
     st.markdown(
         "<p>Send a single-use magic link for clients to upload PHI securely.</p>",
@@ -257,6 +370,7 @@ def display_upload_requests():
 
     if submit_request:
         try:
+            perf.mark_first_db_query()
             result = create_upload_request(client_email)
             st.success("Magic link sent successfully.")
             st.markdown("**Upload Request Details**")
@@ -268,10 +382,10 @@ def display_upload_requests():
             st.error(f"Unexpected error: {exc}")
 
     st.divider()
-    display_uploads_inbox()
+    display_uploads_inbox(perf)
 
 
-def display_uploads_inbox():
+def display_uploads_inbox(perf: AdminPerfTracker):
     st.markdown("<h3 style='margin-top: 1.5rem;'>Uploads Inbox</h3>", unsafe_allow_html=True)
     st.markdown(
         "<p>Most recent upload portal files (default 50). Use filters to narrow results.</p>",
@@ -311,6 +425,7 @@ def display_uploads_inbox():
         start_date = None
         end_date = None
 
+    perf.mark_first_db_query()
     db = SessionLocal()
     try:
         query = db.query(UploadPortalFile)
@@ -376,11 +491,13 @@ def display_uploads_inbox():
     finally:
         db.close()
 
-def display_client_submissions():
+
+def display_client_submissions(perf: AdminPerfTracker):
     st.markdown("<h3 style='margin-top: 1.5rem;'>Client Submissions</h3>", unsafe_allow_html=True)
     search_term = st.text_input("Search by email", placeholder="Search by email")
     normalized_search = search_term.strip().lower() if search_term else ""
-    
+
+    perf.mark_first_db_query()
     db = next(get_db())
     try:
         query = db.query(
@@ -393,18 +510,18 @@ def display_client_submissions():
         clients = query.group_by(ClientSubmission.user_email).order_by(
             func.max(ClientSubmission.submitted_at).desc()
         ).all()
-        
+
         total_submissions = sum(row.submission_count for row in clients)
         logging.info(
             "Dashboard query counts: clients=%d, submissions=%d",
             len(clients),
             total_submissions,
         )
-        
+
         if not clients:
             st.write("No client submissions available")
             return
-        
+
         header_cols = st.columns([3.6, 1.4, 2.2, 0.8])
         with header_cols[0]:
             st.markdown("**Email**")
@@ -414,17 +531,21 @@ def display_client_submissions():
             st.markdown("**Last Submitted**")
         with header_cols[3]:
             st.markdown("**Delete**")
-        
-        st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
-        
+
+        st.markdown("<div style='margin-bottom: 0.6rem;'></div>", unsafe_allow_html=True)
+
         for client in clients:
-            client_key = client.email.replace("@", "_at_").replace(".", "_")
+            client_email = client.email or ""
+            client_key = client_email.replace("@", "_at_").replace(".", "_")
             st.markdown('<div class="as-card">', unsafe_allow_html=True)
             cols = st.columns([3.6, 1.4, 2.2, 0.8])
             with cols[0]:
-                st.markdown(f"[{client.email}](mailto:{client.email})")
+                st.markdown(f"<span class=\"as-email\">{client_email}</span>", unsafe_allow_html=True)
             with cols[1]:
-                st.markdown(f"<span class=\"as-pill\">{client.submission_count}</span>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<span class=\"as-pill\">{client.submission_count}</span>",
+                    unsafe_allow_html=True,
+                )
             with cols[2]:
                 if client.last_submitted_at:
                     st.write(_format_admin_dt(client.last_submitted_at) or "-")
@@ -432,17 +553,17 @@ def display_client_submissions():
                     st.write("-")
             with cols[3]:
                 if st.button("🗑️", key=f"delete_btn_{client_key}"):
-                    st.session_state[f"confirm_delete_{client_key}"] = client.email
+                    st.session_state[f"confirm_delete_{client_key}"] = client_email
                     st.rerun()
 
             if st.session_state.get(f"confirm_delete_{client_key}"):
-                st.warning(f"Are you sure you want to delete all records for {client.email}?")
+                st.warning(f"Are you sure you want to delete all records for {client_email}?")
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Yes, Delete", key=f"confirm_yes_{client_key}", type="primary"):
                         try:
-                            delete_user(db, client.email)
-                            st.success(f"Deleted all records for {client.email}")
+                            delete_user(db, client_email)
+                            st.success(f"Deleted all records for {client_email}")
                             del st.session_state[f"confirm_delete_{client_key}"]
                             st.rerun()
                         except Exception as e:
@@ -452,14 +573,16 @@ def display_client_submissions():
                         del st.session_state[f"confirm_delete_{client_key}"]
                         st.rerun()
 
-            with st.expander(f"View submissions for {client.email}", expanded=False):
+            st.markdown('<div class="as-card-divider"></div>', unsafe_allow_html=True)
+
+            with st.expander(f"View submissions for {client_email}", expanded=False):
                 submission_rows = db.query(
                     ClientSubmission,
                     func.count(Upload.id).label("upload_count"),
                 ).outerjoin(
                     Upload, Upload.submission_id == ClientSubmission.id
                 ).filter(
-                    ClientSubmission.user_email == client.email
+                    ClientSubmission.user_email == client_email
                 ).group_by(
                     ClientSubmission.id
                 ).order_by(
@@ -596,7 +719,7 @@ Total Issues Identified: {total_issue_count}
 === Anthropic Claude Analysis ===
 {anthropic_text}
 """
-                                        
+
                                         st.download_button(
                                             label="📥 Download Admin Summary",
                                             data=admin_summary,
@@ -604,7 +727,7 @@ Total Issues Identified: {total_issue_count}
                                             mime="text/plain",
                                             key=f"download_summary_{upload_key}"
                                         )
-                                        
+
                                         st.text_area(
                                             "Admin Summary",
                                             admin_summary,
@@ -612,7 +735,7 @@ Total Issues Identified: {total_issue_count}
                                             key=f"summary_text_{upload_key}",
                                             disabled=True
                                         )
-                                        
+
                                         if st.button("Close", key=f"close_summary_{upload_key}"):
                                             st.session_state[f"show_summary_{upload_key}"] = False
                                             st.rerun()
@@ -675,24 +798,22 @@ Total Issues Identified: {total_issue_count}
 
                         st.markdown("</div>", unsafe_allow_html=True)
                         if submission_index < len(submission_rows) - 1:
-                            st.divider()
+                            st.markdown('<div class="as-row-divider"></div>', unsafe_allow_html=True)
 
             st.markdown("</div>", unsafe_allow_html=True)
-            st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-            st.divider()
+            st.markdown('<div class="as-row-divider"></div>', unsafe_allow_html=True)
     finally:
         db.close()
 
-def display_document_analysis():
+
+def display_document_analysis(perf: AdminPerfTracker):
     """Admin-only document analysis for AR and Insurance Claims"""
     st.markdown("<h3 style='margin-top: 1.5rem;'>Document Analysis</h3>", unsafe_allow_html=True)
     st.info("These analysis tools are available to admin users only. Upload AR or Insurance Claims documents for analysis.")
-    
-    # Import analysis functions from analysis_utils.py
+
     from analysis_utils import analyze_with_all_models, send_followup_email, send_email, extract_text_from_pdf
     import pandas as pd
-    
-    # Contact Information Form for admin analysis
+
     with st.form("admin_analysis_form"):
         st.markdown("**Client Information**")
         first_name = st.text_input("Client First Name", key="admin_first_name")
@@ -701,63 +822,66 @@ def display_document_analysis():
         email = st.text_input("Client Email Address", placeholder="client@example.com", key="admin_email")
         org_type = st.selectbox("Type", ["Location", "Group"], key="admin_org_type")
         submit_info = st.form_submit_button("Save Client Info")
-    
+
     import re
     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     valid_email = re.match(email_pattern, email) if email else False
-    
+
     client_info_complete = all([first_name, last_name, office_name, email, org_type]) and valid_email
-    
+
     if email and not valid_email:
         st.error("Please enter a valid email address")
-    
+
     if not client_info_complete:
         st.warning("Please complete the client information above before uploading documents.")
     else:
         st.markdown("---")
         st.markdown("**Upload Documents for Analysis**")
-        
-        # AR File Upload Section
-        st.markdown("""
-            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 0.5rem; margin-top: 1rem;">
-                <span style="font-size: 1.2rem;">📊</span>
-                <span style="font-size: 1.1rem; font-weight: 500;">Accounts Receivable Analysis</span>
-            </div>
-        """, unsafe_allow_html=True)
+
+        st.markdown(
+            """
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 0.5rem; margin-top: 1rem;">
+                    <span style="font-size: 1.2rem;">📊</span>
+                    <span style="font-size: 1.1rem; font-weight: 500;">Accounts Receivable Analysis</span>
+                </div>
+            """,
+            unsafe_allow_html=True,
+        )
         ar_file = st.file_uploader("Upload AR Report", type=["csv", "xlsx"], key="admin_ar")
-        
-        # Insurance Claims File Upload Section
-        st.markdown("""
-            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 0.5rem; margin-top: 1rem;">
-                <span style="font-size: 1.2rem;">📋</span>
-                <span style="font-size: 1.1rem; font-weight: 500;">Insurance Claims Analysis</span>
-            </div>
-        """, unsafe_allow_html=True)
+
+        st.markdown(
+            """
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 0.5rem; margin-top: 1rem;">
+                    <span style="font-size: 1.2rem;">📋</span>
+                    <span style="font-size: 1.1rem; font-weight: 500;">Insurance Claims Analysis</span>
+                </div>
+            """,
+            unsafe_allow_html=True,
+        )
         claim_file = st.file_uploader("Upload Claim Report", type=["csv", "xlsx", "pdf"], key="admin_claim")
-        
-        # Analyze Button
+
         st.markdown("---")
         uploaded_files = {
             "AR Analyzer": ar_file,
             "Insurance Claim Analyzer": claim_file,
         }
         uploaded_count = sum(1 for f in uploaded_files.values() if f is not None)
-        
+
         if uploaded_count > 0:
             st.markdown(f"**Documents ready for analysis:** {uploaded_count}")
-            
+
             if 'admin_analyzing' not in st.session_state:
                 st.session_state.admin_analyzing = False
-            
+
             analyze_clicked = st.button("Analyze Documents", type="primary", disabled=st.session_state.admin_analyzing, key="admin_analyze_btn")
-            
+
             if st.session_state.admin_analyzing:
                 st.info("Analysis in progress. This may take a couple of minutes...")
-            
+
             if analyze_clicked:
                 st.session_state.admin_analyzing = True
                 st.rerun()
-            
+
             if st.session_state.admin_analyzing:
                 normalized_email = normalize_email(email)
                 logging.info("Normalized email: %s", normalized_email)
@@ -768,8 +892,8 @@ def display_document_analysis():
                     "email": normalized_email,
                     "org_type": org_type,
                 }
-                
-                # Save user to database
+
+                perf.mark_first_db_query()
                 db = SessionLocal()
                 try:
                     existing_user = db.query(User).filter(User.email == normalized_email).first()
@@ -808,8 +932,7 @@ def display_document_analysis():
                     db.rollback()
                 finally:
                     db.close()
-                
-                # Process each uploaded document
+
                 analysis_results = {}
                 upload_ids = []
                 all_emails_sent = True
@@ -817,7 +940,6 @@ def display_document_analysis():
                     if file is not None:
                         with st.spinner(f"Analyzing {tool_name}..."):
                             file.seek(0)
-                            # Read file content
                             file_content = file.read()
                             file_name = file.name
                             file_type = file.type
@@ -831,8 +953,7 @@ def display_document_analysis():
                             )
 
                             file.seek(0)
-                            
-                            # Extract text from file
+
                             if file_type == "application/pdf":
                                 text = extract_text_from_pdf(file)
                             elif file_type in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"]:
@@ -841,12 +962,10 @@ def display_document_analysis():
                             else:
                                 df = pd.read_csv(file)
                                 text = df.to_string()
-                            
-                            # Run analysis
+
                             results = analyze_with_all_models(text)
                             analysis_results[tool_name] = results
-                            
-                            # Send emails
+
                             email_success = True
                             try:
                                 send_followup_email(user_info_dict, tool_name, results)
@@ -870,8 +989,7 @@ def display_document_analysis():
                                 )
                             if not email_success:
                                 all_emails_sent = False
-                            
-                            # Save upload to database
+
                             upload_db = SessionLocal()
                             try:
                                 analysis_json = json.dumps({
@@ -898,7 +1016,7 @@ def display_document_analysis():
                                 upload_db.rollback()
                             finally:
                                 upload_db.close()
-                
+
                 if upload_ids and all_emails_sent:
                     submission_db = SessionLocal()
                     try:
@@ -917,7 +1035,7 @@ def display_document_analysis():
                             submission.id,
                             normalized_email,
                         )
-                        
+
                         submission_db.query(Upload).filter(Upload.id.in_(upload_ids)).update(
                             {"submission_id": submission.id},
                             synchronize_session=False
@@ -942,12 +1060,13 @@ def display_document_analysis():
                         "Submission snapshot skipped for %s due to email failure (admin)",
                         normalized_email,
                     )
-                
+
                 st.session_state.admin_analyzing = False
                 st.success("Analysis complete! Results have been emailed to the client and admin team.")
                 st.rerun()
         else:
             st.info("Upload an AR Report or Insurance Claims document to begin analysis.")
+
 
 def display_admin_management():
     st.markdown("<h3 style='margin-top: 1.5rem;'>Admin Management</h3>", unsafe_allow_html=True)
