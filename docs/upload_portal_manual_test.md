@@ -50,8 +50,9 @@ PY
 - Verify `upload_portal_files` records are created with `completed_at` set.
 
 ## Admin: Review Uploads
-- Return to **Secure Uploads** and confirm recent uploads appear.
+- Return to **Secure Uploads** and confirm recent uploads appear in **Uploads Inbox** (default 50).
 - Spot check `byte_size` and `content_type` values on recent rows.
+- Verify the `gs://` path is populated and the Console link opens the object detail view.
 
 ## Failure Handling
 - Trigger a validation failure and confirm an error state.

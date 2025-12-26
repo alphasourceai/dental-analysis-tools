@@ -26,6 +26,10 @@ Default content types (when `PORTAL_ALLOWED_CONTENT_TYPES` is unset): PDF, CSV, 
 ## Optional Upload Portal Email Env Vars
 - `UPLOAD_PORTAL_SENDGRID_TEMPLATE_ID` (SendGrid dynamic template ID for magic link emails)
 
+## SendGrid Dynamic Template Variables
+- `{{upload_link}}`
+- `{{expires_in_minutes}}`
+
 ## Render Start Command
 No change required. Keep the existing Streamlit start command:
 ```
