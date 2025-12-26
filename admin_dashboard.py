@@ -206,10 +206,11 @@ def _render_admin_css() -> None:
             font-weight: 600;
         }
         .as-email {
-            color: #AD8BF7;
+            color: #A78BFA;
             font-weight: 600;
             font-size: 0.95rem;
             word-break: break-word;
+            text-decoration: none;
         }
         .as-card details {
             background: rgba(6, 21, 81, 0.35);
@@ -244,8 +245,6 @@ def _render_admin_login() -> None:
         "<p style='text-align: center; margin-bottom: 2rem; margin-top: 1.5rem;'>Please log in to access the admin dashboard.</p>",
         unsafe_allow_html=True,
     )
-    st.info("Ask Jason to add your auth user_id to admin_users if you cannot log in.")
-
     with st.form("admin_login_form"):
         st.markdown(
             """
@@ -575,7 +574,12 @@ def display_client_submissions(perf: AdminPerfTracker):
 
             st.markdown('<div class="as-card-divider"></div>', unsafe_allow_html=True)
 
-            with st.expander(f"View submissions for {client_email}", expanded=False):
+            with st.expander("View submissions", expanded=False):
+                st.markdown(
+                    f"<div class=\"as-muted\">Client Email</div><div class=\"as-email\">{client_email}</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown('<div class="as-row-divider"></div>', unsafe_allow_html=True)
                 submission_rows = db.query(
                     ClientSubmission,
                     func.count(Upload.id).label("upload_count"),
@@ -658,8 +662,10 @@ def display_client_submissions(perf: AdminPerfTracker):
                                 with upload_header_cols[4]:
                                     st.markdown("**Analysis**")
 
-                                for upload in uploads_for_submission:
-                                    upload_key = f"{submission.id}_{upload.id}"
+                                for row_idx, upload in enumerate(uploads_for_submission):
+                                    key_suffix = f"{submission.id}_{upload.id}_{submission_index}_{row_idx}"
+                                    summary_state_key = f"show_summary_{key_suffix}"
+                                    analysis_state_key = f"show_analysis_{key_suffix}"
                                     analysis_payload = _parse_analysis_json(upload.analysis_data)
                                     has_analysis = bool(analysis_payload)
                                     upload_cols = st.columns([3.0, 2.0, 2.2, 1.0, 1.0])
@@ -671,20 +677,20 @@ def display_client_submissions(perf: AdminPerfTracker):
                                         st.write(_format_admin_dt(upload.upload_time) or "-")
                                     with upload_cols[3]:
                                         if has_analysis:
-                                            if st.button("📥", key=f"download_btn_{upload_key}"):
-                                                st.session_state[f"show_summary_{upload_key}"] = True
+                                            if st.button("📥", key=f"open_summary_{key_suffix}"):
+                                                st.session_state[summary_state_key] = True
                                                 st.rerun()
                                         else:
                                             st.write("-")
                                     with upload_cols[4]:
                                         if has_analysis:
-                                            if st.button("📄", key=f"view_btn_{upload_key}"):
-                                                st.session_state[f"show_analysis_{upload_key}"] = True
+                                            if st.button("📄", key=f"open_analysis_{key_suffix}"):
+                                                st.session_state[analysis_state_key] = True
                                                 st.rerun()
                                         else:
                                             st.write("-")
 
-                                    if st.session_state.get(f"show_summary_{upload_key}", False):
+                                    if st.session_state.get(summary_state_key, False):
                                         st.markdown("---")
                                         st.markdown(
                                             f"**Admin Summary for {upload.file_name} ({upload.tool_name})**"
@@ -720,32 +726,29 @@ Total Issues Identified: {total_issue_count}
 {anthropic_text}
 """
 
-                                        st.download_button(
-                                            label="📥 Download Admin Summary",
-                                            data=admin_summary,
-                                            file_name=f"admin_summary_{submission.user_email}_{upload.file_name}.txt",
-                                            mime="text/plain",
-                                            key=f"download_summary_{upload_key}"
-                                        )
+                                            st.download_button(
+                                                label="📥 Download Admin Summary",
+                                                data=admin_summary,
+                                                file_name=f"admin_summary_{submission.user_email}_{upload.file_name}.txt",
+                                                mime="text/plain",
+                                                key=f"download_summary_{key_suffix}"
+                                            )
 
-                                        st.text_area(
-                                            "Admin Summary",
-                                            admin_summary,
-                                            height=400,
-                                            key=f"summary_text_{upload_key}",
-                                            disabled=True
-                                        )
-
-                                        if st.button("Close", key=f"close_summary_{upload_key}"):
-                                            st.session_state[f"show_summary_{upload_key}"] = False
-                                            st.rerun()
+                                            st.text_area(
+                                                "Admin Summary",
+                                                admin_summary,
+                                                height=400,
+                                                key=f"summary_text_{key_suffix}",
+                                                disabled=True
+                                            )
                                         else:
                                             st.info("No analysis data available.")
-                                            if st.button("Close", key=f"close_summary_{upload_key}"):
-                                                st.session_state[f"show_summary_{upload_key}"] = False
-                                                st.rerun()
 
-                                    if st.session_state.get(f"show_analysis_{upload_key}", False):
+                                        if st.button("Close", key=f"close_summary_{key_suffix}"):
+                                            st.session_state[summary_state_key] = False
+                                            st.rerun()
+
+                                    if st.session_state.get(analysis_state_key, False):
                                         st.markdown("---")
                                         st.markdown(
                                             f"**Analysis for {upload.file_name} ({upload.tool_name})**"
@@ -762,39 +765,39 @@ Total Issues Identified: {total_issue_count}
 
                                             st.markdown("**OpenAI Analysis:**")
                                             st.text_area(
-                                                "",
+                                                "OpenAI Analysis",
                                                 openai_text,
                                                 height=200,
-                                                key=f"openai_{upload_key}",
-                                                disabled=True
+                                                key=f"analysis_openai_{key_suffix}",
+                                                disabled=True,
+                                                label_visibility="collapsed",
                                             )
 
                                             st.markdown("**xAI Analysis:**")
                                             st.text_area(
-                                                "",
+                                                "xAI Analysis",
                                                 xai_text,
                                                 height=200,
-                                                key=f"xai_{upload_key}",
-                                                disabled=True
+                                                key=f"analysis_xai_{key_suffix}",
+                                                disabled=True,
+                                                label_visibility="collapsed",
                                             )
 
                                             st.markdown("**Anthropic Analysis:**")
                                             st.text_area(
-                                                "",
+                                                "Anthropic Analysis",
                                                 anthropic_text,
                                                 height=200,
-                                                key=f"anthropic_{upload_key}",
-                                                disabled=True
+                                                key=f"analysis_anthropic_{key_suffix}",
+                                                disabled=True,
+                                                label_visibility="collapsed",
                                             )
-
-                                            if st.button("Close", key=f"close_{upload_key}"):
-                                                st.session_state[f"show_analysis_{upload_key}"] = False
-                                                st.rerun()
                                         else:
                                             st.info("No analysis data available.")
-                                            if st.button("Close", key=f"close_{upload_key}"):
-                                                st.session_state[f"show_analysis_{upload_key}"] = False
-                                                st.rerun()
+
+                                        if st.button("Close", key=f"close_analysis_{key_suffix}"):
+                                            st.session_state[analysis_state_key] = False
+                                            st.rerun()
 
                         st.markdown("</div>", unsafe_allow_html=True)
                         if submission_index < len(submission_rows) - 1:
