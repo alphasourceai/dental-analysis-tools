@@ -1,3 +1,4 @@
+import html
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ except ImportError:
     ZoneInfo = None
 
 import streamlit as st
+import streamlit.components.v1 as components
 from sqlalchemy import func
 
 from database import SessionLocal
@@ -40,12 +42,6 @@ def normalize_email(raw_email: str) -> str:
     if not raw_email:
         return ""
     return raw_email.strip().lower()
-
-
-def _safe_email_html(raw_email: str) -> str:
-    if not raw_email:
-        return ""
-    return raw_email.replace("@", "&#64;")
 
 
 def _token_ttl_minutes() -> int:
@@ -113,6 +109,40 @@ def _parse_analysis_json(value: object):
         except (TypeError, json.JSONDecodeError):
             return None
     return None
+
+
+def _render_email_html(raw_email: str, height: int = 24) -> None:
+    if not raw_email:
+        st.write("-")
+        return
+    safe_email = html.escape(raw_email).replace("@", "&#64;")
+    components.html(
+        f"""
+        <html>
+            <head>
+                <style>
+                    body {{
+                        margin: 0;
+                        padding: 0;
+                        background: transparent;
+                        font-family: 'Raleway', system-ui, -apple-system, sans-serif;
+                    }}
+                    .as-email {{
+                        color: #A78BFA;
+                        font-weight: 600;
+                        font-size: 0.95rem;
+                        text-decoration: none;
+                    }}
+                </style>
+            </head>
+            <body>
+                <span class="as-email">{safe_email}</span>
+            </body>
+        </html>
+        """,
+        height=height,
+        scrolling=False,
+    )
 
 
 def _ensure_admin_state() -> None:
@@ -217,6 +247,20 @@ def _render_admin_css() -> None:
             font-size: 0.95rem;
             word-break: break-word;
             text-decoration: none;
+        }
+        .as-email:hover {
+            text-decoration: none;
+        }
+        .client-submissions-scope .as-email,
+        .client-submissions-scope .as-email * {
+            color: #A78BFA !important;
+            text-decoration: none !important;
+        }
+        .client-submissions-scope a[href^="mailto:"] {
+            pointer-events: none !important;
+            cursor: default !important;
+            color: #A78BFA !important;
+            text-decoration: none !important;
         }
         .as-card details {
             background: rgba(6, 21, 81, 0.35);
@@ -499,6 +543,7 @@ def display_uploads_inbox(perf: AdminPerfTracker):
 
 def display_client_submissions(perf: AdminPerfTracker):
     st.markdown("<h3 style='margin-top: 1.5rem;'>Client Submissions</h3>", unsafe_allow_html=True)
+    st.markdown('<div class="client-submissions-scope">', unsafe_allow_html=True)
     search_term = st.text_input("Search by email", placeholder="Search by email")
     normalized_search = search_term.strip().lower() if search_term else ""
 
@@ -541,15 +586,11 @@ def display_client_submissions(perf: AdminPerfTracker):
 
         for client in clients:
             client_email = client.email or ""
-            safe_email = _safe_email_html(client_email)
             client_key = client_email.replace("@", "_at_").replace(".", "_")
             st.markdown('<div class="as-card">', unsafe_allow_html=True)
             cols = st.columns([3.6, 1.4, 2.2, 0.8])
             with cols[0]:
-                if safe_email:
-                    st.markdown(f"<span class=\"as-email\">{safe_email}</span>", unsafe_allow_html=True)
-                else:
-                    st.write("-")
+                _render_email_html(client_email)
             with cols[1]:
                 st.markdown(
                     f"<span class=\"as-pill\">{client.submission_count}</span>",
@@ -567,8 +608,7 @@ def display_client_submissions(perf: AdminPerfTracker):
 
             if st.session_state.get(f"confirm_delete_{client_key}"):
                 st.warning("Are you sure you want to delete all records for this client?")
-                if safe_email:
-                    st.markdown(f"<span class=\"as-email\">{safe_email}</span>", unsafe_allow_html=True)
+                _render_email_html(client_email)
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Yes, Delete", key=f"confirm_yes_{client_key}", type="primary"):
@@ -587,11 +627,8 @@ def display_client_submissions(perf: AdminPerfTracker):
             st.markdown('<div class="as-card-divider"></div>', unsafe_allow_html=True)
 
             with st.expander("View submissions", expanded=False):
-                if safe_email:
-                    st.markdown(
-                        f"<div class=\"as-muted\">Client Email</div><div class=\"as-email\">{safe_email}</div>",
-                        unsafe_allow_html=True,
-                    )
+                st.markdown("<div class=\"as-muted\">Client Email</div>", unsafe_allow_html=True)
+                _render_email_html(client_email)
                 st.markdown('<div class="as-row-divider"></div>', unsafe_allow_html=True)
                 submission_rows = db.query(
                     ClientSubmission,
@@ -820,6 +857,7 @@ Total Issues Identified: {total_issue_count}
             st.markdown('<div class="as-row-divider"></div>', unsafe_allow_html=True)
     finally:
         db.close()
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def display_document_analysis(perf: AdminPerfTracker):
