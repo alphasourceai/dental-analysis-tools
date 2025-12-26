@@ -99,7 +99,6 @@ def _parse_analysis_json(value: object):
 def display_admin_dashboard():
     st.markdown("""
     <style>
-    /* Admin-only expander summary styling to match dashboard background */
     details > summary {
         background-color: #061551 !important;
         color: #EBFEFF !important;
@@ -110,6 +109,107 @@ def display_admin_dashboard():
     details > summary:focus-visible {
         background-color: #061551 !important;
         color: #EBFEFF !important;
+    }
+    [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] p {
+        font-size: 0.75rem !important;
+        line-height: 1.2 !important;
+        margin: 0.15rem 0 !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+    [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] .stMarkdown strong {
+        font-size: 0.8rem !important;
+        font-weight: 600 !important;
+    }
+    [data-baseweb="tab-panel"]:first-of-type .stButton > button {
+        padding: 0.15rem 0.3rem !important;
+        font-size: 1rem !important;
+        min-height: 1.6rem !important;
+        height: 1.6rem !important;
+        line-height: 1 !important;
+        border-radius: 4px !important;
+    }
+    [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] {
+        padding: 0.1rem 0.3rem !important;
+    }
+    [data-baseweb="tab-panel"]:first-of-type [data-testid="stTextArea"] p,
+    [data-baseweb="tab-panel"]:first-of-type .stAlert p,
+    [data-baseweb="tab-panel"]:first-of-type .stWarning p,
+    [data-baseweb="tab-panel"]:first-of-type .stError p,
+    [data-baseweb="tab-panel"]:first-of-type .stSuccess p,
+    [data-baseweb="tab-panel"]:first-of-type .stInfo p {
+        font-size: 1rem !important;
+        white-space: normal !important;
+    }
+    .as-card {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 14px;
+        padding: 0.75rem 0.9rem;
+        margin-bottom: 0.85rem;
+    }
+    .as-subcard {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 0.6rem 0.75rem;
+        margin: 0.6rem 0;
+    }
+    .as-muted {
+        color: #A9B2C9;
+        font-size: 0.75rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        margin-bottom: 0.15rem;
+    }
+    .as-pill {
+        display: inline-block;
+        padding: 0.1rem 0.5rem;
+        border-radius: 999px;
+        background: rgba(0, 207, 200, 0.2);
+        border: 1px solid rgba(0, 207, 200, 0.35);
+        color: #E6FBFF;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    .as-card a,
+    .as-card a:visited,
+    .as-subcard a,
+    .as-subcard a:visited {
+        color: #E6EBFF !important;
+        text-decoration: none !important;
+    }
+    .as-card a:hover,
+    .as-subcard a:hover {
+        color: #FFFFFF !important;
+        text-decoration: underline !important;
+    }
+
+    [data-baseweb="tab-panel"]:first-of-type a,
+    [data-baseweb="tab-panel"]:first-of-type a:visited,
+    [data-baseweb="tab-panel"]:first-of-type a:active {
+        color: #E6EBFF !important;
+        text-decoration: none !important;
+    }
+    [data-baseweb="tab-panel"]:first-of-type a:hover {
+        color: #FFFFFF !important;
+        text-decoration: underline !important;
+    }
+
+    .as-card details {
+        background: rgba(6, 21, 81, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        padding: 0.35rem 0.6rem;
+        margin-top: 0.5rem;
+    }
+    .as-subcard details {
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 10px;
+        padding: 0.35rem 0.6rem;
+        margin-top: 0.55rem;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -277,89 +377,6 @@ def display_uploads_inbox():
         db.close()
 
 def display_client_submissions():
-    # Add compact styling CSS - targets first tab's content area only
-    st.markdown("""
-    <style>
-    /* Compact table styling for Client Submissions tab - use data attribute targeting */
-    [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] p {
-        font-size: 0.75rem !important;
-        line-height: 1.2 !important;
-        margin: 0.15rem 0 !important;
-        white-space: nowrap !important;
-        overflow: hidden !important;
-        text-overflow: ellipsis !important;
-    }
-    
-    /* Headers in the table */
-    [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] .stMarkdown strong {
-        font-size: 0.8rem !important;
-        font-weight: 600 !important;
-    }
-    
-    /* Icon-only buttons - very compact */
-    [data-baseweb="tab-panel"]:first-of-type .stButton > button {
-        padding: 0.15rem 0.3rem !important;
-        font-size: 1rem !important;
-        min-height: 1.6rem !important;
-        height: 1.6rem !important;
-        line-height: 1 !important;
-        border-radius: 4px !important;
-    }
-    
-    /* Column spacing */
-    [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] {
-        padding: 0.1rem 0.3rem !important;
-    }
-    
-    /* Exclude modals and dialogs from compact styling */
-    [data-baseweb="tab-panel"]:first-of-type [data-testid="stTextArea"] p,
-    [data-baseweb="tab-panel"]:first-of-type .stAlert p,
-    [data-baseweb="tab-panel"]:first-of-type .stWarning p,
-    [data-baseweb="tab-panel"]:first-of-type .stError p,
-    [data-baseweb="tab-panel"]:first-of-type .stSuccess p,
-    [data-baseweb="tab-panel"]:first-of-type .stInfo p {
-        font-size: 1rem !important;
-        white-space: normal !important;
-    }
-
-    [data-baseweb="tab-panel"]:first-of-type a {
-        color: #f5f7ff !important;
-        text-decoration: underline !important;
-    }
-
-    [data-baseweb="tab-panel"]:first-of-type a:hover {
-        color: #ffffff !important;
-    }
-
-    [data-baseweb="tab-panel"]:first-of-type span[data-client-row] {
-        display: none !important;
-    }
-
-    [data-baseweb="tab-panel"]:first-of-type div[data-testid="stVerticalBlock"]:has(span[data-client-row]) {
-        background: rgba(255, 255, 255, 0.04);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 12px;
-        padding: 0.65rem 0.8rem;
-        margin-bottom: 0.75rem;
-    }
-
-    [data-baseweb="tab-panel"]:first-of-type details {
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 10px;
-        padding: 0.35rem 0.6rem;
-        margin-top: 0.5rem;
-    }
-
-    [data-baseweb="tab-panel"]:first-of-type details details {
-        background: rgba(255, 255, 255, 0.025);
-        border-color: rgba(255, 255, 255, 0.06);
-        margin-left: 0.5rem;
-    }
-    
-    </style>
-    """, unsafe_allow_html=True)
-    
     st.markdown("<h3 style='margin-top: 1.5rem;'>Client Submissions</h3>", unsafe_allow_html=True)
     search_term = st.text_input("Search by email", placeholder="Search by email")
     normalized_search = search_term.strip().lower() if search_term else ""
@@ -402,61 +419,56 @@ def display_client_submissions():
         
         for client in clients:
             client_key = client.email.replace("@", "_at_").replace(".", "_")
-            with st.container():
-                st.markdown("<span data-client-row=\"true\"></span>", unsafe_allow_html=True)
-                cols = st.columns([3.6, 1.4, 2.2, 0.8])
-                with cols[0]:
-                    st.markdown(
-                        f"<a href=\"mailto:{client.email}\" style=\"color:#f5f7ff;text-decoration:underline;\">{client.email}</a>",
-                        unsafe_allow_html=True,
-                    )
-                with cols[1]:
-                    st.write(client.submission_count)
-                with cols[2]:
-                    if client.last_submitted_at:
-                        st.write(_format_admin_dt(client.last_submitted_at) or "-")
-                    else:
-                        st.write("-")
-                with cols[3]:
-                    if st.button("🗑️", key=f"delete_btn_{client_key}"):
-                        st.session_state[f"confirm_delete_{client_key}"] = client.email
-                        st.rerun()
-                
-                if st.session_state.get(f"confirm_delete_{client_key}"):
-                    st.warning(f"Are you sure you want to delete all records for {client.email}?")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("Yes, Delete", key=f"confirm_yes_{client_key}", type="primary"):
-                            try:
-                                delete_user(db, client.email)
-                                st.success(f"Deleted all records for {client.email}")
-                                del st.session_state[f"confirm_delete_{client_key}"]
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error deleting user: {str(e)}")
-                    with col2:
-                        if st.button("Cancel", key=f"confirm_no_{client_key}"):
+            st.markdown('<div class="as-card">', unsafe_allow_html=True)
+            cols = st.columns([3.6, 1.4, 2.2, 0.8])
+            with cols[0]:
+                st.markdown(f"[{client.email}](mailto:{client.email})")
+            with cols[1]:
+                st.markdown(f"<span class=\"as-pill\">{client.submission_count}</span>", unsafe_allow_html=True)
+            with cols[2]:
+                if client.last_submitted_at:
+                    st.write(_format_admin_dt(client.last_submitted_at) or "-")
+                else:
+                    st.write("-")
+            with cols[3]:
+                if st.button("🗑️", key=f"delete_btn_{client_key}"):
+                    st.session_state[f"confirm_delete_{client_key}"] = client.email
+                    st.rerun()
+
+            if st.session_state.get(f"confirm_delete_{client_key}"):
+                st.warning(f"Are you sure you want to delete all records for {client.email}?")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Yes, Delete", key=f"confirm_yes_{client_key}", type="primary"):
+                        try:
+                            delete_user(db, client.email)
+                            st.success(f"Deleted all records for {client.email}")
                             del st.session_state[f"confirm_delete_{client_key}"]
                             st.rerun()
-                
-                with st.expander(f"View submissions for {client.email}", expanded=False):
-                    submission_rows = db.query(
-                        ClientSubmission,
-                        func.count(Upload.id).label("upload_count"),
-                    ).outerjoin(
-                        Upload, Upload.submission_id == ClientSubmission.id
-                    ).filter(
-                        ClientSubmission.user_email == client.email
-                    ).group_by(
-                        ClientSubmission.id
-                    ).order_by(
-                        ClientSubmission.submitted_at.desc()
-                    ).all()
-                    
-                    if not submission_rows:
-                        st.write("No submissions available for this client.")
-                        continue
-                    
+                        except Exception as e:
+                            st.error(f"Error deleting user: {str(e)}")
+                with col2:
+                    if st.button("Cancel", key=f"confirm_no_{client_key}"):
+                        del st.session_state[f"confirm_delete_{client_key}"]
+                        st.rerun()
+
+            with st.expander(f"View submissions for {client.email}", expanded=False):
+                submission_rows = db.query(
+                    ClientSubmission,
+                    func.count(Upload.id).label("upload_count"),
+                ).outerjoin(
+                    Upload, Upload.submission_id == ClientSubmission.id
+                ).filter(
+                    ClientSubmission.user_email == client.email
+                ).group_by(
+                    ClientSubmission.id
+                ).order_by(
+                    ClientSubmission.submitted_at.desc()
+                ).all()
+
+                if not submission_rows:
+                    st.write("No submissions available for this client.")
+                else:
                     submission_ids = [row[0].id for row in submission_rows]
                     uploads_by_submission = {}
                     if submission_ids:
@@ -465,37 +477,44 @@ def display_client_submissions():
                         ).order_by(Upload.upload_time.desc()).all()
                         for upload in uploads:
                             uploads_by_submission.setdefault(upload.submission_id, []).append(upload)
-                    
-                    sub_header_cols = st.columns([2.2, 2.2, 2.4, 1.6, 1.4])
-                    with sub_header_cols[0]:
-                        st.markdown("**Submitted At**")
-                    with sub_header_cols[1]:
-                        st.markdown("**Name**")
-                    with sub_header_cols[2]:
-                        st.markdown("**Office/Group**")
-                    with sub_header_cols[3]:
-                        st.markdown("**Org Type**")
-                    with sub_header_cols[4]:
-                        st.markdown("**Uploads**")
-                    
-                    for submission_row in submission_rows:
+
+                    for submission_index, submission_row in enumerate(submission_rows):
                         submission = submission_row[0]
                         upload_count = submission_row[1]
                         full_name = f"{submission.first_name} {submission.last_name}".strip()
                         submission_label = _format_admin_dt(submission.submitted_at) or "-"
-                        
-                        cols = st.columns([2.2, 2.2, 2.4, 1.6, 1.4])
-                        with cols[0]:
-                            st.write(submission_label)
-                        with cols[1]:
-                            st.write(full_name if full_name.strip() else "-")
-                        with cols[2]:
-                            st.write(submission.office_name or "-")
-                        with cols[3]:
-                            st.write(submission.org_type or "-")
-                        with cols[4]:
-                            st.write(upload_count)
-                        
+
+                        st.markdown('<div class="as-subcard">', unsafe_allow_html=True)
+                        sub_cols = st.columns([2.2, 2.2, 2.4, 1.6, 1.2])
+                        with sub_cols[0]:
+                            st.markdown(
+                                f"<div class=\"as-muted\">Submitted At</div><div>{submission_label}</div>",
+                                unsafe_allow_html=True,
+                            )
+                        with sub_cols[1]:
+                            name_value = full_name if full_name.strip() else "-"
+                            st.markdown(
+                                f"<div class=\"as-muted\">Name</div><div>{name_value}</div>",
+                                unsafe_allow_html=True,
+                            )
+                        with sub_cols[2]:
+                            office_value = submission.office_name or "-"
+                            st.markdown(
+                                f"<div class=\"as-muted\">Office/Group</div><div>{office_value}</div>",
+                                unsafe_allow_html=True,
+                            )
+                        with sub_cols[3]:
+                            org_value = submission.org_type or "-"
+                            st.markdown(
+                                f"<div class=\"as-muted\">Org Type</div><div>{org_value}</div>",
+                                unsafe_allow_html=True,
+                            )
+                        with sub_cols[4]:
+                            st.markdown(
+                                f"<div class=\"as-muted\">Uploads</div><span class=\"as-pill\">{upload_count}</span>",
+                                unsafe_allow_html=True,
+                            )
+
                         uploads_for_submission = uploads_by_submission.get(submission.id, [])
                         with st.expander(
                             f"Uploads for {submission_label} ({len(uploads_for_submission)})",
@@ -503,60 +522,59 @@ def display_client_submissions():
                         ):
                             if not uploads_for_submission:
                                 st.write("No uploads linked to this submission.")
-                                continue
-                            
-                            upload_header_cols = st.columns([3.0, 2.0, 2.2, 1.0, 1.0])
-                            with upload_header_cols[0]:
-                                st.markdown("**File Name**")
-                            with upload_header_cols[1]:
-                                st.markdown("**Tool**")
-                            with upload_header_cols[2]:
-                                st.markdown("**Upload Time**")
-                            with upload_header_cols[3]:
-                                st.markdown("**Summary**")
-                            with upload_header_cols[4]:
-                                st.markdown("**Analysis**")
-                            
-                            for upload in uploads_for_submission:
-                                upload_key = f"{submission.id}_{upload.id}"
-                                analysis_payload = _parse_analysis_json(upload.analysis_data)
-                                has_analysis = bool(analysis_payload)
-                                upload_cols = st.columns([3.0, 2.0, 2.2, 1.0, 1.0])
-                                with upload_cols[0]:
-                                    st.write(upload.file_name or "-")
-                                with upload_cols[1]:
-                                    st.write(upload.tool_name or "-")
-                                with upload_cols[2]:
-                                    st.write(_format_admin_dt(upload.upload_time) or "-")
-                                with upload_cols[3]:
-                                    if has_analysis:
-                                        if st.button("📥", key=f"download_btn_{upload_key}"):
-                                            st.session_state[f"show_summary_{upload_key}"] = True
-                                            st.rerun()
-                                    else:
-                                        st.write("-")
-                                with upload_cols[4]:
-                                    if has_analysis:
-                                        if st.button("📄", key=f"view_btn_{upload_key}"):
-                                            st.session_state[f"show_analysis_{upload_key}"] = True
-                                            st.rerun()
-                                    else:
-                                        st.write("-")
-                                
-                                if st.session_state.get(f"show_summary_{upload_key}", False):
-                                    st.markdown("---")
-                                    st.markdown(
-                                        f"**Admin Summary for {upload.file_name} ({upload.tool_name})**"
-                                    )
-                                    if analysis_payload:
-                                        raw_analyses = analysis_payload.get("raw_analyses", {})
-                                        if not isinstance(raw_analyses, dict):
-                                            raw_analyses = {}
-                                        total_issue_count = analysis_payload.get("total_issue_count", "N/A")
-                                        openai_text = raw_analyses.get("OpenAI Analysis", "No OpenAI analysis available.")
-                                        xai_text = raw_analyses.get("xAI Analysis", "No xAI analysis available.")
-                                        anthropic_text = raw_analyses.get("AnthropicAI Analysis", "No Anthropic analysis available.")
-                                        admin_summary = f"""
+                            else:
+                                upload_header_cols = st.columns([3.0, 2.0, 2.2, 1.0, 1.0])
+                                with upload_header_cols[0]:
+                                    st.markdown("**File Name**")
+                                with upload_header_cols[1]:
+                                    st.markdown("**Tool**")
+                                with upload_header_cols[2]:
+                                    st.markdown("**Upload Time**")
+                                with upload_header_cols[3]:
+                                    st.markdown("**Summary**")
+                                with upload_header_cols[4]:
+                                    st.markdown("**Analysis**")
+
+                                for upload in uploads_for_submission:
+                                    upload_key = f"{submission.id}_{upload.id}"
+                                    analysis_payload = _parse_analysis_json(upload.analysis_data)
+                                    has_analysis = bool(analysis_payload)
+                                    upload_cols = st.columns([3.0, 2.0, 2.2, 1.0, 1.0])
+                                    with upload_cols[0]:
+                                        st.write(upload.file_name or "-")
+                                    with upload_cols[1]:
+                                        st.write(upload.tool_name or "-")
+                                    with upload_cols[2]:
+                                        st.write(_format_admin_dt(upload.upload_time) or "-")
+                                    with upload_cols[3]:
+                                        if has_analysis:
+                                            if st.button("📥", key=f"download_btn_{upload_key}"):
+                                                st.session_state[f"show_summary_{upload_key}"] = True
+                                                st.rerun()
+                                        else:
+                                            st.write("-")
+                                    with upload_cols[4]:
+                                        if has_analysis:
+                                            if st.button("📄", key=f"view_btn_{upload_key}"):
+                                                st.session_state[f"show_analysis_{upload_key}"] = True
+                                                st.rerun()
+                                        else:
+                                            st.write("-")
+
+                                    if st.session_state.get(f"show_summary_{upload_key}", False):
+                                        st.markdown("---")
+                                        st.markdown(
+                                            f"**Admin Summary for {upload.file_name} ({upload.tool_name})**"
+                                        )
+                                        if analysis_payload:
+                                            raw_analyses = analysis_payload.get("raw_analyses", {})
+                                            if not isinstance(raw_analyses, dict):
+                                                raw_analyses = {}
+                                            total_issue_count = analysis_payload.get("total_issue_count", "N/A")
+                                            openai_text = raw_analyses.get("OpenAI Analysis", "No OpenAI analysis available.")
+                                            xai_text = raw_analyses.get("xAI Analysis", "No xAI analysis available.")
+                                            anthropic_text = raw_analyses.get("AnthropicAI Analysis", "No Anthropic analysis available.")
+                                            admin_summary = f"""
 Tool: {upload.tool_name}
 File Name: {upload.file_name}
 
@@ -598,64 +616,70 @@ Total Issues Identified: {total_issue_count}
                                         if st.button("Close", key=f"close_summary_{upload_key}"):
                                             st.session_state[f"show_summary_{upload_key}"] = False
                                             st.rerun()
-                                    else:
-                                        st.info("No analysis data available.")
-                                        if st.button("Close", key=f"close_summary_{upload_key}"):
-                                            st.session_state[f"show_summary_{upload_key}"] = False
-                                            st.rerun()
-                                
-                                if st.session_state.get(f"show_analysis_{upload_key}", False):
-                                    st.markdown("---")
-                                    st.markdown(
-                                        f"**Analysis for {upload.file_name} ({upload.tool_name})**"
-                                    )
-                                    if analysis_payload:
-                                        raw_analyses = analysis_payload.get("raw_analyses", {})
-                                        if not isinstance(raw_analyses, dict):
-                                            raw_analyses = {}
-                                        total_issue_count = analysis_payload.get("total_issue_count", "N/A")
-                                        openai_text = raw_analyses.get("OpenAI Analysis", "No OpenAI analysis available.")
-                                        xai_text = raw_analyses.get("xAI Analysis", "No xAI analysis available.")
-                                        anthropic_text = raw_analyses.get("AnthropicAI Analysis", "No Anthropic analysis available.")
-                                        st.markdown(f"**Total Issues Identified:** {total_issue_count}")
-                                        
-                                        st.markdown("**OpenAI Analysis:**")
-                                        st.text_area(
-                                            "",
-                                            openai_text,
-                                            height=200,
-                                            key=f"openai_{upload_key}",
-                                            disabled=True
+                                        else:
+                                            st.info("No analysis data available.")
+                                            if st.button("Close", key=f"close_summary_{upload_key}"):
+                                                st.session_state[f"show_summary_{upload_key}"] = False
+                                                st.rerun()
+
+                                    if st.session_state.get(f"show_analysis_{upload_key}", False):
+                                        st.markdown("---")
+                                        st.markdown(
+                                            f"**Analysis for {upload.file_name} ({upload.tool_name})**"
                                         )
-                                        
-                                        st.markdown("**xAI Analysis:**")
-                                        st.text_area(
-                                            "",
-                                            xai_text,
-                                            height=200,
-                                            key=f"xai_{upload_key}",
-                                            disabled=True
-                                        )
-                                        
-                                        st.markdown("**Anthropic Analysis:**")
-                                        st.text_area(
-                                            "",
-                                            anthropic_text,
-                                            height=200,
-                                            key=f"anthropic_{upload_key}",
-                                            disabled=True
-                                        )
-                                        
-                                        if st.button("Close", key=f"close_{upload_key}"):
-                                            st.session_state[f"show_analysis_{upload_key}"] = False
-                                            st.rerun()
-                                    else:
-                                        st.info("No analysis data available.")
-                                        if st.button("Close", key=f"close_{upload_key}"):
-                                            st.session_state[f"show_analysis_{upload_key}"] = False
-                                            st.rerun()
-                        
-                        st.divider()
+                                        if analysis_payload:
+                                            raw_analyses = analysis_payload.get("raw_analyses", {})
+                                            if not isinstance(raw_analyses, dict):
+                                                raw_analyses = {}
+                                            total_issue_count = analysis_payload.get("total_issue_count", "N/A")
+                                            openai_text = raw_analyses.get("OpenAI Analysis", "No OpenAI analysis available.")
+                                            xai_text = raw_analyses.get("xAI Analysis", "No xAI analysis available.")
+                                            anthropic_text = raw_analyses.get("AnthropicAI Analysis", "No Anthropic analysis available.")
+                                            st.markdown(f"**Total Issues Identified:** {total_issue_count}")
+
+                                            st.markdown("**OpenAI Analysis:**")
+                                            st.text_area(
+                                                "",
+                                                openai_text,
+                                                height=200,
+                                                key=f"openai_{upload_key}",
+                                                disabled=True
+                                            )
+
+                                            st.markdown("**xAI Analysis:**")
+                                            st.text_area(
+                                                "",
+                                                xai_text,
+                                                height=200,
+                                                key=f"xai_{upload_key}",
+                                                disabled=True
+                                            )
+
+                                            st.markdown("**Anthropic Analysis:**")
+                                            st.text_area(
+                                                "",
+                                                anthropic_text,
+                                                height=200,
+                                                key=f"anthropic_{upload_key}",
+                                                disabled=True
+                                            )
+
+                                            if st.button("Close", key=f"close_{upload_key}"):
+                                                st.session_state[f"show_analysis_{upload_key}"] = False
+                                                st.rerun()
+                                        else:
+                                            st.info("No analysis data available.")
+                                            if st.button("Close", key=f"close_{upload_key}"):
+                                                st.session_state[f"show_analysis_{upload_key}"] = False
+                                                st.rerun()
+
+                        st.markdown("</div>", unsafe_allow_html=True)
+                        if submission_index < len(submission_rows) - 1:
+                            st.divider()
+
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+            st.divider()
     finally:
         db.close()
 
