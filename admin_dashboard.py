@@ -3,7 +3,10 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 
 import streamlit as st
 from sqlalchemy import func
@@ -39,8 +42,58 @@ def _parse_date_input(value: str) -> datetime.date:
 def format_mst(dt: datetime) -> str:
     if not dt:
         return None
-    mst = dt.astimezone(ZoneInfo("America/Denver"))
-    return mst.strftime("%m-%d-%Y %H:%M MST")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if ZoneInfo:
+        mst = dt.astimezone(ZoneInfo("America/Denver"))
+        return mst.strftime("%m-%d-%Y %H:%M MST")
+    utc = dt.astimezone(timezone.utc)
+    return utc.strftime("%m-%d-%Y %H:%M UTC")
+
+
+def _format_admin_dt(value: object):
+    if not value:
+        return None
+    dt = None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            try:
+                dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return raw
+    else:
+        return str(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if ZoneInfo:
+        mst = dt.astimezone(ZoneInfo("America/Denver"))
+        return mst.strftime("%m-%d-%Y %H:%M MST")
+    utc = dt.astimezone(timezone.utc)
+    return utc.strftime("%m-%d-%Y %H:%M UTC")
+
+
+def _parse_analysis_json(value: object):
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except (TypeError, json.JSONDecodeError):
+            return None
+    return None
 
 # Admin Dashboard Page
 def display_admin_dashboard():
@@ -198,6 +251,7 @@ def display_uploads_inbox():
                     "created_at": format_mst(row.created_at),
                     "completed_at": format_mst(row.completed_at),
                     "user_email": row.user_email,
+                    "console_url": console_url,
                     "user_id": str(row.user_id) if row.user_id else None,
                     "original_filename": row.original_filename,
                     "content_type": row.content_type,
@@ -207,7 +261,6 @@ def display_uploads_inbox():
                     "request_id": str(row.request_id),
                     "session_id": str(row.session_id),
                     "gs_path": gs_path,
-                    "console_url": console_url,
                 }
             )
 
@@ -215,7 +268,7 @@ def display_uploads_inbox():
             items,
             use_container_width=True,
             column_config={
-                "console_url": st.column_config.LinkColumn("Console link"),
+                "console_url": st.column_config.LinkColumn("Console link", display_text="View file"),
             },
         )
     except Exception:
@@ -268,6 +321,41 @@ def display_client_submissions():
         font-size: 1rem !important;
         white-space: normal !important;
     }
+
+    [data-baseweb="tab-panel"]:first-of-type a {
+        color: #f5f7ff !important;
+        text-decoration: underline !important;
+    }
+
+    [data-baseweb="tab-panel"]:first-of-type a:hover {
+        color: #ffffff !important;
+    }
+
+    [data-baseweb="tab-panel"]:first-of-type span[data-client-row] {
+        display: none !important;
+    }
+
+    [data-baseweb="tab-panel"]:first-of-type div[data-testid="stVerticalBlock"]:has(span[data-client-row]) {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 12px;
+        padding: 0.65rem 0.8rem;
+        margin-bottom: 0.75rem;
+    }
+
+    [data-baseweb="tab-panel"]:first-of-type details {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        padding: 0.35rem 0.6rem;
+        margin-top: 0.5rem;
+    }
+
+    [data-baseweb="tab-panel"]:first-of-type details details {
+        background: rgba(255, 255, 255, 0.025);
+        border-color: rgba(255, 255, 255, 0.06);
+        margin-left: 0.5rem;
+    }
     
     </style>
     """, unsafe_allow_html=True)
@@ -315,14 +403,18 @@ def display_client_submissions():
         for client in clients:
             client_key = client.email.replace("@", "_at_").replace(".", "_")
             with st.container():
+                st.markdown("<span data-client-row=\"true\"></span>", unsafe_allow_html=True)
                 cols = st.columns([3.6, 1.4, 2.2, 0.8])
                 with cols[0]:
-                    st.write(client.email)
+                    st.markdown(
+                        f"<a href=\"mailto:{client.email}\" style=\"color:#f5f7ff;text-decoration:underline;\">{client.email}</a>",
+                        unsafe_allow_html=True,
+                    )
                 with cols[1]:
                     st.write(client.submission_count)
                 with cols[2]:
                     if client.last_submitted_at:
-                        st.write(client.last_submitted_at.strftime("%Y-%m-%d %H:%M:%S"))
+                        st.write(_format_admin_dt(client.last_submitted_at) or "-")
                     else:
                         st.write("-")
                 with cols[3]:
@@ -390,10 +482,7 @@ def display_client_submissions():
                         submission = submission_row[0]
                         upload_count = submission_row[1]
                         full_name = f"{submission.first_name} {submission.last_name}".strip()
-                        submission_label = (
-                            submission.submitted_at.strftime("%Y-%m-%d %H:%M:%S")
-                            if submission.submitted_at else "-"
-                        )
+                        submission_label = _format_admin_dt(submission.submitted_at) or "-"
                         
                         cols = st.columns([2.2, 2.2, 2.4, 1.6, 1.4])
                         with cols[0]:
@@ -430,22 +519,24 @@ def display_client_submissions():
                             
                             for upload in uploads_for_submission:
                                 upload_key = f"{submission.id}_{upload.id}"
+                                analysis_payload = _parse_analysis_json(upload.analysis_data)
+                                has_analysis = bool(analysis_payload)
                                 upload_cols = st.columns([3.0, 2.0, 2.2, 1.0, 1.0])
                                 with upload_cols[0]:
                                     st.write(upload.file_name or "-")
                                 with upload_cols[1]:
                                     st.write(upload.tool_name or "-")
                                 with upload_cols[2]:
-                                    st.write(upload.upload_time or "-")
+                                    st.write(_format_admin_dt(upload.upload_time) or "-")
                                 with upload_cols[3]:
-                                    if upload.analysis_data:
+                                    if has_analysis:
                                         if st.button("📥", key=f"download_btn_{upload_key}"):
                                             st.session_state[f"show_summary_{upload_key}"] = True
                                             st.rerun()
                                     else:
                                         st.write("-")
                                 with upload_cols[4]:
-                                    if upload.analysis_data:
+                                    if has_analysis:
                                         if st.button("📄", key=f"view_btn_{upload_key}"):
                                             st.session_state[f"show_analysis_{upload_key}"] = True
                                             st.rerun()
@@ -457,8 +548,14 @@ def display_client_submissions():
                                     st.markdown(
                                         f"**Admin Summary for {upload.file_name} ({upload.tool_name})**"
                                     )
-                                    try:
-                                        analysis = json.loads(upload.analysis_data)
+                                    if analysis_payload:
+                                        raw_analyses = analysis_payload.get("raw_analyses", {})
+                                        if not isinstance(raw_analyses, dict):
+                                            raw_analyses = {}
+                                        total_issue_count = analysis_payload.get("total_issue_count", "N/A")
+                                        openai_text = raw_analyses.get("OpenAI Analysis", "No OpenAI analysis available.")
+                                        xai_text = raw_analyses.get("xAI Analysis", "No xAI analysis available.")
+                                        anthropic_text = raw_analyses.get("AnthropicAI Analysis", "No Anthropic analysis available.")
                                         admin_summary = f"""
 Tool: {upload.tool_name}
 File Name: {upload.file_name}
@@ -470,16 +567,16 @@ Office/Group: {submission.office_name}
 Email: {submission.user_email}
 Organization Type: {submission.org_type}
 
-Total Issues Identified: {analysis['total_issue_count']}
+Total Issues Identified: {total_issue_count}
 
 === OpenAI GPT-4 Analysis ===
-{analysis['raw_analyses']['OpenAI Analysis']}
+{openai_text}
 
 === xAI Grok Analysis ===
-{analysis['raw_analyses']['xAI Analysis']}
+{xai_text}
 
 === Anthropic Claude Analysis ===
-{analysis['raw_analyses']['AnthropicAI Analysis']}
+{anthropic_text}
 """
                                         
                                         st.download_button(
@@ -501,22 +598,31 @@ Total Issues Identified: {analysis['total_issue_count']}
                                         if st.button("Close", key=f"close_summary_{upload_key}"):
                                             st.session_state[f"show_summary_{upload_key}"] = False
                                             st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Error displaying admin summary: {str(e)}")
+                                    else:
+                                        st.info("No analysis data available.")
+                                        if st.button("Close", key=f"close_summary_{upload_key}"):
+                                            st.session_state[f"show_summary_{upload_key}"] = False
+                                            st.rerun()
                                 
                                 if st.session_state.get(f"show_analysis_{upload_key}", False):
                                     st.markdown("---")
                                     st.markdown(
                                         f"**Analysis for {upload.file_name} ({upload.tool_name})**"
                                     )
-                                    try:
-                                        analysis = json.loads(upload.analysis_data)
-                                        st.markdown(f"**Total Issues Identified:** {analysis['total_issue_count']}")
+                                    if analysis_payload:
+                                        raw_analyses = analysis_payload.get("raw_analyses", {})
+                                        if not isinstance(raw_analyses, dict):
+                                            raw_analyses = {}
+                                        total_issue_count = analysis_payload.get("total_issue_count", "N/A")
+                                        openai_text = raw_analyses.get("OpenAI Analysis", "No OpenAI analysis available.")
+                                        xai_text = raw_analyses.get("xAI Analysis", "No xAI analysis available.")
+                                        anthropic_text = raw_analyses.get("AnthropicAI Analysis", "No Anthropic analysis available.")
+                                        st.markdown(f"**Total Issues Identified:** {total_issue_count}")
                                         
                                         st.markdown("**OpenAI Analysis:**")
                                         st.text_area(
                                             "",
-                                            analysis['raw_analyses']['OpenAI Analysis'],
+                                            openai_text,
                                             height=200,
                                             key=f"openai_{upload_key}",
                                             disabled=True
@@ -525,7 +631,7 @@ Total Issues Identified: {analysis['total_issue_count']}
                                         st.markdown("**xAI Analysis:**")
                                         st.text_area(
                                             "",
-                                            analysis['raw_analyses']['xAI Analysis'],
+                                            xai_text,
                                             height=200,
                                             key=f"xai_{upload_key}",
                                             disabled=True
@@ -534,7 +640,7 @@ Total Issues Identified: {analysis['total_issue_count']}
                                         st.markdown("**Anthropic Analysis:**")
                                         st.text_area(
                                             "",
-                                            analysis['raw_analyses']['AnthropicAI Analysis'],
+                                            anthropic_text,
                                             height=200,
                                             key=f"anthropic_{upload_key}",
                                             disabled=True
@@ -543,8 +649,11 @@ Total Issues Identified: {analysis['total_issue_count']}
                                         if st.button("Close", key=f"close_{upload_key}"):
                                             st.session_state[f"show_analysis_{upload_key}"] = False
                                             st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Error displaying analysis: {str(e)}")
+                                    else:
+                                        st.info("No analysis data available.")
+                                        if st.button("Close", key=f"close_{upload_key}"):
+                                            st.session_state[f"show_analysis_{upload_key}"] = False
+                                            st.rerun()
                         
                         st.divider()
     finally:
