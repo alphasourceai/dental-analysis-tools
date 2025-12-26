@@ -1,17 +1,38 @@
-import streamlit as st
 import json
-from sqlalchemy import func
-from models import get_db, delete_user, User, Upload, ClientSubmission
-from database import SessionLocal
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
+
+import streamlit as st
+from sqlalchemy import func
+
+from database import SessionLocal
+from models import ClientSubmission, Upload, UploadPortalFile, User, delete_user, get_db
 from supabase_utils import persist_upload_file, update_upload_file_upload_id
-from upload_portal import PortalError, create_upload_request, list_recent_uploads
+from upload_portal import PortalError, create_upload_request
 
 def normalize_email(raw_email: str) -> str:
     if not raw_email:
         return ""
     return raw_email.strip().lower()
+
+
+def _token_ttl_minutes() -> int:
+    raw = os.getenv("PORTAL_TOKEN_TTL_MINUTES", "60")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 60
+
+
+def _parse_date_input(value: str) -> datetime.date:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 # Admin Dashboard Page
 def display_admin_dashboard():
@@ -79,23 +100,120 @@ def display_upload_requests():
             st.success("Magic link sent successfully.")
             st.markdown("**Upload Request Details**")
             st.write(f"Request ID: {result.get('request_id')}")
-            st.write(f"Expires At (UTC): {result.get('expires_at')}")
+            st.write(f"Expires in {_token_ttl_minutes()} minutes")
         except PortalError as exc:
             st.error(f"Unable to create upload request: {exc.message}")
         except Exception as exc:
             st.error(f"Unexpected error: {exc}")
 
     st.divider()
-    st.markdown("**Recent Secure Uploads**")
+    display_uploads_inbox()
+
+
+def display_uploads_inbox():
+    st.markdown("<h3 style='margin-top: 1.5rem;'>Uploads Inbox</h3>", unsafe_allow_html=True)
+    st.markdown(
+        "<p>Most recent upload portal files (default 50). Use filters to narrow results.</p>",
+        unsafe_allow_html=True,
+    )
+
+    completed_only = st.checkbox("Completed only", value=True, key="uploads_inbox_completed_only")
+    user_email_filter = st.text_input(
+        "Filter by user email (contains)",
+        placeholder="name@example.com",
+        key="uploads_inbox_email_filter",
+    ).strip()
+
+    date_cols = st.columns(2)
+    with date_cols[0]:
+        start_date_raw = st.text_input(
+            "Start date (YYYY-MM-DD)",
+            placeholder="2024-01-01",
+            key="uploads_inbox_start_date",
+        ).strip()
+    with date_cols[1]:
+        end_date_raw = st.text_input(
+            "End date (YYYY-MM-DD)",
+            placeholder="2024-01-31",
+            key="uploads_inbox_end_date",
+        ).strip()
+
+    start_date = _parse_date_input(start_date_raw)
+    end_date = _parse_date_input(end_date_raw)
+
+    if start_date_raw and not start_date:
+        st.warning("Start date is invalid. Use YYYY-MM-DD.")
+    if end_date_raw and not end_date:
+        st.warning("End date is invalid. Use YYYY-MM-DD.")
+    if start_date and end_date and end_date < start_date:
+        st.warning("End date must be on or after the start date.")
+        start_date = None
+        end_date = None
+
+    db = SessionLocal()
     try:
-        uploads = list_recent_uploads(limit=25)
-        items = uploads.get("items", [])
-        if not items:
+        query = db.query(UploadPortalFile)
+        if completed_only:
+            query = query.filter(UploadPortalFile.completed_at.isnot(None))
+        if user_email_filter:
+            query = query.filter(UploadPortalFile.user_email.ilike(f"%{user_email_filter}%"))
+        if start_date:
+            start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+            query = query.filter(UploadPortalFile.created_at >= start_dt)
+        if end_date:
+            end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+            query = query.filter(UploadPortalFile.created_at < end_dt)
+
+        rows = (
+            query.order_by(UploadPortalFile.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        if not rows:
             st.info("No secure uploads recorded yet.")
-        else:
-            st.dataframe(items, use_container_width=True)
-    except PortalError:
+            return
+
+        items = []
+        for row in rows:
+            object_name = row.object_name or ""
+            gcs_bucket = row.gcs_bucket or ""
+            gs_path = f"gs://{gcs_bucket}/{object_name}" if gcs_bucket and object_name else None
+            console_url = None
+            if gcs_bucket and object_name:
+                encoded_object = quote(object_name, safe="/")
+                console_url = (
+                    "https://console.cloud.google.com/storage/browser/_details/"
+                    f"{gcs_bucket}/{encoded_object}"
+                )
+            items.append(
+                {
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+                    "user_email": row.user_email,
+                    "user_id": str(row.user_id) if row.user_id else None,
+                    "original_filename": row.original_filename,
+                    "content_type": row.content_type,
+                    "byte_size": row.byte_size,
+                    "gcs_bucket": row.gcs_bucket,
+                    "object_name": row.object_name,
+                    "request_id": str(row.request_id),
+                    "session_id": str(row.session_id),
+                    "gs_path": gs_path,
+                    "console_url": console_url,
+                }
+            )
+
+        st.dataframe(
+            items,
+            use_container_width=True,
+            column_config={
+                "console_url": st.column_config.LinkColumn("Console link"),
+            },
+        )
+    except Exception:
         st.info("Secure uploads table is not available yet. Complete database setup to view uploads.")
+    finally:
+        db.close()
 
 def display_client_submissions():
     # Add compact styling CSS - targets first tab's content area only

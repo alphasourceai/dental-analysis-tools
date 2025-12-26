@@ -194,15 +194,15 @@ def _send_magic_link_email(
         raise PortalError("config_missing", "Email configuration missing", status=500)
 
     template_id = _get_env("UPLOAD_PORTAL_SENDGRID_TEMPLATE_ID").strip()
+    expires_in_minutes = max(1, _token_ttl_minutes())
 
     portal_url = _portal_base_url().rstrip("/")
     link = f"{portal_url}/?upload_token={quote(token)}"
-    expiration = expires_at.strftime("%Y-%m-%d %H:%M UTC")
     subject = "Secure upload link"
     plain_text = (
         "Your secure upload link is ready.\n\n"
         f"Link: {link}\n"
-        f"Expires: {expiration}\n\n"
+        f"Expires in {expires_in_minutes} minutes.\n\n"
         "If you did not request this link, you can ignore this email."
     )
     html_content = f"""
@@ -217,8 +217,8 @@ def _send_magic_link_email(
                 </tr>
                 <tr>
                   <td style="padding-top:12px;font-size:14px;line-height:1.6;color:#c8cfdd;">
-                    Use the secure link below to upload your documents. This link expires on
-                    <strong>{expiration}</strong>.
+                    Use the secure link below to upload your documents. This link expires in
+                    <strong>{expires_in_minutes} minutes</strong>.
                   </td>
                 </tr>
                 <tr>
@@ -253,7 +253,7 @@ def _send_magic_link_email(
         message.template_id = template_id
         message.dynamic_template_data = {
             "upload_link": link,
-            "expires_at_utc": expiration,
+            "expires_in_minutes": expires_in_minutes,
         }
         template_mode = "dynamic"
     else:
