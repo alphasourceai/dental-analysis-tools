@@ -184,6 +184,7 @@ def _render_upload_portal(raw_token: str) -> None:
 # API keys are loaded from environment variables (Replit Secrets)
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+SHOW_DEBUG_CID = os.getenv("SHOW_DEBUG_CID", "").strip().lower() in ("1", "true", "yes", "on")
 
 # ---- Page Config ----
 st.set_page_config(page_title="AlphaSource Dental Analysis", page_icon="📊", layout="centered")
@@ -1055,6 +1056,12 @@ elif st.session_state.page == "Admin Dashboard":
 
 # ---- Footer ----
 st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
+
+# Debug query param display (optional)
+if SHOW_DEBUG_CID:
+    _cid_value = _get_single_query_param(_query_params, "cid")
+    _cid_display = _cid_value if _cid_value else "(none)"
+    st.caption(f"Debug: cid = {_cid_display}")
 
 # Admin links (only on Analyzer page)
 if st.session_state.page == "Analyzer":
