@@ -411,6 +411,10 @@ st.markdown("""
 _query_params = _get_query_params()
 _upload_token = _get_single_query_param(_query_params, "upload_token")
 _page_param = _get_single_query_param(_query_params, "page").lower()
+if SHOW_DEBUG_CID:
+    _cid_value = _get_single_query_param(_query_params, "cid")
+    _cid_display = _cid_value if _cid_value else "<missing>"
+    st.caption(f"Debug: cid={_cid_display}")
 if _page_param == "uploads" and not _upload_token:
     _upload_token = _get_single_query_param(_query_params, "token")
 if _upload_token or _page_param == "uploads":
@@ -1056,12 +1060,6 @@ elif st.session_state.page == "Admin Dashboard":
 
 # ---- Footer ----
 st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
-
-# Debug query param display (optional)
-if SHOW_DEBUG_CID:
-    _cid_value = _get_single_query_param(_query_params, "cid")
-    _cid_display = _cid_value if _cid_value else "(none)"
-    st.caption(f"Debug: cid = {_cid_display}")
 
 # Admin links (only on Analyzer page)
 if st.session_state.page == "Analyzer":
