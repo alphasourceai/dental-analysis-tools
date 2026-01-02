@@ -198,13 +198,18 @@ def _ghl_add_tag(cid: str, tag_name: str) -> tuple[bool, str]:
     base_url = os.getenv("GHL_BASE_URL", "https://services.leadconnectorhq.com").rstrip("/")
     token = os.getenv("GHL_BEARER_TOKEN", "")
     version = os.getenv("GHL_API_VERSION", "2021-07-28")
+    location_id = os.getenv("LOCATION_ID", "").strip()
     if not token:
         return False, "missing bearer token"
+    if not location_id:
+        logging.warning("[ghl] add_tag missing location id for cid %s", cid)
+        return False, "missing location id"
     url = f"{base_url}/contacts/{cid}/tags"
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {token}",
         "Version": version,
+        "LocationId": location_id,
     }
     payload = {"tags": [tag_name]}
     try:
@@ -213,7 +218,17 @@ def _ghl_add_tag(cid: str, tag_name: str) -> tuple[bool, str]:
         return False, "request failed"
     if response.status_code in (200, 201, 202, 204):
         return True, ""
-    return False, f"status {response.status_code}"
+    body_text = (response.text or "").strip()
+    if len(body_text) > 300:
+        body_text = body_text[:300]
+    logging.warning(
+        "[ghl] add_tag failed cid=%s tag=%s status=%s body=%s",
+        cid,
+        tag_name,
+        response.status_code,
+        body_text,
+    )
+    return False, f"status {response.status_code}: {body_text}"
 
 def _guess_content_type(filename: str) -> str:
     guessed, _ = mimetypes.guess_type(filename)
@@ -972,7 +987,7 @@ if st.session_state.page == "Analyzer":
 
                                 success, err = _ghl_update_analyzer_submitted(ghl_cid)
                                 if success:
-                                    tag_success, tag_err = _ghl_add_tag(ghl_cid, "Analyzer Submitted")
+                                    tag_success, tag_err = _ghl_add_tag(ghl_cid, "analyzer submitted")
                                     if tag_success:
                                         logging.info("GHL tag added for cid %s", ghl_cid)
                                     else:
