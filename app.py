@@ -54,6 +54,85 @@ def _get_single_query_param(params: dict, key: str) -> str:
         return value[0] if value else ""
     return value or ""
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _ghl_get_contact(cid: str) -> dict:
+    if not cid:
+        return {}
+    base_url = os.getenv("GHL_BASE_URL", "https://services.leadconnectorhq.com").rstrip("/")
+    token = os.getenv("GHL_BEARER_TOKEN", "")
+    version = os.getenv("GHL_API_VERSION", "2021-07-28")
+    if not base_url or not token:
+        return {}
+    url = f"{base_url}/contacts/{cid}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+        "Version": version,
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+    except requests.RequestException:
+        return {}
+    if response.status_code != 200:
+        return {}
+    try:
+        payload = response.json()
+    except ValueError:
+        return {}
+    if isinstance(payload, dict) and isinstance(payload.get("contact"), dict):
+        return payload["contact"]
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+def _extract_office_name(contact: dict) -> str:
+    if not contact:
+        return ""
+    field_id = os.getenv("GHL_OFFICE_FIELD_ID", "").strip()
+    if not field_id:
+        return ""
+    custom_fields = contact.get("customFields") or contact.get("custom_fields") or []
+    if not isinstance(custom_fields, list):
+        return ""
+    for field in custom_fields:
+        if str(field.get("id")) == field_id:
+            value = field.get("value")
+            if isinstance(value, str):
+                return value
+            if value is None:
+                return ""
+            return str(value)
+    return ""
+
+def _maybe_prefill_from_cid(params: dict) -> None:
+    cid = _get_single_query_param(params, "cid")
+    if not cid:
+        st.session_state["prefill_locked"] = False
+        return
+    contact = _ghl_get_contact(cid)
+    if not contact:
+        st.session_state["prefill_locked"] = False
+        return
+    location_id = os.getenv("LOCATION_ID", "").strip()
+    contact_location = contact.get("locationId") or contact.get("location_id")
+    if location_id and contact_location and str(contact_location) != location_id:
+        st.session_state["prefill_locked"] = False
+        return
+
+    first_name = (contact.get("firstName") or contact.get("first_name") or "").strip()
+    last_name = (contact.get("lastName") or contact.get("last_name") or "").strip()
+    email = (contact.get("email") or "").strip()
+    office_name = _extract_office_name(contact).strip()
+    if not all([first_name, last_name, email, office_name]):
+        st.session_state["prefill_locked"] = False
+        return
+
+    st.session_state["contact_first_name"] = first_name
+    st.session_state["contact_last_name"] = last_name
+    st.session_state["contact_office_name"] = office_name
+    st.session_state["contact_email"] = email
+    st.session_state["prefill_locked"] = True
+
 def _guess_content_type(filename: str) -> str:
     guessed, _ = mimetypes.guess_type(filename)
     return guessed or "application/octet-stream"
@@ -432,10 +511,14 @@ if 'admin_session' not in st.session_state:
     st.session_state.admin_session = None
 if 'admin_user' not in st.session_state:
     st.session_state.admin_user = None
+if 'prefill_locked' not in st.session_state:
+    st.session_state.prefill_locked = False
 
 # ---- Page Navigation (no sidebar, using session state) ----
 if 'page' not in st.session_state:
     st.session_state.page = "Analyzer"
+
+_maybe_prefill_from_cid(_query_params)
 
 # Analyzer Page Content
 if st.session_state.page == "Analyzer":
@@ -491,6 +574,7 @@ if st.session_state.page == "Analyzer":
     else:
         # Show contact form and upload sections only if analysis is not complete
         # Contact Information Form
+        prefill_locked = st.session_state.get("prefill_locked", False)
         with st.form("user_info_form"):
             st.markdown("""
                 <div class="section-header">
@@ -501,12 +585,19 @@ if st.session_state.page == "Analyzer":
                     <h3 style="margin: 0;">Contact Information</h3>
                 </div>
             """, unsafe_allow_html=True)
-            first_name = st.text_input("First Name")
-            last_name = st.text_input("Last Name")
-            office_name = st.text_input("Office/Group Name")
-            email = st.text_input("Email Address", placeholder="user@example.com")
+            if prefill_locked:
+                st.caption("Contact info loaded from your form and locked.")
+            first_name = st.text_input("First Name", key="contact_first_name", disabled=prefill_locked)
+            last_name = st.text_input("Last Name", key="contact_last_name", disabled=prefill_locked)
+            office_name = st.text_input("Office/Group Name", key="contact_office_name", disabled=prefill_locked)
+            email = st.text_input(
+                "Email Address",
+                placeholder="user@example.com",
+                key="contact_email",
+                disabled=prefill_locked,
+            )
             org_type = st.selectbox("Type", ["Location", "Group"])
-            submit_user_info = st.form_submit_button("Save Info")
+            submit_user_info = st.form_submit_button("Save Info", disabled=prefill_locked)
 
         import re
         email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
