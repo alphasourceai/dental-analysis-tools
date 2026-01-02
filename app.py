@@ -190,6 +190,31 @@ def _ghl_update_analyzer_submitted(cid: str) -> tuple[bool, str]:
         return False, f"status {alt_response.status_code}"
     return False, f"status {response.status_code}"
 
+def _ghl_add_tag(cid: str, tag_name: str) -> tuple[bool, str]:
+    if not cid:
+        return False, "missing cid"
+    if not tag_name:
+        return False, "missing tag name"
+    base_url = os.getenv("GHL_BASE_URL", "https://services.leadconnectorhq.com").rstrip("/")
+    token = os.getenv("GHL_BEARER_TOKEN", "")
+    version = os.getenv("GHL_API_VERSION", "2021-07-28")
+    if not token:
+        return False, "missing bearer token"
+    url = f"{base_url}/contacts/{cid}/tags"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+        "Version": version,
+    }
+    payload = {"tags": [tag_name]}
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+    except requests.RequestException:
+        return False, "request failed"
+    if response.status_code in (200, 201, 202, 204):
+        return True, ""
+    return False, f"status {response.status_code}"
+
 def _guess_content_type(filename: str) -> str:
     guessed, _ = mimetypes.guess_type(filename)
     return guessed or "application/octet-stream"
@@ -947,6 +972,11 @@ if st.session_state.page == "Analyzer":
 
                                 success, err = _ghl_update_analyzer_submitted(ghl_cid)
                                 if success:
+                                    tag_success, tag_err = _ghl_add_tag(ghl_cid, "Analyzer Submitted")
+                                    if tag_success:
+                                        logging.info("GHL tag added for cid %s", ghl_cid)
+                                    else:
+                                        logging.warning("GHL tag add failed for cid %s: %s", ghl_cid, tag_err)
                                     try:
                                         _update_submission_ghl_fields(
                                             submission_db,
