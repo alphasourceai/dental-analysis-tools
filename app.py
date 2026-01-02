@@ -12,6 +12,7 @@ from io import BytesIO
 import hmac
 import time
 import logging
+from sqlalchemy import text
 from database import get_db, Base, engine, SessionLocal
 from models import get_admin_by_username, Admin, create_admin, User, Upload, ClientSubmission
 from supabase_utils import (
@@ -132,6 +133,62 @@ def _maybe_prefill_from_cid(params: dict) -> None:
     st.session_state["contact_office_name"] = office_name
     st.session_state["contact_email"] = email
     st.session_state["prefill_locked"] = True
+
+_UNSET = object()
+
+def _update_submission_ghl_fields(db, submission_id, ghl_cid=_UNSET, submitted_at=_UNSET, error_msg=_UNSET) -> None:
+    fields = []
+    params = {"id": str(submission_id)}
+    if ghl_cid is not _UNSET:
+        fields.append("ghl_cid = :ghl_cid")
+        params["ghl_cid"] = ghl_cid
+    if submitted_at is not _UNSET:
+        fields.append("ghl_analyzer_submitted_at = :submitted_at")
+        params["submitted_at"] = submitted_at
+    if error_msg is not _UNSET:
+        fields.append("ghl_analyzer_submitted_error = :error_msg")
+        params["error_msg"] = error_msg
+    if not fields:
+        return
+    stmt = text(f"update client_submissions set {', '.join(fields)} where id = :id")
+    db.execute(stmt, params)
+    db.commit()
+
+def _ghl_update_analyzer_submitted(cid: str) -> tuple[bool, str]:
+    if not cid:
+        return False, "missing cid"
+    base_url = os.getenv("GHL_BASE_URL", "https://services.leadconnectorhq.com").rstrip("/")
+    token = os.getenv("GHL_BEARER_TOKEN", "")
+    version = os.getenv("GHL_API_VERSION", "2021-07-28")
+    field_id = os.getenv("GHL_ANALYZER_SUBMITTED_FIELD_ID", "").strip()
+    if not token:
+        return False, "missing bearer token"
+    if not field_id:
+        return False, "missing analyzer field id"
+    url = f"{base_url}/contacts/{cid}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+        "Version": version,
+    }
+    payload = {"customFields": [{"id": field_id, "value": ["Submitted"]}]}
+    try:
+        response = requests.put(url, headers=headers, json=payload, timeout=10)
+    except requests.RequestException:
+        return False, "request failed"
+    if response.status_code in (200, 201, 202, 204):
+        return True, ""
+    if response.status_code in (404, 405):
+        alt_url = f"{base_url}/contacts"
+        alt_payload = {"id": cid, "customFields": [{"id": field_id, "value": ["Submitted"]}]}
+        try:
+            alt_response = requests.put(alt_url, headers=headers, json=alt_payload, timeout=10)
+        except requests.RequestException:
+            return False, "request failed"
+        if alt_response.status_code in (200, 201, 202, 204):
+            return True, ""
+        return False, f"status {alt_response.status_code}"
+    return False, f"status {response.status_code}"
 
 def _guess_content_type(filename: str) -> str:
     guessed, _ = mimetypes.guess_type(filename)
@@ -876,6 +933,57 @@ if st.session_state.page == "Analyzer":
                                 submission.id,
                                 normalized_email,
                             )
+
+                            ghl_cid = _get_single_query_param(_query_params, "cid")
+                            if ghl_cid:
+                                try:
+                                    _update_submission_ghl_fields(submission_db, submission.id, ghl_cid=ghl_cid)
+                                except Exception as exc:
+                                    logging.error(
+                                        "Failed to set GHL cid for submission %s: %s",
+                                        submission.id,
+                                        type(exc).__name__,
+                                    )
+
+                                success, err = _ghl_update_analyzer_submitted(ghl_cid)
+                                if success:
+                                    try:
+                                        _update_submission_ghl_fields(
+                                            submission_db,
+                                            submission.id,
+                                            submitted_at=datetime.utcnow(),
+                                            error_msg=None,
+                                        )
+                                    except Exception as exc:
+                                        logging.error(
+                                            "Failed to update GHL writeback status for submission %s: %s",
+                                            submission.id,
+                                            type(exc).__name__,
+                                        )
+                                else:
+                                    if err == "missing analyzer field id":
+                                        logging.warning(
+                                            "GHL analyzer field id missing; skipping writeback for cid %s",
+                                            ghl_cid,
+                                        )
+                                    else:
+                                        logging.warning(
+                                            "GHL writeback failed for cid %s: %s",
+                                            ghl_cid,
+                                            err,
+                                        )
+                                    try:
+                                        _update_submission_ghl_fields(
+                                            submission_db,
+                                            submission.id,
+                                            error_msg=err,
+                                        )
+                                    except Exception as exc:
+                                        logging.error(
+                                            "Failed to record GHL writeback error for submission %s: %s",
+                                            submission.id,
+                                            type(exc).__name__,
+                                        )
                             
                             submission_db.query(Upload).filter(Upload.id.in_(upload_ids)).update(
                                 {"submission_id": submission.id},
