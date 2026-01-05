@@ -674,7 +674,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                         submission_label = _format_admin_dt(submission.submitted_at) or "-"
 
                         st.markdown('<div class="as-subcard">', unsafe_allow_html=True)
-                        sub_cols = st.columns([2.0, 2.0, 2.2, 1.4, 1.8, 1.0])
+                        sub_cols = st.columns([1.8, 1.8, 2.2, 1.4, 1.5, 1.6, 1.0])
                         with sub_cols[0]:
                             st.markdown(
                                 f"<div class=\"as-muted\">Submitted At</div><div>{submission_label}</div>",
@@ -699,6 +699,24 @@ def display_client_submissions(perf: AdminPerfTracker):
                                 unsafe_allow_html=True,
                             )
                         with sub_cols[4]:
+                            status_value = (submission.status or "").strip()
+                            if status_value:
+                                status_label = status_value.capitalize()
+                                status_markup = f"<span class=\"as-pill\">{html.escape(status_label)}</span>"
+                            else:
+                                status_markup = "<span class=\"as-muted\">—</span>"
+                            run_id = submission.analysis_run_id or ""
+                            run_id_markup = ""
+                            if run_id:
+                                run_id_markup = (
+                                    f"<div class=\"as-muted\" style=\"font-size: 0.75rem;\">"
+                                    f"{html.escape(run_id)}</div>"
+                                )
+                            st.markdown(
+                                f"<div class=\"as-muted\">Status</div><div>{status_markup}</div>{run_id_markup}",
+                                unsafe_allow_html=True,
+                            )
+                        with sub_cols[5]:
                             ghl_cid = submission.ghl_cid or ""
                             ghl_url = _ghl_contact_url(ghl_cid)
                             if ghl_cid:
@@ -715,7 +733,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                                 f"<div class=\"as-muted\">GHL CID</div><div>{ghl_markup}</div>",
                                 unsafe_allow_html=True,
                             )
-                        with sub_cols[5]:
+                        with sub_cols[6]:
                             st.markdown(
                                 f"<div class=\"as-muted\">Uploads</div><span class=\"as-pill\">{upload_count}</span>",
                                 unsafe_allow_html=True,
@@ -1109,6 +1127,8 @@ def display_document_analysis(perf: AdminPerfTracker):
                             last_name=last_name,
                             office_name=office_name,
                             org_type=org_type,
+                            status="completed",
+                            completed_at=datetime.utcnow(),
                         )
                         submission_db.add(submission)
                         submission_db.commit()

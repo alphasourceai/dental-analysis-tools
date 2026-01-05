@@ -26,6 +26,12 @@ class ClientSubmission(Base):
     office_name = Column(String(255))
     org_type = Column(String(50))
     submitted_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+    status = Column(Text, nullable=True, index=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    canceled_at = Column(DateTime(timezone=True), nullable=True)
+    errored_at = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(Text, nullable=True)
+    analysis_run_id = Column(Text, nullable=True, index=True)
     ghl_cid = Column(Text, nullable=True)
     ghl_analyzer_submitted_at = Column(DateTime(timezone=True), nullable=True)
     ghl_analyzer_submitted_error = Column(Text, nullable=True)
@@ -33,6 +39,44 @@ class ClientSubmission(Base):
 # Function to get users from the DB
 def get_users(db):
     return db.query(User).all()
+
+_SUBMISSION_UNSET = object()
+
+def update_submission_status(
+    db,
+    submission_id,
+    status=_SUBMISSION_UNSET,
+    completed_at=_SUBMISSION_UNSET,
+    canceled_at=_SUBMISSION_UNSET,
+    errored_at=_SUBMISSION_UNSET,
+    error_message=_SUBMISSION_UNSET,
+    analysis_run_id=_SUBMISSION_UNSET,
+) -> None:
+    fields = []
+    params = {"id": str(submission_id)}
+    if status is not _SUBMISSION_UNSET:
+        fields.append("status = :status")
+        params["status"] = status
+    if completed_at is not _SUBMISSION_UNSET:
+        fields.append("completed_at = :completed_at")
+        params["completed_at"] = completed_at
+    if canceled_at is not _SUBMISSION_UNSET:
+        fields.append("canceled_at = :canceled_at")
+        params["canceled_at"] = canceled_at
+    if errored_at is not _SUBMISSION_UNSET:
+        fields.append("errored_at = :errored_at")
+        params["errored_at"] = errored_at
+    if error_message is not _SUBMISSION_UNSET:
+        fields.append("error_message = :error_message")
+        params["error_message"] = error_message
+    if analysis_run_id is not _SUBMISSION_UNSET:
+        fields.append("analysis_run_id = :analysis_run_id")
+        params["analysis_run_id"] = analysis_run_id
+    if not fields:
+        return
+    stmt = text(f"update client_submissions set {', '.join(fields)} where id = :id")
+    db.execute(stmt, params)
+    db.commit()
 
 # Upload model
 class Upload(Base):

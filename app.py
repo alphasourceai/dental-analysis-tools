@@ -8,13 +8,14 @@ import pymupdf as fitz
 import pytesseract
 import tempfile
 import os
+import uuid
 from io import BytesIO
 import hmac
 import time
 import logging
 from sqlalchemy import text
 from database import get_db, Base, engine, SessionLocal
-from models import get_admin_by_username, Admin, create_admin, User, Upload, ClientSubmission
+from models import get_admin_by_username, Admin, create_admin, User, Upload, ClientSubmission, update_submission_status
 from supabase_utils import (
     persist_upload_file,
     update_upload_file_upload_id,
@@ -22,7 +23,12 @@ from supabase_utils import (
 from datetime import datetime
 from analysis_utils import (
     extract_text_from_pdf,
-    analyze_with_all_models,
+    openai_analysis,
+    xai_analysis,
+    anthropic_analysis,
+    parse_issues_from_analysis,
+    parse_trends_from_analysis,
+    deduplicate_issues,
     send_followup_email,
     send_email,
     categorize_issue,
@@ -33,6 +39,14 @@ from upload_portal import PortalError, complete_upload, create_signed_upload_url
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class CancelledError(BaseException):
+    pass
+
+def _check_cancel(where: str, run_id: str) -> None:
+    if st.session_state.get("cancel_requested"):
+        logging.info("[analysis] canceled run_id=%s where=%s", run_id, where)
+        raise CancelledError("cancel_requested")
 
 def normalize_email(raw_email: str) -> str:
     if not raw_email:
@@ -603,6 +617,8 @@ if 'analysis_complete' not in st.session_state:
     st.session_state.analysis_complete = False
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = {}
+if 'analyzing' not in st.session_state:
+    st.session_state.analyzing = False
 if 'is_admin_logged_in' not in st.session_state:
     st.session_state.is_admin_logged_in = False
 if 'admin_session' not in st.session_state:
@@ -611,6 +627,16 @@ if 'admin_user' not in st.session_state:
     st.session_state.admin_user = None
 if 'prefill_locked' not in st.session_state:
     st.session_state.prefill_locked = False
+if 'cancel_requested' not in st.session_state:
+    st.session_state.cancel_requested = False
+if 'analysis_run_id' not in st.session_state:
+    st.session_state.analysis_run_id = ""
+if 'analysis_canceled' not in st.session_state:
+    st.session_state.analysis_canceled = False
+if 'analysis_submission_id' not in st.session_state:
+    st.session_state.analysis_submission_id = ""
+if 'pnl_uploader_key_version' not in st.session_state:
+    st.session_state.pnl_uploader_key_version = 0
 
 if _page_param in ("admin", "admin_login", "admin_dashboard"):
     st.session_state.page = "Admin Dashboard"
@@ -678,10 +704,17 @@ if st.session_state.page == "Analyzer":
         if st.button("Start New Analysis"):
             st.session_state.analysis_complete = False
             st.session_state.analysis_results = {}
+            st.session_state.analysis_canceled = False
+            st.session_state.cancel_requested = False
+            st.session_state.analysis_run_id = ""
+            st.session_state.analysis_submission_id = ""
+            st.session_state.pnl_uploader_key_version += 1
             st.rerun()
     
     else:
         # Show contact form and upload sections only if analysis is not complete
+        if st.session_state.get("analysis_canceled"):
+            st.warning("Analysis canceled. No results were saved.")
         # Contact Information Form
         prefill_locked = st.session_state.get("prefill_locked", False)
         with st.form("user_info_form"):
@@ -781,7 +814,14 @@ if st.session_state.page == "Analyzer":
                     <span style="color: #EBFEFF; font-size: 1.31rem; font-weight: 500;">Financial Analysis</span>
                 </div>
             """, unsafe_allow_html=True)
-            pnl_file = st.file_uploader("Upload your financial document", type=["xlsx", "csv", "pdf"], key="pnl", label_visibility="collapsed")
+            uploader_key = f"pnl_{st.session_state.pnl_uploader_key_version}"
+            pnl_file = st.file_uploader(
+                "Upload your financial document",
+                type=["xlsx", "csv", "pdf"],
+                key=uploader_key,
+                label_visibility="collapsed",
+                disabled=st.session_state.analyzing,
+            )
             st.markdown('<div style="height: 1rem;"></div>', unsafe_allow_html=True)
 
             # SOP File Upload Section - HIDDEN FOR NOW (will be used later with templates)
@@ -827,302 +867,516 @@ if st.session_state.page == "Analyzer":
                     disabled=st.session_state.analyzing or not ready_for_analysis,
                 )
                 st.caption(analysis_hint)
-                
+
+                stop_clicked = False
+                if st.session_state.analyzing:
+                    stop_clicked = st.button("Stop analysis", type="secondary")
+
+                if analyze_clicked:
+                    st.session_state.analyzing = True
+                    st.session_state.cancel_requested = False
+                    st.session_state.analysis_canceled = False
+                    st.session_state.analysis_run_id = str(uuid.uuid4())
+                    st.session_state.analysis_submission_id = ""
+                    st.rerun()
+
+                if stop_clicked:
+                    st.session_state.cancel_requested = True
+                    st.rerun()
+
                 if st.session_state.analyzing:
                     progress_bar = st.progress(0)
                     progress_text = st.empty()
                     progress_text.caption("0% — Starting")
-                
-                if analyze_clicked:
-                    st.session_state.analyzing = True
-                    st.rerun()
-                
-                if st.session_state.analyzing:
-                    update_progress(10, "Upload started")
-                    normalized_email = normalize_email(email)
-                    logging.info("Normalized email: %s", normalized_email)
-                    user_info_dict = {
-                        "first_name": first_name,
-                        "last_name": last_name,
-                        "office_name": office_name,
-                        "email": normalized_email,
-                        "org_type": org_type,
-                    }
-                    
-                    # Save user to database FIRST, then close the session before AI analysis
-                    db = SessionLocal()
+
+                    run_id = st.session_state.get("analysis_run_id") or str(uuid.uuid4())
+                    st.session_state.analysis_run_id = run_id
+
                     try:
-                        existing_user = db.query(User).filter(User.email == normalized_email).first()
-                        if not existing_user:
-                            new_user = User(
-                                first_name=first_name,
-                                last_name=last_name,
-                                email=normalized_email,
-                                office_name=office_name,
-                                org_type=org_type
-                            )
-                            db.add(new_user)
-                            db.commit()
-                            logging.info("User upsert: created for %s", normalized_email)
-                        else:
-                            updated = False
-                            if existing_user.first_name != first_name:
-                                existing_user.first_name = first_name
-                                updated = True
-                            if existing_user.last_name != last_name:
-                                existing_user.last_name = last_name
-                                updated = True
-                            if existing_user.office_name != office_name:
-                                existing_user.office_name = office_name
-                                updated = True
-                            if existing_user.org_type != org_type:
-                                existing_user.org_type = org_type
-                                updated = True
-                            if updated:
-                                db.commit()
-                                logging.info("User upsert: updated for %s", normalized_email)
-                            else:
-                                logging.info("User upsert: existing for %s", normalized_email)
-                    except Exception as e:
-                        logging.error(f"Error saving user to database: {str(e)}")
-                        db.rollback()
-                    finally:
-                        # Close this session before long-running AI analysis
-                        db.close()
-                    
-                    # Initialize debug log in session state
-                    if 'debug_log' not in st.session_state:
-                        st.session_state.debug_log = []
-                    st.session_state.debug_log = []  # Reset for this analysis
-                    
-                    # Process each uploaded document
-                    st.session_state.debug_log.append("🔍 Starting upload processing loop...")
-                    upload_ids = []
-                    all_emails_sent = True
-                    for tool_name, file in uploaded_files.items():
-                            if file is not None:
-                                st.session_state.debug_log.append(f"🔍 Processing file: {file.name} ({tool_name})")
-                                file.seek(0)
-                                file_content = file.read()
-                                file_name = file.name
-                                file_type = file.type
+                        _check_cancel("before_start", run_id)
+                        logging.info("[analysis] start run_id=%s", run_id)
+                        _check_cancel("before_upload_loop", run_id)
+                        update_progress(10, "Upload started")
+                        normalized_email = normalize_email(email)
+                        logging.info("Normalized email: %s", normalized_email)
+                        user_info_dict = {
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "office_name": office_name,
+                            "email": normalized_email,
+                            "org_type": org_type,
+                        }
 
-                                upload_file_id = persist_upload_file(
-                                    file_bytes=file_content,
-                                    user_email=normalized_email,
-                                    tool_name=tool_name,
-                                    original_filename=file_name,
-                                    content_type=file_type,
-                                )
-                                update_progress(25, "File stored in Supabase")
-                                
-                                file.seek(0)
-                                
-                                if file.name.endswith(".pdf"):
-                                    raw_text = extract_text_from_pdf(file)
-                                    data_input = raw_text
-                                else:
-                                    df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
-                                    data_input = df.to_string(index=False)
-                                update_progress(45, "Text extraction complete")
-                                
-                                st.session_state.debug_log.append(f"🔍 Running AI analysis for {file.name}...")
-                                update_progress(70, "AI analysis running")
-                                results = analyze_with_all_models(data_input)
-                                st.session_state.debug_log.append(f"✅ Analysis complete for {file.name}")
-                                
-                                st.session_state.analysis_results[tool_name] = results
-                                
-                                st.session_state.debug_log.append(f"📧 Sending emails for {file.name}...")
-                                update_progress(90, "Emails sending")
-                                email_success = True
-                                try:
-                                    send_followup_email(user_info_dict, tool_name, results)
-                                except Exception as exc:
-                                    email_success = False
-                                    logging.error(
-                                        "Follow-up email failed for %s (%s): %s",
-                                        normalized_email,
-                                        file_name,
-                                        str(exc),
-                                    )
-                                try:
-                                    send_email(user_info_dict, file_content, file_name, file_type, results, tool_name)
-                                except Exception as exc:
-                                    email_success = False
-                                    logging.error(
-                                        "Admin email failed for %s (%s): %s",
-                                        normalized_email,
-                                        file_name,
-                                        str(exc),
-                                    )
-                                if email_success:
-                                    st.session_state.debug_log.append(f"✅ Emails sent for {file.name}")
-                                else:
-                                    all_emails_sent = False
-                                    st.session_state.debug_log.append(f"❌ Email send failed for {file.name}")
-                                
-                                st.session_state.debug_log.append(f"💾 Opening new database session for {file.name}...")
-                                upload_db = SessionLocal()
-                                try:
-                                    import json
-                                    logging.info(f"Starting database save for {file.name}")
-                                    
-                                    st.session_state.debug_log.append(f"🔍 Serializing analysis to JSON...")
-                                    analysis_json = json.dumps({
-                                        'raw_analyses': results['raw_analyses'],
-                                        'deduplicated_issues': results['deduplicated_issues'],
-                                        'total_issue_count': results['total_issue_count'],
-                                        'all_trends': results.get('all_trends', [])
-                                    })
-                                    st.session_state.debug_log.append(f"✅ JSON serialized, length: {len(analysis_json)}")
-                                    logging.info(f"Analysis JSON serialized, length: {len(analysis_json)}")
-                                    
-                                    st.session_state.debug_log.append(f"🔍 Creating Upload object...")
-                                    new_upload = Upload(
-                                        file_name=file.name,
-                                        tool_name=tool_name,
-                                        upload_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                        user_email=normalized_email,
-                                        analysis_data=analysis_json
-                                    )
-                                    st.session_state.debug_log.append(f"✅ Upload object created")
-                                    logging.info(f"Upload object created for {file.name}")
-                                    
-                                    st.session_state.debug_log.append(f"🔍 Adding upload to database session...")
-                                    upload_db.add(new_upload)
-                                    st.session_state.debug_log.append(f"✅ Upload added to session")
-                                    logging.info(f"Upload added to session for {file.name}")
-                                    
-                                    st.session_state.debug_log.append(f"🔍 Committing to database...")
-                                    upload_db.commit()
-                                    st.session_state.debug_log.append(f"✅ Database commit successful!")
-                                    logging.info(f"✅ Upload committed successfully: {file.name} - {tool_name}")
-
-                                    update_upload_file_upload_id(upload_file_id, new_upload.id)
-                                    upload_ids.append(new_upload.id)
-                                    
-                                    st.session_state.debug_log.append(f"✅ Upload saved to database: {file.name}")
-                                except json.JSONDecodeError as e:
-                                    st.session_state.debug_log.append(f"❌ JSON error: {str(e)}")
-                                    logging.error(f"❌ JSON serialization error for {file.name}: {str(e)}")
-                                    upload_db.rollback()
-                                except Exception as e:
-                                    st.session_state.debug_log.append(f"❌ Database error: {type(e).__name__}: {str(e)}")
-                                    logging.error(f"❌ Error saving upload to database for {file.name}: {str(e)}")
-                                    logging.error(f"Exception type: {type(e).__name__}")
-                                    logging.error(f"Results keys: {results.keys() if results else 'None'}")
-                                    import traceback
-                                    logging.error(f"Traceback: {traceback.format_exc()}")
-                                    upload_db.rollback()
-                                finally:
-                                    upload_db.close()
-                    
-                    if upload_ids and all_emails_sent:
-                        submission_db = SessionLocal()
+                        # Save user to database FIRST, then close the session before AI analysis
+                        _check_cancel("before_user_upsert", run_id)
+                        db = SessionLocal()
                         try:
-                            submission = ClientSubmission(
-                                user_email=normalized_email,
-                                first_name=first_name,
-                                last_name=last_name,
-                                office_name=office_name,
-                                org_type=org_type,
-                            )
-                            submission_db.add(submission)
-                            submission_db.commit()
-                            submission_db.refresh(submission)
-                            logging.info(
-                                "Submission snapshot created: %s for %s",
-                                submission.id,
-                                normalized_email,
-                            )
+                            existing_user = db.query(User).filter(User.email == normalized_email).first()
+                            if not existing_user:
+                                new_user = User(
+                                    first_name=first_name,
+                                    last_name=last_name,
+                                    email=normalized_email,
+                                    office_name=office_name,
+                                    org_type=org_type
+                                )
+                                db.add(new_user)
+                                _check_cancel("before_user_upsert_commit", run_id)
+                                db.commit()
+                                logging.info("User upsert: created for %s", normalized_email)
+                            else:
+                                updated = False
+                                if existing_user.first_name != first_name:
+                                    existing_user.first_name = first_name
+                                    updated = True
+                                if existing_user.last_name != last_name:
+                                    existing_user.last_name = last_name
+                                    updated = True
+                                if existing_user.office_name != office_name:
+                                    existing_user.office_name = office_name
+                                    updated = True
+                                if existing_user.org_type != org_type:
+                                    existing_user.org_type = org_type
+                                    updated = True
+                                if updated:
+                                    _check_cancel("before_user_upsert_commit", run_id)
+                                    db.commit()
+                                    logging.info("User upsert: updated for %s", normalized_email)
+                                else:
+                                    logging.info("User upsert: existing for %s", normalized_email)
+                        except Exception as e:
+                            logging.error(f"Error saving user to database: {str(e)}")
+                            db.rollback()
+                        finally:
+                            # Close this session before long-running AI analysis
+                            db.close()
 
-                            ghl_cid = _get_single_query_param(_query_params, "cid")
-                            if ghl_cid:
-                                try:
-                                    _update_submission_ghl_fields(submission_db, submission.id, ghl_cid=ghl_cid)
-                                except Exception as exc:
-                                    logging.error(
-                                        "Failed to set GHL cid for submission %s: %s",
+                        submission_id = st.session_state.get("analysis_submission_id") or ""
+                        if not submission_id:
+                            _check_cancel("before_submission_create", run_id)
+                            submission_db = SessionLocal()
+                            try:
+                                submission = ClientSubmission(
+                                    user_email=normalized_email,
+                                    first_name=first_name,
+                                    last_name=last_name,
+                                    office_name=office_name,
+                                    org_type=org_type,
+                                    status="submitted",
+                                    analysis_run_id=run_id,
+                                )
+                                submission_db.add(submission)
+                                _check_cancel("before_submission_create_commit", run_id)
+                                submission_db.commit()
+                                submission_db.refresh(submission)
+                                submission_id = str(submission.id)
+                                st.session_state.analysis_submission_id = submission_id
+                                logging.info(
+                                    "[analysis] submission created run_id=%s id=%s",
+                                    run_id,
+                                    submission_id,
+                                )
+                            except Exception as exc:
+                                logging.error(
+                                    "[analysis] submission create failed run_id=%s: %s",
+                                    run_id,
+                                    str(exc),
+                                )
+                                submission_db.rollback()
+                            finally:
+                                submission_db.close()
+
+                        # Initialize debug log in session state
+                        if 'debug_log' not in st.session_state:
+                            st.session_state.debug_log = []
+                        st.session_state.debug_log = []  # Reset for this analysis
+
+                        # Process each uploaded document
+                        st.session_state.debug_log.append("🔍 Starting upload processing loop...")
+                        upload_ids = []
+                        all_emails_sent = True
+                        for tool_name, file in uploaded_files.items():
+                                if file is not None:
+                                    _check_cancel("before_upload_begin", run_id)
+                                    st.session_state.debug_log.append(f"🔍 Processing file: {file.name} ({tool_name})")
+                                    file.seek(0)
+                                    file_content = file.read()
+                                    file_name = file.name
+                                    file_type = file.type
+
+                                    upload_file_id = persist_upload_file(
+                                        file_bytes=file_content,
+                                        user_email=normalized_email,
+                                        tool_name=tool_name,
+                                        original_filename=file_name,
+                                        content_type=file_type,
+                                    )
+                                    update_progress(25, "File stored in Supabase")
+                                    _check_cancel("after_upload_complete", run_id)
+
+                                    _check_cancel("before_extraction", run_id)
+                                    file.seek(0)
+
+                                    if file.name.endswith(".pdf"):
+                                        raw_text = extract_text_from_pdf(file)
+                                        data_input = raw_text
+                                    else:
+                                        df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
+                                        data_input = df.to_string(index=False)
+                                    update_progress(45, "Text extraction complete")
+
+                                    st.session_state.debug_log.append(f"🔍 Running AI analysis for {file.name}...")
+                                    update_progress(70, "AI analysis running")
+                                    _check_cancel("before_openai", run_id)
+                                    openai_result = openai_analysis(data_input)
+                                    _check_cancel("after_openai", run_id)
+                                    _check_cancel("before_xai", run_id)
+                                    xai_result = xai_analysis(data_input)
+                                    _check_cancel("after_xai", run_id)
+                                    _check_cancel("before_anthropic", run_id)
+                                    anthropic_result = anthropic_analysis(data_input)
+                                    _check_cancel("after_anthropic", run_id)
+
+                                    openai_issues = parse_issues_from_analysis(openai_result, "OpenAI GPT-4")
+                                    xai_issues = parse_issues_from_analysis(xai_result, "xAI Grok")
+                                    anthropic_issues = parse_issues_from_analysis(anthropic_result, "Anthropic Claude")
+
+                                    openai_trends = parse_trends_from_analysis(openai_result, "OpenAI GPT-4")
+                                    xai_trends = parse_trends_from_analysis(xai_result, "xAI Grok")
+                                    anthropic_trends = parse_trends_from_analysis(anthropic_result, "Anthropic Claude")
+
+                                    all_issues = openai_issues + xai_issues + anthropic_issues
+                                    all_trends = openai_trends + xai_trends + anthropic_trends
+
+                                    deduplicated_issues = deduplicate_issues(all_issues)
+
+                                    results = {
+                                        "raw_analyses": {
+                                            "OpenAI Analysis": openai_result,
+                                            "xAI Analysis": xai_result,
+                                            "AnthropicAI Analysis": anthropic_result,
+                                        },
+                                        "parsed_issues": {
+                                            "openai": openai_issues,
+                                            "xai": xai_issues,
+                                            "anthropic": anthropic_issues,
+                                        },
+                                        "parsed_trends": {
+                                            "openai": openai_trends,
+                                            "xai": xai_trends,
+                                            "anthropic": anthropic_trends,
+                                        },
+                                        "all_trends": all_trends,
+                                        "deduplicated_issues": deduplicated_issues,
+                                        "total_issue_count": len(deduplicated_issues)
+                                    }
+
+                                    _check_cancel("before_results_assignment", run_id)
+                                    st.session_state.debug_log.append(f"✅ Analysis complete for {file.name}")
+                                    st.session_state.analysis_results[tool_name] = results
+
+                                    _check_cancel("before_email_send", run_id)
+                                    st.session_state.debug_log.append(f"📧 Sending emails for {file.name}...")
+                                    update_progress(90, "Emails sending")
+                                    email_success = True
+                                    try:
+                                        send_followup_email(user_info_dict, tool_name, results)
+                                    except Exception as exc:
+                                        email_success = False
+                                        logging.error(
+                                            "Follow-up email failed for %s (%s): %s",
+                                            normalized_email,
+                                            file_name,
+                                            str(exc),
+                                        )
+                                    try:
+                                        send_email(user_info_dict, file_content, file_name, file_type, results, tool_name)
+                                    except Exception as exc:
+                                        email_success = False
+                                        logging.error(
+                                            "Admin email failed for %s (%s): %s",
+                                            normalized_email,
+                                            file_name,
+                                            str(exc),
+                                        )
+                                    if email_success:
+                                        st.session_state.debug_log.append(f"✅ Emails sent for {file.name}")
+                                    else:
+                                        all_emails_sent = False
+                                        st.session_state.debug_log.append(f"❌ Email send failed for {file.name}")
+
+                                    _check_cancel("before_upload_save", run_id)
+                                    st.session_state.debug_log.append(f"💾 Opening new database session for {file.name}...")
+                                    upload_db = SessionLocal()
+                                    try:
+                                        import json
+                                        logging.info(f"Starting database save for {file.name}")
+
+                                        st.session_state.debug_log.append(f"🔍 Serializing analysis to JSON...")
+                                        analysis_json = json.dumps({
+                                            'raw_analyses': results['raw_analyses'],
+                                            'deduplicated_issues': results['deduplicated_issues'],
+                                            'total_issue_count': results['total_issue_count'],
+                                            'all_trends': results.get('all_trends', [])
+                                        })
+                                        st.session_state.debug_log.append(f"✅ JSON serialized, length: {len(analysis_json)}")
+                                        logging.info(f"Analysis JSON serialized, length: {len(analysis_json)}")
+
+                                        st.session_state.debug_log.append(f"🔍 Creating Upload object...")
+                                        new_upload = Upload(
+                                            file_name=file.name,
+                                            tool_name=tool_name,
+                                            upload_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            user_email=normalized_email,
+                                            analysis_data=analysis_json
+                                        )
+                                        st.session_state.debug_log.append(f"✅ Upload object created")
+                                        logging.info(f"Upload object created for {file.name}")
+
+                                        st.session_state.debug_log.append(f"🔍 Adding upload to database session...")
+                                        upload_db.add(new_upload)
+                                        st.session_state.debug_log.append(f"✅ Upload added to session")
+                                        logging.info(f"Upload added to session for {file.name}")
+
+                                        st.session_state.debug_log.append(f"🔍 Committing to database...")
+                                        _check_cancel("before_upload_commit", run_id)
+                                        upload_db.commit()
+                                        st.session_state.debug_log.append(f"✅ Database commit successful!")
+                                        logging.info(f"✅ Upload committed successfully: {file.name} - {tool_name}")
+
+                                        _check_cancel("before_upload_file_link", run_id)
+                                        update_upload_file_upload_id(upload_file_id, new_upload.id)
+                                        upload_ids.append(new_upload.id)
+
+                                        st.session_state.debug_log.append(f"✅ Upload saved to database: {file.name}")
+                                    except json.JSONDecodeError as e:
+                                        st.session_state.debug_log.append(f"❌ JSON error: {str(e)}")
+                                        logging.error(f"❌ JSON serialization error for {file.name}: {str(e)}")
+                                        upload_db.rollback()
+                                    except Exception as e:
+                                        st.session_state.debug_log.append(f"❌ Database error: {type(e).__name__}: {str(e)}")
+                                        logging.error(f"❌ Error saving upload to database for {file.name}: {str(e)}")
+                                        logging.error(f"Exception type: {type(e).__name__}")
+                                        logging.error(f"Results keys: {results.keys() if results else 'None'}")
+                                        import traceback
+                                        logging.error(f"Traceback: {traceback.format_exc()}")
+                                        upload_db.rollback()
+                                    finally:
+                                        upload_db.close()
+
+                        _check_cancel("before_submission_save", run_id)
+                        submission_id = submission_id or st.session_state.get("analysis_submission_id") or ""
+                        if upload_ids and all_emails_sent:
+                            submission_db = SessionLocal()
+                            try:
+                                if not submission_id:
+                                    submission = ClientSubmission(
+                                        user_email=normalized_email,
+                                        first_name=first_name,
+                                        last_name=last_name,
+                                        office_name=office_name,
+                                        org_type=org_type,
+                                        status="completed",
+                                        completed_at=datetime.utcnow(),
+                                        analysis_run_id=run_id,
+                                    )
+                                    submission_db.add(submission)
+                                    _check_cancel("before_submission_commit", run_id)
+                                    submission_db.commit()
+                                    submission_db.refresh(submission)
+                                    submission_id = str(submission.id)
+                                    st.session_state.analysis_submission_id = submission_id
+                                    logging.info(
+                                        "Submission snapshot created: %s for %s",
                                         submission.id,
-                                        type(exc).__name__,
+                                        normalized_email,
+                                    )
+                                else:
+                                    _check_cancel("before_submission_status_complete", run_id)
+                                    update_submission_status(
+                                        submission_db,
+                                        submission_id,
+                                        status="completed",
+                                        completed_at=datetime.utcnow(),
+                                        error_message=None,
+                                        errored_at=None,
+                                        canceled_at=None,
                                     )
 
-                                success, err = _ghl_update_analyzer_submitted(ghl_cid)
-                                if success:
-                                    tag_success, tag_err = _ghl_add_tag(ghl_cid, "analyzer submitted")
-                                    if tag_success:
-                                        logging.info("GHL tag added for cid %s", ghl_cid)
-                                    else:
-                                        logging.warning("GHL tag add failed for cid %s: %s", ghl_cid, tag_err)
+                                ghl_cid = _get_single_query_param(_query_params, "cid")
+                                if ghl_cid:
+                                    _check_cancel("before_submission_ghl_cid", run_id)
                                     try:
-                                        _update_submission_ghl_fields(
-                                            submission_db,
-                                            submission.id,
-                                            submitted_at=datetime.utcnow(),
-                                            error_msg=None,
-                                        )
+                                        _update_submission_ghl_fields(submission_db, submission_id, ghl_cid=ghl_cid)
                                     except Exception as exc:
                                         logging.error(
-                                            "Failed to update GHL writeback status for submission %s: %s",
-                                            submission.id,
+                                            "Failed to set GHL cid for submission %s: %s",
+                                            submission_id,
                                             type(exc).__name__,
                                         )
-                                else:
-                                    if err == "missing analyzer field id":
-                                        logging.warning(
-                                            "GHL analyzer field id missing; skipping writeback for cid %s",
-                                            ghl_cid,
-                                        )
+
+                                    _check_cancel("before_ghl_writeback", run_id)
+                                    success, err = _ghl_update_analyzer_submitted(ghl_cid)
+                                    _check_cancel("after_ghl_writeback", run_id)
+                                    if success:
+                                        _check_cancel("before_ghl_tag", run_id)
+                                        tag_success, tag_err = _ghl_add_tag(ghl_cid, "analyzer submitted")
+                                        if tag_success:
+                                            logging.info("GHL tag added for cid %s", ghl_cid)
+                                        else:
+                                            logging.warning("GHL tag add failed for cid %s: %s", ghl_cid, tag_err)
+                                        try:
+                                            _check_cancel("before_submission_ghl_success_update", run_id)
+                                            _update_submission_ghl_fields(
+                                                submission_db,
+                                                submission_id,
+                                                submitted_at=datetime.utcnow(),
+                                                error_msg=None,
+                                            )
+                                        except Exception as exc:
+                                            logging.error(
+                                                "Failed to update GHL writeback status for submission %s: %s",
+                                                submission_id,
+                                                type(exc).__name__,
+                                            )
                                     else:
-                                        logging.warning(
-                                            "GHL writeback failed for cid %s: %s",
-                                            ghl_cid,
-                                            err,
-                                        )
-                                    try:
-                                        _update_submission_ghl_fields(
-                                            submission_db,
-                                            submission.id,
-                                            error_msg=err,
-                                        )
-                                    except Exception as exc:
-                                        logging.error(
-                                            "Failed to record GHL writeback error for submission %s: %s",
-                                            submission.id,
-                                            type(exc).__name__,
-                                        )
-                            
-                            submission_db.query(Upload).filter(Upload.id.in_(upload_ids)).update(
-                                {"submission_id": submission.id},
-                                synchronize_session=False
-                            )
-                            submission_db.commit()
-                            logging.info(
-                                "Linked %d uploads to submission_id %s",
-                                len(upload_ids),
-                                submission.id,
-                            )
-                        except Exception as e:
-                            logging.error(
-                                "Error creating submission snapshot for %s: %s",
+                                        if err == "missing analyzer field id":
+                                            logging.warning(
+                                                "GHL analyzer field id missing; skipping writeback for cid %s",
+                                                ghl_cid,
+                                            )
+                                        else:
+                                            logging.warning(
+                                                "GHL writeback failed for cid %s: %s",
+                                                ghl_cid,
+                                                err,
+                                            )
+                                        try:
+                                            _check_cancel("before_submission_ghl_error_update", run_id)
+                                            _update_submission_ghl_fields(
+                                                submission_db,
+                                                submission_id,
+                                                error_msg=err,
+                                            )
+                                        except Exception as exc:
+                                            logging.error(
+                                                "Failed to record GHL writeback error for submission %s: %s",
+                                                submission_id,
+                                                type(exc).__name__,
+                                            )
+
+                                _check_cancel("before_submission_link_uploads", run_id)
+                                submission_db.query(Upload).filter(Upload.id.in_(upload_ids)).update(
+                                    {"submission_id": submission_id},
+                                    synchronize_session=False
+                                )
+                                _check_cancel("before_submission_link_commit", run_id)
+                                submission_db.commit()
+                                logging.info(
+                                    "Linked %d uploads to submission_id %s",
+                                    len(upload_ids),
+                                    submission_id,
+                                )
+                            except Exception as e:
+                                logging.error(
+                                    "Error creating submission snapshot for %s: %s",
+                                    normalized_email,
+                                    str(e),
+                                )
+                                submission_db.rollback()
+                            finally:
+                                submission_db.close()
+                        elif upload_ids and not all_emails_sent:
+                            logging.warning(
+                                "Submission snapshot skipped for %s due to email failure",
                                 normalized_email,
-                                str(e),
                             )
-                            submission_db.rollback()
-                        finally:
-                            submission_db.close()
-                    elif upload_ids and not all_emails_sent:
-                        logging.warning(
-                            "Submission snapshot skipped for %s due to email failure",
-                            normalized_email,
-                        )
-                    
-                    update_progress(100, "Analysis complete")
-                    # Reset analyzing state and mark analysis as complete
-                    st.session_state.analyzing = False
-                    st.session_state.analysis_complete = True
-                    st.rerun()
+                            if submission_id:
+                                submission_db = SessionLocal()
+                                try:
+                                    update_submission_status(
+                                        submission_db,
+                                        submission_id,
+                                        status="error",
+                                        errored_at=datetime.utcnow(),
+                                        error_message="email_failed",
+                                    )
+                                except Exception as exc:
+                                    logging.error(
+                                        "[analysis] submission error update failed run_id=%s: %s",
+                                        run_id,
+                                        str(exc),
+                                    )
+                                finally:
+                                    submission_db.close()
+
+                        update_progress(100, "Analysis complete")
+                        # Reset analyzing state and mark analysis as complete
+                        st.session_state.analyzing = False
+                        st.session_state.analysis_complete = True
+                        st.session_state.analysis_canceled = False
+                        st.session_state.cancel_requested = False
+                        logging.info("[analysis] finished run_id=%s", run_id)
+                        st.rerun()
+                    except CancelledError:
+                        submission_id = st.session_state.get("analysis_submission_id") or ""
+                        if submission_id:
+                            cancel_db = SessionLocal()
+                            try:
+                                update_submission_status(
+                                    cancel_db,
+                                    submission_id,
+                                    status="canceled",
+                                    canceled_at=datetime.utcnow(),
+                                )
+                            except Exception as exc:
+                                logging.error(
+                                    "[analysis] cancel status update failed run_id=%s: %s",
+                                    run_id,
+                                    str(exc),
+                                )
+                            finally:
+                                cancel_db.close()
+                        st.session_state.analyzing = False
+                        st.session_state.analysis_complete = False
+                        st.session_state.analysis_results = {}
+                        st.session_state.cancel_requested = False
+                        st.session_state.analysis_canceled = True
+                        st.session_state.analysis_run_id = ""
+                        st.session_state.analysis_submission_id = ""
+                        st.session_state.pnl_uploader_key_version += 1
+                        logging.info("[analysis] canceled run_id=%s", run_id)
+                        st.rerun()
+                    except Exception as exc:
+                        submission_id = st.session_state.get("analysis_submission_id") or ""
+                        if submission_id:
+                            error_db = SessionLocal()
+                            try:
+                                update_submission_status(
+                                    error_db,
+                                    submission_id,
+                                    status="error",
+                                    errored_at=datetime.utcnow(),
+                                    error_message=str(exc)[:300],
+                                )
+                            except Exception as update_exc:
+                                logging.error(
+                                    "[analysis] error status update failed run_id=%s: %s",
+                                    run_id,
+                                    str(update_exc),
+                                )
+                            finally:
+                                error_db.close()
+                        st.session_state.analyzing = False
+                        st.session_state.analysis_complete = False
+                        st.session_state.analysis_results = {}
+                        st.session_state.cancel_requested = False
+                        st.session_state.analysis_canceled = False
+                        st.session_state.analysis_run_id = ""
+                        st.session_state.analysis_submission_id = ""
+                        st.session_state.pnl_uploader_key_version += 1
+                        logging.error("[analysis] error run_id=%s: %s", run_id, str(exc))
+                        st.rerun()
 
 # Admin Setup Page (for initial production setup)
 elif st.session_state.page == "Admin Setup":
