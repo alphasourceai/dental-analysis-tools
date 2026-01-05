@@ -813,7 +813,6 @@ if st.session_state.page == "Analyzer":
                     st.session_state.analyzing = False
                 progress_bar = None
                 progress_text = None
-                progress_hint = None
                 analysis_hint = "Analysis may take a few minutes. Please don't click the button again."
                 
                 def update_progress(value: int, label: str) -> None:
@@ -833,8 +832,6 @@ if st.session_state.page == "Analyzer":
                     progress_bar = st.progress(0)
                     progress_text = st.empty()
                     progress_text.caption("0% — Starting")
-                    progress_hint = st.empty()
-                    progress_hint.caption(analysis_hint)
                 
                 if analyze_clicked:
                     st.session_state.analyzing = True
