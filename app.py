@@ -361,6 +361,7 @@ def _render_upload_portal(raw_token: str) -> None:
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 SHOW_DEBUG_CID = os.getenv("SHOW_DEBUG_CID", "").strip().lower() in ("1", "true", "yes", "on")
+SHOW_DEBUG_ADMIN_ROUTE = os.getenv("SHOW_DEBUG_ADMIN_ROUTE", "").strip().lower() in ("1", "true", "yes", "on")
 
 # ---- Page Config ----
 st.set_page_config(page_title="AlphaSource Dental Analysis", page_icon="📊", layout="centered")
@@ -611,6 +612,17 @@ if 'admin_user' not in st.session_state:
 if 'prefill_locked' not in st.session_state:
     st.session_state.prefill_locked = False
 
+if _page_param in ("admin", "admin_login", "admin_dashboard"):
+    st.session_state.page = "Admin Dashboard"
+    if SHOW_DEBUG_ADMIN_ROUTE:
+        logging.info("admin_route page_param=%s -> Admin Dashboard", _page_param)
+elif _page_param in ("analyzer", "home", "public"):
+    st.session_state.page = "Analyzer"
+    if SHOW_DEBUG_ADMIN_ROUTE:
+        logging.info("admin_route page_param=%s -> Analyzer", _page_param)
+elif SHOW_DEBUG_ADMIN_ROUTE:
+    logging.info("admin_route page_param=%s -> (no override)", _page_param)
+
 # ---- Page Navigation (no sidebar, using session state) ----
 if 'page' not in st.session_state:
     st.session_state.page = "Analyzer"
@@ -684,16 +696,44 @@ if st.session_state.page == "Analyzer":
             """, unsafe_allow_html=True)
             if prefill_locked:
                 st.caption("Contact info loaded from your form and locked.")
-            first_name = st.text_input("First Name", key="contact_first_name", disabled=prefill_locked)
-            last_name = st.text_input("Last Name", key="contact_last_name", disabled=prefill_locked)
-            office_name = st.text_input("Office/Group Name", key="contact_office_name", disabled=prefill_locked)
+
+            def render_required_label(text: str) -> None:
+                st.markdown(
+                    f'<div style="margin: 0.35rem 0 0.1rem; font-size: 0.95rem;">{text} <span style="opacity: 0.8;">*</span> <span style="font-size: 0.7rem; opacity: 0.6;">required</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+            render_required_label("First Name")
+            first_name = st.text_input(
+                "First Name",
+                key="contact_first_name",
+                disabled=prefill_locked,
+                label_visibility="collapsed",
+            )
+            render_required_label("Last Name")
+            last_name = st.text_input(
+                "Last Name",
+                key="contact_last_name",
+                disabled=prefill_locked,
+                label_visibility="collapsed",
+            )
+            render_required_label("Office/Group Name")
+            office_name = st.text_input(
+                "Office/Group Name",
+                key="contact_office_name",
+                disabled=prefill_locked,
+                label_visibility="collapsed",
+            )
+            render_required_label("Email Address")
             email = st.text_input(
                 "Email Address",
                 placeholder="user@example.com",
                 key="contact_email",
                 disabled=prefill_locked,
+                label_visibility="collapsed",
             )
-            org_type = st.selectbox("Type", ["Location", "Group"])
+            render_required_label("Type")
+            org_type = st.selectbox("Type", ["Location", "Group"], label_visibility="collapsed")
             submit_user_info = st.form_submit_button("Save Info", disabled=prefill_locked)
 
         import re
@@ -773,6 +813,8 @@ if st.session_state.page == "Analyzer":
                     st.session_state.analyzing = False
                 progress_bar = None
                 progress_text = None
+                progress_hint = None
+                analysis_hint = "Analysis may take a few minutes. Please don't click the button again."
                 
                 def update_progress(value: int, label: str) -> None:
                     if progress_bar is None or progress_text is None:
@@ -785,11 +827,14 @@ if st.session_state.page == "Analyzer":
                     type="primary",
                     disabled=st.session_state.analyzing or not ready_for_analysis,
                 )
+                st.caption(analysis_hint)
                 
                 if st.session_state.analyzing:
                     progress_bar = st.progress(0)
                     progress_text = st.empty()
                     progress_text.caption("0% — Starting")
+                    progress_hint = st.empty()
+                    progress_hint.caption(analysis_hint)
                 
                 if analyze_clicked:
                     st.session_state.analyzing = True
