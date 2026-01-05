@@ -698,14 +698,30 @@ if st.session_state.page == "Analyzer":
 
         import re
         email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        valid_email = re.match(email_pattern, email) if email else False
+        show_validation = not prefill_locked and (
+            submit_user_info or any([first_name, last_name, office_name, email])
+        )
+        if prefill_locked:
+            valid_email = True
+        else:
+            valid_email = re.match(email_pattern, email) if email else False
+        ready_for_analysis = prefill_locked or (
+            all([first_name, last_name, office_name, email, org_type]) and valid_email
+        )
         
-        user_info_complete = all([first_name, last_name, office_name, email, org_type]) and valid_email
+        if show_validation and not first_name:
+            st.error("First name is required.")
+        if show_validation and not last_name:
+            st.error("Last name is required.")
+        if show_validation and not office_name:
+            st.error("Office/Group name is required.")
+        if show_validation:
+            if not email:
+                st.error("Email address is required.")
+            elif not valid_email:
+                st.error("Please enter a valid email address (e.g., user@example.com)")
         
-        if email and not valid_email:
-            st.error("Please enter a valid email address (e.g., user@example.com)")
-        
-        if not user_info_complete:
+        if not ready_for_analysis and not prefill_locked:
             st.info("Please complete the contact information form above before uploading documents.")
         else:
             st.markdown("""
@@ -755,22 +771,32 @@ if st.session_state.page == "Analyzer":
                 
                 if 'analyzing' not in st.session_state:
                     st.session_state.analyzing = False
+                progress_bar = None
+                progress_text = None
                 
-                analyze_clicked = st.button("Analyze Document", type="primary", disabled=st.session_state.analyzing)
+                def update_progress(value: int, label: str) -> None:
+                    if progress_bar is None or progress_text is None:
+                        return
+                    progress_bar.progress(value)
+                    progress_text.caption(f"{value}% — {label}")
+                
+                analyze_clicked = st.button(
+                    "Analyze Document",
+                    type="primary",
+                    disabled=st.session_state.analyzing or not ready_for_analysis,
+                )
                 
                 if st.session_state.analyzing:
-                    st.markdown("""
-                        <div style="display: flex; align-items: center; gap: 10px; margin-top: 1rem;">
-                            <div class="spinner"></div>
-                            <span style="color: #AD8BF7; font-size: 0.95rem;">Analysis may take a couple of minutes. Please wait...</span>
-                        </div>
-                    """, unsafe_allow_html=True)
+                    progress_bar = st.progress(0)
+                    progress_text = st.empty()
+                    progress_text.caption("0% — Starting")
                 
                 if analyze_clicked:
                     st.session_state.analyzing = True
                     st.rerun()
                 
                 if st.session_state.analyzing:
+                    update_progress(10, "Upload started")
                     normalized_email = normalize_email(email)
                     logging.info("Normalized email: %s", normalized_email)
                     user_info_dict = {
@@ -834,126 +860,121 @@ if st.session_state.page == "Analyzer":
                     for tool_name, file in uploaded_files.items():
                             if file is not None:
                                 st.session_state.debug_log.append(f"🔍 Processing file: {file.name} ({tool_name})")
-                                with st.spinner(f"Analyzing {tool_name}..."):
-                                    # Read file content once upfront to avoid invalidating file object
-                                    file.seek(0)
-                                    file_content = file.read()
-                                    file_name = file.name
-                                    file_type = file.type
+                                file.seek(0)
+                                file_content = file.read()
+                                file_name = file.name
+                                file_type = file.type
 
-                                    upload_file_id = persist_upload_file(
-                                        file_bytes=file_content,
-                                        user_email=normalized_email,
-                                        tool_name=tool_name,
-                                        original_filename=file_name,
-                                        content_type=file_type,
+                                upload_file_id = persist_upload_file(
+                                    file_bytes=file_content,
+                                    user_email=normalized_email,
+                                    tool_name=tool_name,
+                                    original_filename=file_name,
+                                    content_type=file_type,
+                                )
+                                update_progress(25, "File stored in Supabase")
+                                
+                                file.seek(0)
+                                
+                                if file.name.endswith(".pdf"):
+                                    raw_text = extract_text_from_pdf(file)
+                                    data_input = raw_text
+                                else:
+                                    df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
+                                    data_input = df.to_string(index=False)
+                                update_progress(45, "Text extraction complete")
+                                
+                                st.session_state.debug_log.append(f"🔍 Running AI analysis for {file.name}...")
+                                update_progress(70, "AI analysis running")
+                                results = analyze_with_all_models(data_input)
+                                st.session_state.debug_log.append(f"✅ Analysis complete for {file.name}")
+                                
+                                st.session_state.analysis_results[tool_name] = results
+                                
+                                st.session_state.debug_log.append(f"📧 Sending emails for {file.name}...")
+                                update_progress(90, "Emails sending")
+                                email_success = True
+                                try:
+                                    send_followup_email(user_info_dict, tool_name, results)
+                                except Exception as exc:
+                                    email_success = False
+                                    logging.error(
+                                        "Follow-up email failed for %s (%s): %s",
+                                        normalized_email,
+                                        file_name,
+                                        str(exc),
                                     )
+                                try:
+                                    send_email(user_info_dict, file_content, file_name, file_type, results, tool_name)
+                                except Exception as exc:
+                                    email_success = False
+                                    logging.error(
+                                        "Admin email failed for %s (%s): %s",
+                                        normalized_email,
+                                        file_name,
+                                        str(exc),
+                                    )
+                                if email_success:
+                                    st.session_state.debug_log.append(f"✅ Emails sent for {file.name}")
+                                else:
+                                    all_emails_sent = False
+                                    st.session_state.debug_log.append(f"❌ Email send failed for {file.name}")
+                                
+                                st.session_state.debug_log.append(f"💾 Opening new database session for {file.name}...")
+                                upload_db = SessionLocal()
+                                try:
+                                    import json
+                                    logging.info(f"Starting database save for {file.name}")
                                     
-                                    # Reset file pointer for processing
-                                    file.seek(0)
+                                    st.session_state.debug_log.append(f"🔍 Serializing analysis to JSON...")
+                                    analysis_json = json.dumps({
+                                        'raw_analyses': results['raw_analyses'],
+                                        'deduplicated_issues': results['deduplicated_issues'],
+                                        'total_issue_count': results['total_issue_count'],
+                                        'all_trends': results.get('all_trends', [])
+                                    })
+                                    st.session_state.debug_log.append(f"✅ JSON serialized, length: {len(analysis_json)}")
+                                    logging.info(f"Analysis JSON serialized, length: {len(analysis_json)}")
                                     
-                                    if file.name.endswith(".pdf"):
-                                        raw_text = extract_text_from_pdf(file)
-                                        data_input = raw_text
-                                    else:
-                                        df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
-                                        data_input = df.to_string(index=False)
+                                    st.session_state.debug_log.append(f"🔍 Creating Upload object...")
+                                    new_upload = Upload(
+                                        file_name=file.name,
+                                        tool_name=tool_name,
+                                        upload_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        user_email=normalized_email,
+                                        analysis_data=analysis_json
+                                    )
+                                    st.session_state.debug_log.append(f"✅ Upload object created")
+                                    logging.info(f"Upload object created for {file.name}")
                                     
-                                    st.session_state.debug_log.append(f"🔍 Running AI analysis for {file.name}...")
-                                    # Run the analysis with all models
-                                    results = analyze_with_all_models(data_input)
-                                    st.session_state.debug_log.append(f"✅ Analysis complete for {file.name}")
+                                    st.session_state.debug_log.append(f"🔍 Adding upload to database session...")
+                                    upload_db.add(new_upload)
+                                    st.session_state.debug_log.append(f"✅ Upload added to session")
+                                    logging.info(f"Upload added to session for {file.name}")
                                     
-                                    # Store results in session state
-                                    st.session_state.analysis_results[tool_name] = results
-                                    
-                                    st.session_state.debug_log.append(f"📧 Sending emails for {file.name}...")
-                                    # Send emails (pass file content instead of file object)
-                                    email_success = True
-                                    try:
-                                        send_followup_email(user_info_dict, tool_name, results)
-                                    except Exception as exc:
-                                        email_success = False
-                                        logging.error(
-                                            "Follow-up email failed for %s (%s): %s",
-                                            normalized_email,
-                                            file_name,
-                                            str(exc),
-                                        )
-                                    try:
-                                        send_email(user_info_dict, file_content, file_name, file_type, results, tool_name)
-                                    except Exception as exc:
-                                        email_success = False
-                                        logging.error(
-                                            "Admin email failed for %s (%s): %s",
-                                            normalized_email,
-                                            file_name,
-                                            str(exc),
-                                        )
-                                    if email_success:
-                                        st.session_state.debug_log.append(f"✅ Emails sent for {file.name}")
-                                    else:
-                                        all_emails_sent = False
-                                        st.session_state.debug_log.append(f"❌ Email send failed for {file.name}")
-                                    
-                                    # Save upload to database with FRESH session (after long AI analysis)
-                                    st.session_state.debug_log.append(f"💾 Opening new database session for {file.name}...")
-                                    upload_db = SessionLocal()
-                                    try:
-                                        import json
-                                        logging.info(f"Starting database save for {file.name}")
-                                        
-                                        st.session_state.debug_log.append(f"🔍 Serializing analysis to JSON...")
-                                        # Include all analysis data including trends
-                                        analysis_json = json.dumps({
-                                            'raw_analyses': results['raw_analyses'],
-                                            'deduplicated_issues': results['deduplicated_issues'],
-                                            'total_issue_count': results['total_issue_count'],
-                                            'all_trends': results.get('all_trends', [])
-                                        })
-                                        st.session_state.debug_log.append(f"✅ JSON serialized, length: {len(analysis_json)}")
-                                        logging.info(f"Analysis JSON serialized, length: {len(analysis_json)}")
-                                        
-                                        st.session_state.debug_log.append(f"🔍 Creating Upload object...")
-                                        new_upload = Upload(
-                                            file_name=file.name,
-                                            tool_name=tool_name,
-                                            upload_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                            user_email=normalized_email,
-                                            analysis_data=analysis_json
-                                        )
-                                        st.session_state.debug_log.append(f"✅ Upload object created")
-                                        logging.info(f"Upload object created for {file.name}")
-                                        
-                                        st.session_state.debug_log.append(f"🔍 Adding upload to database session...")
-                                        upload_db.add(new_upload)
-                                        st.session_state.debug_log.append(f"✅ Upload added to session")
-                                        logging.info(f"Upload added to session for {file.name}")
-                                        
-                                        st.session_state.debug_log.append(f"🔍 Committing to database...")
-                                        upload_db.commit()
-                                        st.session_state.debug_log.append(f"✅ Database commit successful!")
-                                        logging.info(f"✅ Upload committed successfully: {file.name} - {tool_name}")
+                                    st.session_state.debug_log.append(f"🔍 Committing to database...")
+                                    upload_db.commit()
+                                    st.session_state.debug_log.append(f"✅ Database commit successful!")
+                                    logging.info(f"✅ Upload committed successfully: {file.name} - {tool_name}")
 
-                                        update_upload_file_upload_id(upload_file_id, new_upload.id)
-                                        upload_ids.append(new_upload.id)
-                                        
-                                        st.session_state.debug_log.append(f"✅ Upload saved to database: {file.name}")
-                                    except json.JSONDecodeError as e:
-                                        st.session_state.debug_log.append(f"❌ JSON error: {str(e)}")
-                                        logging.error(f"❌ JSON serialization error for {file.name}: {str(e)}")
-                                        upload_db.rollback()
-                                    except Exception as e:
-                                        st.session_state.debug_log.append(f"❌ Database error: {type(e).__name__}: {str(e)}")
-                                        logging.error(f"❌ Error saving upload to database for {file.name}: {str(e)}")
-                                        logging.error(f"Exception type: {type(e).__name__}")
-                                        logging.error(f"Results keys: {results.keys() if results else 'None'}")
-                                        import traceback
-                                        logging.error(f"Traceback: {traceback.format_exc()}")
-                                        upload_db.rollback()
-                                    finally:
-                                        # Always close the upload database session
-                                        upload_db.close()
+                                    update_upload_file_upload_id(upload_file_id, new_upload.id)
+                                    upload_ids.append(new_upload.id)
+                                    
+                                    st.session_state.debug_log.append(f"✅ Upload saved to database: {file.name}")
+                                except json.JSONDecodeError as e:
+                                    st.session_state.debug_log.append(f"❌ JSON error: {str(e)}")
+                                    logging.error(f"❌ JSON serialization error for {file.name}: {str(e)}")
+                                    upload_db.rollback()
+                                except Exception as e:
+                                    st.session_state.debug_log.append(f"❌ Database error: {type(e).__name__}: {str(e)}")
+                                    logging.error(f"❌ Error saving upload to database for {file.name}: {str(e)}")
+                                    logging.error(f"Exception type: {type(e).__name__}")
+                                    logging.error(f"Results keys: {results.keys() if results else 'None'}")
+                                    import traceback
+                                    logging.error(f"Traceback: {traceback.format_exc()}")
+                                    upload_db.rollback()
+                                finally:
+                                    upload_db.close()
                     
                     if upload_ids and all_emails_sent:
                         submission_db = SessionLocal()
@@ -1055,6 +1076,7 @@ if st.session_state.page == "Analyzer":
                             normalized_email,
                         )
                     
+                    update_progress(100, "Analysis complete")
                     # Reset analyzing state and mark analysis as complete
                     st.session_state.analyzing = False
                     st.session_state.analysis_complete = True
@@ -1304,13 +1326,5 @@ elif st.session_state.page == "Admin Dashboard":
 
 # ---- Footer ----
 st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
-
-# Admin links (only on Analyzer page)
-if st.session_state.page == "Analyzer":
-    col1, col2, col3 = st.columns([1,1,1])
-    with col2:
-        if st.button("Admin Dashboard", key="admin_link", use_container_width=True):
-            st.session_state.page = "Admin Dashboard"
-            st.rerun()
 
 st.markdown("<p style='text-align: center; margin-top: 1rem;'>Built by <a href='https://alphasourceai.com' target='_blank'>AlphaSource AI</a></p>", unsafe_allow_html=True)

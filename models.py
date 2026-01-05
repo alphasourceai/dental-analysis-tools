@@ -26,6 +26,9 @@ class ClientSubmission(Base):
     office_name = Column(String(255))
     org_type = Column(String(50))
     submitted_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+    ghl_cid = Column(Text, nullable=True)
+    ghl_analyzer_submitted_at = Column(DateTime(timezone=True), nullable=True)
+    ghl_analyzer_submitted_error = Column(Text, nullable=True)
 
 # Function to get users from the DB
 def get_users(db):
@@ -55,7 +58,7 @@ class UploadFile(Base):
     content_type = Column(Text, nullable=True)
     byte_size = Column(BigInteger, nullable=True)
     bucket = Column(Text, nullable=False)
-    storage_path = Column(Text, nullable=False)
+    object_path = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 # Admin access mapping (Supabase Auth)

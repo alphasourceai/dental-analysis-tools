@@ -145,6 +145,18 @@ def _render_email_html(raw_email: str, height: int = 24) -> None:
     )
 
 
+def _ghl_contact_url(cid: str) -> str:
+    if not cid:
+        return ""
+    location_id = os.getenv("LOCATION_ID", "").strip()
+    if not location_id:
+        return ""
+    return (
+        "https://app.gohighlevel.com/v2/location/"
+        f"{quote(location_id)}/contacts/detail/{quote(cid)}"
+    )
+
+
 def _ensure_admin_state() -> None:
     if "is_admin_logged_in" not in st.session_state:
         st.session_state.is_admin_logged_in = False
@@ -662,7 +674,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                         submission_label = _format_admin_dt(submission.submitted_at) or "-"
 
                         st.markdown('<div class="as-subcard">', unsafe_allow_html=True)
-                        sub_cols = st.columns([2.2, 2.2, 2.4, 1.6, 1.2])
+                        sub_cols = st.columns([2.0, 2.0, 2.2, 1.4, 1.8, 1.0])
                         with sub_cols[0]:
                             st.markdown(
                                 f"<div class=\"as-muted\">Submitted At</div><div>{submission_label}</div>",
@@ -687,6 +699,23 @@ def display_client_submissions(perf: AdminPerfTracker):
                                 unsafe_allow_html=True,
                             )
                         with sub_cols[4]:
+                            ghl_cid = submission.ghl_cid or ""
+                            ghl_url = _ghl_contact_url(ghl_cid)
+                            if ghl_cid:
+                                if ghl_url:
+                                    ghl_markup = (
+                                        f"<a href=\"{ghl_url}\" target=\"_blank\" "
+                                        f"rel=\"noopener noreferrer\">{html.escape(ghl_cid)}</a>"
+                                    )
+                                else:
+                                    ghl_markup = html.escape(ghl_cid)
+                            else:
+                                ghl_markup = "<span class=\"as-muted\">—</span>"
+                            st.markdown(
+                                f"<div class=\"as-muted\">GHL CID</div><div>{ghl_markup}</div>",
+                                unsafe_allow_html=True,
+                            )
+                        with sub_cols[5]:
                             st.markdown(
                                 f"<div class=\"as-muted\">Uploads</div><span class=\"as-pill\">{upload_count}</span>",
                                 unsafe_allow_html=True,
