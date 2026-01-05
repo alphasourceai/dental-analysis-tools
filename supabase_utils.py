@@ -66,15 +66,25 @@ def persist_upload_file(file_bytes, user_email, tool_name, original_filename, co
 
     date_prefix = datetime.utcnow().strftime("%Y-%m-%d")
     unique_name = f"{uuid4()}_{original_filename}"
-    storage_path = f"consulting-uploads/{user_email}/{date_prefix}/{tool_name}/{unique_name}"
+    bucket = "consulting-uploads"
+    storage_path = f"{bucket}/{user_email}/{date_prefix}/{tool_name}/{unique_name}"
+    if storage_path.startswith(f"{bucket}/"):
+        object_path = storage_path[len(bucket) + 1:]
+    else:
+        object_path = storage_path
 
     try:
-        client.storage.from_("consulting-uploads").upload(
-            storage_path,
+        client.storage.from_(bucket).upload(
+            object_path,
             file_bytes,
             {"content-type": content_type, "upsert": False},
         )
-        logging.info("Supabase Storage upload succeeded: %s -> %s", original_filename, storage_path)
+        logging.info(
+            "Supabase Storage upload succeeded: %s -> %s/%s",
+            original_filename,
+            bucket,
+            object_path,
+        )
     except Exception as exc:
         logging.error(f"Supabase Storage upload failed for {original_filename}: {str(exc)}")
         return None
@@ -92,9 +102,15 @@ def persist_upload_file(file_bytes, user_email, tool_name, original_filename, co
                 original_filename=original_filename,
                 content_type=content_type,
                 byte_size=len(file_bytes) if file_bytes is not None else None,
-                bucket="consulting-uploads",
-                storage_path=storage_path,
+                bucket=bucket,
+                object_path=object_path,
             )
+        )
+        logging.info(
+            "upload_files record pending: bucket=%s object_path=%s upload_id=%s",
+            bucket,
+            object_path,
+            normalized_upload_id,
         )
         db.commit()
         return upload_file_id
