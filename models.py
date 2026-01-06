@@ -26,6 +26,7 @@ class ClientSubmission(Base):
     office_name = Column(String(255))
     org_type = Column(String(50))
     submitted_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+    source = Column(Text, nullable=True, index=True)
     status = Column(Text, nullable=True, index=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     canceled_at = Column(DateTime(timezone=True), nullable=True)

@@ -962,6 +962,7 @@ if st.session_state.page == "Analyzer":
                                     last_name=last_name,
                                     office_name=office_name,
                                     org_type=org_type,
+                                    source="client",
                                     status="submitted",
                                     analysis_run_id=run_id,
                                 )
@@ -1176,6 +1177,7 @@ if st.session_state.page == "Analyzer":
                                         last_name=last_name,
                                         office_name=office_name,
                                         org_type=org_type,
+                                        source="client",
                                         status="completed",
                                         completed_at=datetime.utcnow(),
                                         analysis_run_id=run_id,
