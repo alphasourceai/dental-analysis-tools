@@ -657,14 +657,6 @@ _maybe_prefill_from_cid(_query_params)
 
 # Analyzer Page Content
 if st.session_state.page == "Analyzer":
-    # Page Title - only on Analyzer page
-    st.markdown("""
-        <div class="title-container" style="margin-top: 1.5rem;">
-            <h1>Dental Operations AI Analysis</h1>
-        </div>
-    """, unsafe_allow_html=True)
-    st.markdown('<div style="height: 1.5rem;"></div>', unsafe_allow_html=True)
-    
     # Show results if analysis is complete
     if st.session_state.analysis_complete:
         st.markdown("### Analysis Complete!")
@@ -1624,5 +1616,3 @@ elif st.session_state.page == "Admin Dashboard":
 
 # ---- Footer ----
 st.markdown("""<hr style="margin-top: 3rem;">""", unsafe_allow_html=True)
-
-st.markdown("<p style='text-align: center; margin-top: 1rem;'>Built by <a href='https://alphasourceai.com' target='_blank'>AlphaSource AI</a></p>", unsafe_allow_html=True)
