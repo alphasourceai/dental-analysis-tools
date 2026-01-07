@@ -67,11 +67,7 @@ def persist_upload_file(file_bytes, user_email, tool_name, original_filename, co
     date_prefix = datetime.utcnow().strftime("%Y-%m-%d")
     unique_name = f"{uuid4()}_{original_filename}"
     bucket = "consulting-uploads"
-    storage_path = f"{bucket}/{user_email}/{date_prefix}/{tool_name}/{unique_name}"
-    if storage_path.startswith(f"{bucket}/"):
-        object_path = storage_path[len(bucket) + 1:]
-    else:
-        object_path = storage_path
+    object_path = f"{user_email}/{date_prefix}/{tool_name}/{unique_name}"
 
     try:
         client.storage.from_(bucket).upload(

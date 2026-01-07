@@ -29,6 +29,8 @@ from analysis_utils import (
     parse_issues_from_analysis,
     parse_trends_from_analysis,
     deduplicate_issues,
+    log_active_models,
+    get_model_labels,
     send_followup_email,
     send_email,
     categorize_issue,
@@ -887,6 +889,7 @@ if st.session_state.page == "Analyzer":
                     try:
                         _check_cancel("before_start", run_id)
                         logging.info("[analysis] start run_id=%s", run_id)
+                        log_active_models(run_id)
                         _check_cancel("before_upload_loop", run_id)
                         update_progress(10, "Upload started")
                         normalized_email = normalize_email(email)
@@ -1030,13 +1033,14 @@ if st.session_state.page == "Analyzer":
                                     anthropic_result = anthropic_analysis(data_input)
                                     _check_cancel("after_anthropic", run_id)
 
-                                    openai_issues = parse_issues_from_analysis(openai_result, "OpenAI GPT-4")
-                                    xai_issues = parse_issues_from_analysis(xai_result, "xAI Grok")
-                                    anthropic_issues = parse_issues_from_analysis(anthropic_result, "Anthropic Claude")
+                                    model_labels = get_model_labels()
+                                    openai_issues = parse_issues_from_analysis(openai_result, model_labels["openai"])
+                                    xai_issues = parse_issues_from_analysis(xai_result, model_labels["xai"])
+                                    anthropic_issues = parse_issues_from_analysis(anthropic_result, model_labels["anthropic"])
 
-                                    openai_trends = parse_trends_from_analysis(openai_result, "OpenAI GPT-4")
-                                    xai_trends = parse_trends_from_analysis(xai_result, "xAI Grok")
-                                    anthropic_trends = parse_trends_from_analysis(anthropic_result, "Anthropic Claude")
+                                    openai_trends = parse_trends_from_analysis(openai_result, model_labels["openai"])
+                                    xai_trends = parse_trends_from_analysis(xai_result, model_labels["xai"])
+                                    anthropic_trends = parse_trends_from_analysis(anthropic_result, model_labels["anthropic"])
 
                                     all_issues = openai_issues + xai_issues + anthropic_issues
                                     all_trends = openai_trends + xai_trends + anthropic_trends
