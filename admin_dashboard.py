@@ -5,6 +5,7 @@ import os
 import re
 import time
 import uuid
+import math
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 import requests
@@ -304,10 +305,32 @@ def _extract_key_trends(payload: dict) -> list:
     except Exception:
         return []
 
-def _safe_pdf_multi_cell(pdf: FPDF, text: str, field_label: str, height: int = 6) -> None:
+def _safe_pdf_multi_cell(pdf: FPDF, text: str, field_label: str, height: int = 6, width: float = 0) -> None:
     safe_text = _sanitize_pdf_text(text)
+    safe_width = 0.0
     try:
-        pdf.multi_cell(0, height, safe_text)
+        safe_width = float(width or 0)
+    except (TypeError, ValueError):
+        safe_width = 0.0
+    if not math.isfinite(safe_width):
+        safe_width = 0.0
+    if safe_width <= 0:
+        computed_width = pdf.w - pdf.r_margin - pdf.get_x()
+        if not math.isfinite(computed_width):
+            computed_width = 0.0
+        safe_width = computed_width
+    if safe_width <= 0:
+        logging.error(
+            "[pdf] invalid width field=%s width=%s computed=%.2f x=%.2f y=%.2f",
+            field_label,
+            width,
+            safe_width,
+            pdf.get_x(),
+            pdf.get_y(),
+        )
+        safe_width = 1.0
+    try:
+        pdf.multi_cell(safe_width, height, safe_text)
     except Exception as exc:
         snippet = safe_text if len(safe_text) <= 200 else f"{safe_text[:200]}..."
         logging.error(
@@ -318,11 +341,70 @@ def _safe_pdf_multi_cell(pdf: FPDF, text: str, field_label: str, height: int = 6
         )
         raise
 
+def _render_pdf_metadata_row(
+    pdf: FPDF,
+    label: str,
+    value: object,
+    field_label: str,
+    label_width: float = 40,
+    height: int = 6,
+    min_value_width: float = 30,
+) -> None:
+    safe_label = _sanitize_pdf_text(label)
+    safe_value = _sanitize_pdf_text(value or "-")
+    full_width = pdf.w - pdf.l_margin - pdf.r_margin
+    if not math.isfinite(full_width) or full_width <= 0:
+        full_width = label_width + min_value_width
+    label_width = min(label_width, full_width)
+    value_width = full_width - label_width
+    start_x = pdf.l_margin
+    start_y = pdf.get_y()
+
+    pdf.set_x(start_x)
+    pdf.set_font("Helvetica", "B", 10)
+    if value_width < min_value_width:
+        pdf.cell(full_width, height, f"{safe_label}:", ln=1)
+        pdf.set_font("Helvetica", "", 10)
+        try:
+            _safe_pdf_multi_cell(pdf, safe_value, field_label, height=height, width=full_width)
+        except Exception:
+            logging.error(
+                "[pdf] metadata render failed field=%s label_w=%.2f value_w=%.2f full_w=%.2f used_w=%.2f x=%.2f y=%.2f",
+                field_label,
+                label_width,
+                value_width,
+                full_width,
+                full_width,
+                pdf.get_x(),
+                pdf.get_y(),
+            )
+            raise
+        pdf.set_x(pdf.l_margin)
+        return
+
+    pdf.cell(label_width, height, f"{safe_label}:", ln=0)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_xy(start_x + label_width, start_y)
+    try:
+        _safe_pdf_multi_cell(pdf, safe_value, field_label, height=height, width=value_width)
+    except Exception:
+        logging.error(
+            "[pdf] metadata render failed field=%s label_w=%.2f value_w=%.2f full_w=%.2f x=%.2f y=%.2f",
+            field_label,
+            label_width,
+            value_width,
+            full_width,
+            pdf.get_x(),
+            pdf.get_y(),
+        )
+        raise
+    pdf.set_x(pdf.l_margin)
+
 def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int) -> bytes:
     pdf = FPDF()
+    pdf.set_margins(16, 16, 16)
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
-    pdf.set_margins(16, 16, 16)
 
     dark = (37, 42, 52)
     accent = (0, 207, 200)
@@ -353,11 +435,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         ("Upload Time", metadata.get("upload_time")),
     ]
     for label, value in details:
-        value_text = _sanitize_pdf_text(value or "-")
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(32, 6, f"{label}:", ln=0)
-        pdf.set_font("Helvetica", "", 10)
-        _safe_pdf_multi_cell(pdf, value_text, f"metadata:{label}", height=6)
+        _render_pdf_metadata_row(pdf, label, value, f"metadata:{label}", height=6)
 
     pdf.ln(2)
 
@@ -551,35 +629,41 @@ def _render_admin_css() -> None:
             max-width: 100%;
             line-height: 1.2;
         }
-        .client-submissions-scope [data-testid="stButton"] button:has([data-testid="stButtonIcon"]) {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button {
             padding: 0 !important;
-            min-width: 2rem !important;
-            width: 2rem !important;
-            height: 2rem !important;
+            min-width: 32px !important;
+            width: 32px !important;
+            height: 32px !important;
             border-radius: 6px !important;
             border: 1px solid rgba(255, 255, 255, 0.7) !important;
             background: transparent !important;
             color: #EBFEFF !important;
             box-shadow: none !important;
+            gap: 0 !important;
             display: inline-flex !important;
             align-items: center !important;
             justify-content: center !important;
         }
-        .client-submissions-scope [data-testid="stButton"] button:has([data-testid="stButtonIcon"]):hover {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button * {
+            background: transparent !important;
+        }
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:hover {
             border-color: rgba(0, 207, 200, 0.9) !important;
             color: #00CFC8 !important;
             background: rgba(0, 207, 200, 0.12) !important;
         }
-        .client-submissions-scope [data-testid="stButton"] button:has([data-testid="stButtonIcon"]):focus-visible {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:focus-visible {
             outline: 2px solid rgba(0, 207, 200, 0.6) !important;
             outline-offset: 2px !important;
         }
-        .client-submissions-scope [data-testid="stButton"] button:has([data-testid="stButtonIcon"]) [data-testid="stButtonLabel"] {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button [data-testid="stButtonLabel"] {
             display: none !important;
         }
-        .client-submissions-scope [data-testid="stButton"] button:has([data-testid="stButtonIcon"]) [data-testid="stButtonIcon"] {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button [data-testid="stButtonIcon"] {
             font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 24;
             font-size: 1.1rem;
+            margin: 0 !important;
+            padding: 0 !important;
         }
         .stRadio div[role="radiogroup"] {
             gap: 0.4rem;
@@ -1142,6 +1226,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                             f"Uploads for {submission_label} ({len(uploads_for_submission)})",
                             expanded=False,
                         ):
+                            st.markdown('<div class="as-uploads-scope">', unsafe_allow_html=True)
                             if not uploads_for_submission:
                                 st.write("No uploads linked to this submission.")
                             else:
@@ -1213,6 +1298,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     with upload_cols[5]:
                                         st.write(getattr(upload, "pdf_version", 0) or 0)
                                     with upload_cols[6]:
+                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
                                         if has_analysis:
                                             if st.button(
                                                 "Summary",
@@ -1225,7 +1311,9 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 st.rerun()
                                         else:
                                             st.write("-")
+                                        st.markdown("</div>", unsafe_allow_html=True)
                                     with upload_cols[7]:
+                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
                                         if has_analysis:
                                             if st.button(
                                                 "Analysis",
@@ -1238,7 +1326,9 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 st.rerun()
                                         else:
                                             st.write("-")
+                                        st.markdown("</div>", unsafe_allow_html=True)
                                     with upload_cols[8]:
+                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
                                         if has_analysis:
                                             if st.button(
                                                 "Generate PDF",
@@ -1255,6 +1345,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 st.rerun()
                                         else:
                                             st.write("-")
+                                        st.markdown("</div>", unsafe_allow_html=True)
 
                                     if st.session_state.get(summary_state_key, False):
                                         st.markdown("---")
@@ -1371,6 +1462,7 @@ Total Issues Identified: {total_issue_count}
                                             st.session_state[analysis_state_key] = False
                                             st.rerun()
 
+                            st.markdown("</div>", unsafe_allow_html=True)
                         st.markdown("</div>", unsafe_allow_html=True)
                         if submission_index < len(submission_rows) - 1:
                             st.markdown('<div class="as-row-divider"></div>', unsafe_allow_html=True)
