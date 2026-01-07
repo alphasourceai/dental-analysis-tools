@@ -15,10 +15,18 @@ except ImportError:
 import streamlit as st
 import streamlit.components.v1 as components
 from sqlalchemy import func, text
+from fpdf import FPDF
 
 from database import SessionLocal
 from models import ClientSubmission, Upload, UploadPortalFile, User, delete_user, get_db, update_submission_status
-from supabase_utils import persist_upload_file, update_upload_file_upload_id, sign_in_admin, is_admin_user
+from supabase_utils import (
+    persist_upload_file,
+    update_upload_file_upload_id,
+    sign_in_admin,
+    is_admin_user,
+    _get_supabase_admin_client,
+    SUPABASE_URL,
+)
 from upload_portal import PortalError, create_upload_request
 
 MST_FALLBACK = timezone(timedelta(hours=-7), name="MST")
@@ -214,6 +222,186 @@ def _parse_analysis_json(value: object):
         except (TypeError, json.JSONDecodeError):
             return None
     return None
+
+def _sanitize_pdf_text(value: object) -> str:
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    cleaned = text.replace("\r", " ").replace("\t", " ").strip()
+    return cleaned.encode("latin-1", "replace").decode("latin-1")
+
+def _safe_path_component(value: str) -> str:
+    if not value:
+        return "unknown"
+    safe = value.strip().replace("/", "_").replace("\\", "_").replace(" ", "_")
+    return safe
+
+def _extract_opportunities(payload: dict) -> list:
+    items = []
+    if not payload:
+        return items
+    deduplicated = payload.get("deduplicated_issues", [])
+    if not isinstance(deduplicated, list):
+        return items
+    for issue in deduplicated:
+        if not isinstance(issue, dict):
+            continue
+        title = (issue.get("title") or "").strip()
+        impact = (issue.get("impact") or "").strip()
+        recommendation = (issue.get("recommendation") or "").strip()
+        if title or impact or recommendation:
+            items.append(
+                {
+                    "title": title,
+                    "impact": impact,
+                    "recommendation": recommendation,
+                }
+            )
+    return items
+
+def _extract_trends(payload: dict) -> list:
+    items = []
+    if not payload:
+        return items
+    trends = payload.get("all_trends", [])
+    if not isinstance(trends, list):
+        return items
+    for trend in trends:
+        if isinstance(trend, dict):
+            text = trend.get("text") or ""
+        else:
+            text = str(trend)
+        text = text.strip()
+        if text:
+            items.append(text)
+    return items
+
+def _extract_key_trends(payload: dict) -> list:
+    if not payload:
+        return []
+    try:
+        from analysis_utils import extract_compelling_insights
+        return extract_compelling_insights(payload, max_insights=5)
+    except Exception:
+        return []
+
+def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int) -> bytes:
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+    pdf.set_margins(16, 16, 16)
+
+    dark = (37, 42, 52)
+    accent = (0, 207, 200)
+
+    pdf.set_text_color(*dark)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "AlphaSource", ln=1)
+    pdf.set_text_color(*accent)
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, "Analysis Results", ln=1)
+    pdf.set_text_color(*dark)
+    pdf.ln(2)
+
+    pdf.set_draw_color(*accent)
+    y = pdf.get_y()
+    pdf.line(16, y, 194, y)
+    pdf.ln(6)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "Client & Upload Details", ln=1)
+    pdf.set_font("Helvetica", "", 10)
+
+    details = [
+        ("Client Name", metadata.get("client_name")),
+        ("Office/Group", metadata.get("office_name")),
+        ("Client Email", metadata.get("client_email")),
+        ("Tool", metadata.get("tool_name")),
+        ("Upload Time", metadata.get("upload_time")),
+    ]
+    for label, value in details:
+        value_text = _sanitize_pdf_text(value or "-")
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(32, 6, f"{label}:", ln=0)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 6, value_text)
+
+    pdf.ln(2)
+
+    def render_section(title: str, items: list, item_type: str) -> None:
+        if not items:
+            return
+        pdf.set_text_color(*accent)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 7, title, ln=1)
+        pdf.set_text_color(*dark)
+        pdf.set_font("Helvetica", "", 10)
+
+        for item in items:
+            if item_type == "opportunity":
+                title_text = _sanitize_pdf_text(item.get("title") or "Opportunity")
+                impact_text = _sanitize_pdf_text(item.get("impact") or "")
+                rec_text = _sanitize_pdf_text(item.get("recommendation") or "")
+                pdf.set_font("Helvetica", "B", 10)
+                pdf.multi_cell(0, 6, f"Issue: {title_text}")
+                pdf.set_font("Helvetica", "", 10)
+                if impact_text:
+                    pdf.multi_cell(0, 5, f"Impact: {impact_text}")
+                if rec_text:
+                    pdf.multi_cell(0, 5, f"Recommendation: {rec_text}")
+                pdf.ln(1)
+            else:
+                text = _sanitize_pdf_text(item)
+                pdf.multi_cell(0, 5, f"- {text}")
+        pdf.ln(2)
+
+    render_section("Improvement Opportunities", sections.get("opportunities", []), "opportunity")
+    render_section("Trends", sections.get("trends", []), "trend")
+    render_section("Key Trends Identified", sections.get("key_trends", []), "trend")
+
+    if notes:
+        pdf.set_text_color(*accent)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 7, "Additional Notes", ln=1)
+        pdf.set_text_color(*dark)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 6, _sanitize_pdf_text(notes))
+
+    pdf.set_y(-20)
+    pdf.set_font("Helvetica", "", 9)
+    footer = f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} • Version v{version}"
+    pdf.cell(0, 8, footer, align="C")
+
+    return pdf.output(dest="S").encode("latin-1")
+
+def _upload_pdf_report(pdf_bytes: bytes, object_path: str) -> tuple[str, str]:
+    client = _get_supabase_admin_client()
+    if not client:
+        return "", "Supabase admin client is not configured"
+    bucket = "consulting-uploads"
+    try:
+        client.storage.from_(bucket).upload(
+            object_path,
+            pdf_bytes,
+            {"content-type": "application/pdf", "upsert": False},
+        )
+    except Exception as exc:
+        return "", str(exc)
+
+    public_url = ""
+    try:
+        response = client.storage.from_(bucket).get_public_url(object_path)
+        if isinstance(response, dict):
+            public_url = response.get("publicURL") or response.get("public_url") or ""
+        elif isinstance(response, str):
+            public_url = response
+    except Exception:
+        public_url = ""
+
+    if not public_url and SUPABASE_URL:
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{object_path}"
+
+    return public_url, ""
 
 
 def _render_email_html(raw_email: str, height: int = 24) -> None:
@@ -504,8 +692,8 @@ def display_admin_dashboard():
 
     perf.log("tabs_render_start")
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["Client Submissions", "Document Analysis", "Admin Management", "Secure Uploads"]
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["Client Submissions", "Document Analysis", "Admin Management", "Secure Uploads", "PDF Generator"]
     )
 
     with tab1:
@@ -519,6 +707,9 @@ def display_admin_dashboard():
 
     with tab4:
         display_upload_requests(perf)
+
+    with tab5:
+        display_pdf_generator(perf)
 
     perf.log("render_done")
 
@@ -852,7 +1043,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                             if not uploads_for_submission:
                                 st.write("No uploads linked to this submission.")
                             else:
-                                upload_header_cols = st.columns([3.0, 2.0, 2.2, 1.0, 1.0])
+                                upload_header_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.8, 0.8, 1.0])
                                 with upload_header_cols[0]:
                                     st.markdown("**File Name**")
                                 with upload_header_cols[1]:
@@ -860,9 +1051,17 @@ def display_client_submissions(perf: AdminPerfTracker):
                                 with upload_header_cols[2]:
                                     st.markdown("**Upload Time**")
                                 with upload_header_cols[3]:
-                                    st.markdown("**Summary**")
+                                    st.markdown("**Paid**")
                                 with upload_header_cols[4]:
+                                    st.markdown("**PDF**")
+                                with upload_header_cols[5]:
+                                    st.markdown("**Version**")
+                                with upload_header_cols[6]:
+                                    st.markdown("**Summary**")
+                                with upload_header_cols[7]:
                                     st.markdown("**Analysis**")
+                                with upload_header_cols[8]:
+                                    st.markdown("**Generate**")
 
                                 for row_idx, upload in enumerate(uploads_for_submission):
                                     key_suffix = f"{submission.id}_{upload.id}_{submission_index}_{row_idx}"
@@ -870,7 +1069,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     analysis_state_key = f"show_analysis_{key_suffix}"
                                     analysis_payload = _parse_analysis_json(upload.analysis_data)
                                     has_analysis = bool(analysis_payload)
-                                    upload_cols = st.columns([3.0, 2.0, 2.2, 1.0, 1.0])
+                                    upload_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.8, 0.8, 1.0])
                                     with upload_cols[0]:
                                         st.write(upload.file_name or "-")
                                     with upload_cols[1]:
@@ -878,17 +1077,54 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     with upload_cols[2]:
                                         st.write(_format_admin_dt(upload.upload_time) or "-")
                                     with upload_cols[3]:
+                                        paid_key = f"paid_toggle_{key_suffix}"
+                                        current_paid = bool(getattr(upload, "paid", False))
+                                        paid_value = st.checkbox("", value=current_paid, key=paid_key)
+                                        if paid_value != current_paid:
+                                            paid_db = SessionLocal()
+                                            try:
+                                                paid_db.query(Upload).filter(Upload.id == upload.id).update(
+                                                    {"paid": paid_value}
+                                                )
+                                                paid_db.commit()
+                                                st.rerun()
+                                            except Exception as exc:
+                                                logging.error("Failed to update paid flag for upload %s: %s", upload.id, str(exc))
+                                                paid_db.rollback()
+                                            finally:
+                                                paid_db.close()
+                                    with upload_cols[4]:
+                                        pdf_url = getattr(upload, "pdf_url", "") or ""
+                                        if pdf_url:
+                                            pdf_markup = (
+                                                f"<a href=\"{pdf_url}\" target=\"_blank\" "
+                                                f"rel=\"noopener noreferrer\">PDF</a>"
+                                            )
+                                        else:
+                                            pdf_markup = "<span class=\"as-muted\">—</span>"
+                                        st.markdown(pdf_markup, unsafe_allow_html=True)
+                                    with upload_cols[5]:
+                                        st.write(getattr(upload, "pdf_version", 0) or 0)
+                                    with upload_cols[6]:
                                         if has_analysis:
                                             if st.button("📥", key=f"open_summary_{key_suffix}"):
                                                 st.session_state[summary_state_key] = True
                                                 st.rerun()
                                         else:
                                             st.write("-")
-                                    with upload_cols[4]:
+                                    with upload_cols[7]:
                                         if has_analysis:
                                             if st.button("📄", key=f"open_analysis_{key_suffix}"):
                                                 st.session_state[analysis_state_key] = True
                                                 st.rerun()
+                                        else:
+                                            st.write("-")
+                                    with upload_cols[8]:
+                                        if has_analysis:
+                                            if st.button("Generate", key=f"pdf_generate_{key_suffix}"):
+                                                st.session_state.admin_pdf_upload_id = str(upload.id)
+                                                st.session_state.admin_pdf_client_email = submission.user_email or client_email
+                                                st.session_state.admin_pdf_notice = "Open the PDF Generator tab to finish building this report."
                                         else:
                                             st.write("-")
 
@@ -898,6 +1134,8 @@ def display_client_submissions(perf: AdminPerfTracker):
                                             f"**Admin Summary for {upload.file_name} ({upload.tool_name})**"
                                         )
                                         if analysis_payload:
+                                            from analysis_utils import get_model_labels
+
                                             raw_analyses = analysis_payload.get("raw_analyses", {})
                                             if not isinstance(raw_analyses, dict):
                                                 raw_analyses = {}
@@ -905,6 +1143,10 @@ def display_client_submissions(perf: AdminPerfTracker):
                                             openai_text = raw_analyses.get("OpenAI Analysis", "No OpenAI analysis available.")
                                             xai_text = raw_analyses.get("xAI Analysis", "No xAI analysis available.")
                                             anthropic_text = raw_analyses.get("AnthropicAI Analysis", "No Anthropic analysis available.")
+                                            model_labels = get_model_labels()
+                                            openai_label = model_labels["openai"]
+                                            xai_label = model_labels["xai"]
+                                            anthropic_label = model_labels["anthropic"]
                                             admin_summary = f"""
 Tool: {upload.tool_name}
 File Name: {upload.file_name}
@@ -918,13 +1160,13 @@ Organization Type: {submission.org_type}
 
 Total Issues Identified: {total_issue_count}
 
-=== OpenAI GPT-4 Analysis ===
+=== {openai_label} Analysis ===
 {openai_text}
 
-=== xAI Grok Analysis ===
+=== {xai_label} Analysis ===
 {xai_text}
 
-=== Anthropic Claude Analysis ===
+=== {anthropic_label} Analysis ===
 {anthropic_text}
 """
 
@@ -1040,6 +1282,8 @@ def display_document_analysis(perf: AdminPerfTracker):
         deduplicate_issues,
         send_email,
         extract_text_from_pdf,
+        get_model_labels,
+        log_active_models,
     )
     import pandas as pd
 
@@ -1170,6 +1414,7 @@ def display_document_analysis(perf: AdminPerfTracker):
                 try:
                     _check_admin_cancel("before_start", run_id)
                     logging.info("[analysis] start run_id=%s source=admin", run_id)
+                    log_active_models(run_id)
                     normalized_email = normalize_email(email)
                     logging.info("Normalized email: %s", normalized_email)
                     user_info_dict = {
@@ -1306,13 +1551,14 @@ def display_document_analysis(perf: AdminPerfTracker):
                             anthropic_result = anthropic_analysis(text_content)
                             _check_admin_cancel("after_anthropic", run_id)
 
-                            openai_issues = parse_issues_from_analysis(openai_result, "OpenAI GPT-4")
-                            xai_issues = parse_issues_from_analysis(xai_result, "xAI Grok")
-                            anthropic_issues = parse_issues_from_analysis(anthropic_result, "Anthropic Claude")
+                            model_labels = get_model_labels()
+                            openai_issues = parse_issues_from_analysis(openai_result, model_labels["openai"])
+                            xai_issues = parse_issues_from_analysis(xai_result, model_labels["xai"])
+                            anthropic_issues = parse_issues_from_analysis(anthropic_result, model_labels["anthropic"])
 
-                            openai_trends = parse_trends_from_analysis(openai_result, "OpenAI GPT-4")
-                            xai_trends = parse_trends_from_analysis(xai_result, "xAI Grok")
-                            anthropic_trends = parse_trends_from_analysis(anthropic_result, "Anthropic Claude")
+                            openai_trends = parse_trends_from_analysis(openai_result, model_labels["openai"])
+                            xai_trends = parse_trends_from_analysis(xai_result, model_labels["xai"])
+                            anthropic_trends = parse_trends_from_analysis(anthropic_result, model_labels["anthropic"])
 
                             all_issues = openai_issues + xai_issues + anthropic_issues
                             all_trends = openai_trends + xai_trends + anthropic_trends
@@ -1600,6 +1846,301 @@ def display_document_analysis(perf: AdminPerfTracker):
                     st.rerun()
         else:
             st.info("Upload a Financial, AR, or Insurance Claims document to begin analysis.")
+
+
+def display_pdf_generator(perf: AdminPerfTracker):
+    st.markdown("<h3 style='margin-top: 1.5rem;'>PDF Generator</h3>", unsafe_allow_html=True)
+    notice = st.session_state.pop("admin_pdf_notice", None)
+    if notice:
+        st.info(notice)
+
+    if "admin_pdf_upload_id" not in st.session_state:
+        st.session_state.admin_pdf_upload_id = ""
+    if "admin_pdf_client_email" not in st.session_state:
+        st.session_state.admin_pdf_client_email = ""
+
+    perf.mark_first_db_query()
+    db = SessionLocal()
+    try:
+        preselected_upload_id = st.session_state.get("admin_pdf_upload_id")
+        preselected_email = st.session_state.get("admin_pdf_client_email")
+        preselected_upload = None
+        upload_id_uuid = None
+        if preselected_upload_id:
+            try:
+                upload_id_uuid = uuid.UUID(preselected_upload_id)
+            except (ValueError, TypeError):
+                upload_id_uuid = None
+        if upload_id_uuid is not None:
+            preselected_upload = db.query(Upload).filter(Upload.id == upload_id_uuid).first()
+            if preselected_upload and preselected_upload.user_email:
+                preselected_email = preselected_upload.user_email
+
+        client_rows = db.query(ClientSubmission.user_email).distinct().order_by(
+            ClientSubmission.user_email.asc()
+        ).all()
+        client_emails = [row[0] for row in client_rows if row[0]]
+        if not client_emails:
+            st.info("No client submissions available for PDF generation.")
+            return
+
+        client_index = 0
+        if preselected_email and preselected_email in client_emails:
+            client_index = client_emails.index(preselected_email)
+        selected_email = st.selectbox(
+            "Client",
+            client_emails,
+            index=client_index,
+            key="pdf_generator_client",
+        )
+
+        upload_rows = db.query(Upload).filter(
+            Upload.user_email == selected_email
+        ).order_by(Upload.upload_time.desc()).all()
+        upload_rows = [row for row in upload_rows if row.analysis_data]
+        if not upload_rows:
+            st.info("No analyzed uploads available for this client.")
+            return
+
+        def _upload_label(row: Upload) -> str:
+            upload_time = _format_admin_dt(row.upload_time) or "-"
+            return f"{row.tool_name} — {row.file_name} ({upload_time})"
+
+        upload_index = 0
+        if preselected_upload:
+            for idx, row in enumerate(upload_rows):
+                if row.id == preselected_upload.id:
+                    upload_index = idx
+                    break
+
+        selected_upload = st.selectbox(
+            "Upload",
+            upload_rows,
+            format_func=_upload_label,
+            index=upload_index,
+            key="pdf_generator_upload",
+        )
+
+        submission = None
+        if selected_upload.submission_id:
+            submission = db.query(ClientSubmission).filter(
+                ClientSubmission.id == selected_upload.submission_id
+            ).first()
+        if not submission:
+            submission = db.query(ClientSubmission).filter(
+                ClientSubmission.user_email == selected_email
+            ).order_by(ClientSubmission.submitted_at.desc()).first()
+
+        st.markdown("**PDF Builder**")
+        metadata_cols = st.columns(2)
+        client_name = ""
+        office_name = ""
+        if submission:
+            client_name = f"{submission.first_name or ''} {submission.last_name or ''}".strip()
+            office_name = submission.office_name or ""
+        with metadata_cols[0]:
+            st.markdown(f"**Client First Name:** {submission.first_name if submission else '-'}")
+            st.markdown(f"**Client Last Name:** {submission.last_name if submission else '-'}")
+            st.markdown(f"**Office/Group Name:** {office_name or '-'}")
+        with metadata_cols[1]:
+            st.markdown(f"**Client Email:** {selected_email}")
+            st.markdown(f"**Tool Name:** {selected_upload.tool_name or '-'}")
+            st.markdown(f"**Upload Date/Time:** {_format_admin_dt(selected_upload.upload_time) or '-'}")
+
+        current_paid = bool(getattr(selected_upload, "paid", False))
+        paid_value = st.checkbox("Paid", value=current_paid, key=f"pdf_paid_toggle_{selected_upload.id}")
+        if paid_value != current_paid:
+            paid_db = SessionLocal()
+            try:
+                paid_db.query(Upload).filter(Upload.id == selected_upload.id).update(
+                    {"paid": paid_value}
+                )
+                paid_db.commit()
+                st.rerun()
+            except Exception as exc:
+                logging.error("Failed to update paid flag for upload %s: %s", selected_upload.id, str(exc))
+                paid_db.rollback()
+            finally:
+                paid_db.close()
+
+        analysis_payload = _parse_analysis_json(selected_upload.analysis_data)
+        if not analysis_payload:
+            st.warning("Analysis data is missing or unreadable. You can paste content manually below.")
+
+        opportunities = _extract_opportunities(analysis_payload)
+        trends = _extract_trends(analysis_payload)
+        key_trends = _extract_key_trends(analysis_payload)
+
+        builder_prefix = f"pdf_builder_{selected_upload.id}"
+        selected_opportunities = []
+        selected_trends = []
+        selected_key_trends = []
+
+        st.markdown("#### Improvement Opportunities")
+        if opportunities:
+            for idx, item in enumerate(opportunities):
+                include_key = f"{builder_prefix}_opp_include_{idx}"
+                include = st.checkbox(
+                    f"Include opportunity {idx + 1}",
+                    value=True,
+                    key=include_key,
+                )
+                if include:
+                    title = st.text_input(
+                        "Issue",
+                        value=item.get("title") or "",
+                        key=f"{builder_prefix}_opp_title_{idx}",
+                    )
+                    impact = st.text_area(
+                        "Impact",
+                        value=item.get("impact") or "",
+                        key=f"{builder_prefix}_opp_impact_{idx}",
+                        height=70,
+                    )
+                    recommendation = st.text_area(
+                        "Recommendation",
+                        value=item.get("recommendation") or "",
+                        key=f"{builder_prefix}_opp_rec_{idx}",
+                        height=70,
+                    )
+                    selected_opportunities.append(
+                        {"title": title, "impact": impact, "recommendation": recommendation}
+                    )
+        else:
+            manual_opps = st.text_area(
+                "Opportunities (one per line)",
+                key=f"{builder_prefix}_opp_manual",
+                height=150,
+            )
+            if manual_opps.strip():
+                for line in manual_opps.splitlines():
+                    if line.strip():
+                        selected_opportunities.append({"title": line.strip(), "impact": "", "recommendation": ""})
+
+        st.markdown("#### Trends")
+        if trends:
+            for idx, trend in enumerate(trends):
+                include_key = f"{builder_prefix}_trend_include_{idx}"
+                include = st.checkbox(
+                    f"Include trend {idx + 1}",
+                    value=True,
+                    key=include_key,
+                )
+                if include:
+                    text = st.text_area(
+                        "Trend Text",
+                        value=trend,
+                        key=f"{builder_prefix}_trend_text_{idx}",
+                        height=60,
+                    )
+                    selected_trends.append(text)
+        else:
+            manual_trends = st.text_area(
+                "Trends (one per line)",
+                key=f"{builder_prefix}_trend_manual",
+                height=120,
+            )
+            if manual_trends.strip():
+                for line in manual_trends.splitlines():
+                    if line.strip():
+                        selected_trends.append(line.strip())
+
+        st.markdown("#### Key Trends Identified")
+        if key_trends:
+            for idx, trend in enumerate(key_trends):
+                include_key = f"{builder_prefix}_key_include_{idx}"
+                include = st.checkbox(
+                    f"Include key trend {idx + 1}",
+                    value=True,
+                    key=include_key,
+                )
+                if include:
+                    text = st.text_area(
+                        "Key Trend Text",
+                        value=trend,
+                        key=f"{builder_prefix}_key_text_{idx}",
+                        height=60,
+                    )
+                    selected_key_trends.append(text)
+        else:
+            manual_key = st.text_area(
+                "Key Trends (one per line)",
+                key=f"{builder_prefix}_key_manual",
+                height=120,
+            )
+            if manual_key.strip():
+                for line in manual_key.splitlines():
+                    if line.strip():
+                        selected_key_trends.append(line.strip())
+
+        notes = st.text_area(
+            "Additional Notes",
+            max_chars=2000,
+            key=f"{builder_prefix}_notes",
+            height=120,
+        )
+
+        if st.button("Generate PDF", type="primary", key=f"{builder_prefix}_generate"):
+            if not any([selected_opportunities, selected_trends, selected_key_trends, notes.strip()]):
+                st.warning("Please include at least one section or add notes before generating a PDF.")
+                return
+
+            current_version = getattr(selected_upload, "pdf_version", 0) or 0
+            next_version = current_version + 1
+            date_prefix = datetime.utcnow().strftime("%Y-%m-%d")
+            safe_email = _safe_path_component(selected_email)
+            safe_tool = _safe_path_component(selected_upload.tool_name or "analysis")
+            file_name = f"{safe_email}_{safe_tool}_{date_prefix}_v{next_version}.pdf"
+            object_path = f"reports/{safe_email}/{date_prefix}/{safe_tool}/{selected_upload.id}/{file_name}"
+
+            metadata = {
+                "client_name": client_name or selected_email,
+                "office_name": office_name,
+                "client_email": selected_email,
+                "tool_name": selected_upload.tool_name,
+                "upload_time": _format_admin_dt(selected_upload.upload_time) or "-",
+            }
+            sections = {
+                "opportunities": selected_opportunities,
+                "trends": selected_trends,
+                "key_trends": selected_key_trends,
+            }
+
+            try:
+                pdf_bytes = _generate_pdf_bytes(metadata, sections, notes, next_version)
+            except Exception as exc:
+                logging.error("PDF generation failed for upload %s: %s", selected_upload.id, str(exc))
+                st.error("Unable to generate PDF. Please try again.")
+                return
+
+            pdf_url, err = _upload_pdf_report(pdf_bytes, object_path)
+            if err:
+                logging.error("PDF upload failed for upload %s: %s", selected_upload.id, err)
+                st.error("Unable to save PDF to storage.")
+                return
+
+            update_db = SessionLocal()
+            try:
+                update_db.query(Upload).filter(Upload.id == selected_upload.id).update(
+                    {
+                        "pdf_version": next_version,
+                        "pdf_url": pdf_url,
+                        "pdf_generated_at": datetime.utcnow(),
+                        "paid": paid_value,
+                    }
+                )
+                update_db.commit()
+                logging.info("[pdf] generated upload_id=%s version=%s", selected_upload.id, next_version)
+                st.success("PDF generated and saved successfully.")
+                st.rerun()
+            except Exception as exc:
+                logging.error("Failed to update upload PDF metadata %s: %s", selected_upload.id, str(exc))
+                update_db.rollback()
+                st.error("PDF saved but metadata update failed.")
+            finally:
+                update_db.close()
+    finally:
+        db.close()
 
 
 def display_admin_management():

@@ -7,6 +7,7 @@ import os
 import tempfile
 import base64
 import textwrap
+import logging
 import sendgrid
 from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition, TrackingSettings, ClickTracking
 from PIL import Image
@@ -86,15 +87,53 @@ Be specific with numbers, percentages, and timeframes when identifying trends.""
     return base_prompt
 
 
+_MODEL_CONFIG = None
+
+def get_model_config():
+    global _MODEL_CONFIG
+    if _MODEL_CONFIG is not None:
+        return _MODEL_CONFIG
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-5-chat-latest")
+    xai_model = os.getenv("XAI_MODEL", "grok-4-1-fast-reasoning")
+    anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+    _MODEL_CONFIG = {
+        "openai": openai_model,
+        "xai": xai_model,
+        "anthropic": anthropic_model,
+    }
+    return _MODEL_CONFIG
+
+def get_model_labels():
+    models = get_model_config()
+    openai_model = models.get("openai")
+    xai_model = models.get("xai")
+    anthropic_model = models.get("anthropic")
+    return {
+        "openai": f"OpenAI ({openai_model})" if openai_model else "OpenAI",
+        "xai": f"xAI ({xai_model})" if xai_model else "xAI",
+        "anthropic": f"Anthropic ({anthropic_model})" if anthropic_model else "Anthropic",
+    }
+
+def log_active_models(run_id=None) -> None:
+    models = get_model_config()
+    logging.info(
+        "[models] run_id=%s openai=%s xai=%s anthropic=%s",
+        run_id,
+        models.get("openai"),
+        models.get("xai"),
+        models.get("anthropic"),
+    )
+
 def openai_analysis(data_input, doc_type="general"):
-    """Run analysis using OpenAI GPT-4"""
+    """Run analysis using OpenAI"""
     from openai import OpenAI
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     
     prompt = get_analysis_prompt(doc_type)
+    model_name = get_model_config()["openai"]
     
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model=model_name,
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": f"Analyze this dental practice data:\n\n{data_input[:6000]}"}
@@ -115,9 +154,10 @@ def xai_analysis(data_input, doc_type="general"):
     )
     
     prompt = get_analysis_prompt(doc_type)
+    model_name = get_model_config()["xai"]
     
     response = client.chat.completions.create(
-        model="grok-4-1-fast-reasoning",
+        model=model_name,
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": f"Analyze this dental practice data:\n\n{data_input[:6000]}"}
@@ -135,9 +175,10 @@ def anthropic_analysis(data_input, doc_type="general"):
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     
     prompt = get_analysis_prompt(doc_type)
+    model_name = get_model_config()["anthropic"]
     
     message = client.messages.create(
-        model="claude-sonnet-4-5",
+        model=model_name,
         max_tokens=1500,
         temperature=0.3,
         system=prompt,
@@ -269,14 +310,16 @@ def analyze_with_all_models(data_input):
     openai_result = openai_analysis(data_input)
     xai_result = xai_analysis(data_input)
     anthropic_result = anthropic_analysis(data_input)
+
+    model_labels = get_model_labels()
     
-    openai_issues = parse_issues_from_analysis(openai_result, "OpenAI GPT-4")
-    xai_issues = parse_issues_from_analysis(xai_result, "xAI Grok")
-    anthropic_issues = parse_issues_from_analysis(anthropic_result, "Anthropic Claude")
+    openai_issues = parse_issues_from_analysis(openai_result, model_labels["openai"])
+    xai_issues = parse_issues_from_analysis(xai_result, model_labels["xai"])
+    anthropic_issues = parse_issues_from_analysis(anthropic_result, model_labels["anthropic"])
     
-    openai_trends = parse_trends_from_analysis(openai_result, "OpenAI GPT-4")
-    xai_trends = parse_trends_from_analysis(xai_result, "xAI Grok")
-    anthropic_trends = parse_trends_from_analysis(anthropic_result, "Anthropic Claude")
+    openai_trends = parse_trends_from_analysis(openai_result, model_labels["openai"])
+    xai_trends = parse_trends_from_analysis(xai_result, model_labels["xai"])
+    anthropic_trends = parse_trends_from_analysis(anthropic_result, model_labels["anthropic"])
     
     all_issues = openai_issues + xai_issues + anthropic_issues
     all_trends = openai_trends + xai_trends + anthropic_trends

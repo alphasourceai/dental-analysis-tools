@@ -83,20 +83,24 @@ def update_submission_status(
 class Upload(Base):
     __tablename__ = "uploads"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"), index=True)
     file_name = Column(String(255))
     tool_name = Column(String(100))
     upload_time = Column(String(100))
     user_email = Column(String(255), index=True)
     analysis_data = Column(Text)
     submission_id = Column(PGUUID(as_uuid=True), nullable=True, index=True)
+    paid = Column(Boolean, nullable=False, server_default=text("false"))
+    pdf_version = Column(Integer, nullable=False, server_default=text("0"))
+    pdf_url = Column(Text, nullable=True)
+    pdf_generated_at = Column(DateTime(timezone=True), nullable=True)
 
 # Upload file audit model
 class UploadFile(Base):
     __tablename__ = "upload_files"
 
     id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    upload_id = Column(PGUUID(as_uuid=True), nullable=True)
+    upload_id = Column(PGUUID(as_uuid=True), ForeignKey("uploads.id"), nullable=True)
     user_email = Column(Text, nullable=False)
     tool_name = Column(Text, nullable=False)
     original_filename = Column(Text, nullable=False)
