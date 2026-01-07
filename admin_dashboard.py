@@ -2,6 +2,7 @@ import html
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -223,11 +224,29 @@ def _parse_analysis_json(value: object):
             return None
     return None
 
+def _wrap_long_tokens(text: str, max_token_length: int = 28) -> str:
+    if not text:
+        return ""
+    parts = re.split(r"(\s+)", text)
+    wrapped = []
+    for part in parts:
+        if not part or part.isspace():
+            wrapped.append(part)
+            continue
+        if len(part) <= max_token_length:
+            wrapped.append(part)
+            continue
+        chunks = [part[i:i + max_token_length] for i in range(0, len(part), max_token_length)]
+        wrapped.append(" ".join(chunks))
+    return "".join(wrapped)
+
 def _sanitize_pdf_text(value: object) -> str:
     if value is None:
         return ""
     text = value if isinstance(value, str) else str(value)
-    cleaned = text.replace("\r", " ").replace("\t", " ").strip()
+    cleaned = re.sub(r"[\r\n\t]+", " ", text)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    cleaned = _wrap_long_tokens(cleaned)
     return cleaned.encode("latin-1", "replace").decode("latin-1")
 
 def _safe_path_component(value: str) -> str:
@@ -285,6 +304,20 @@ def _extract_key_trends(payload: dict) -> list:
     except Exception:
         return []
 
+def _safe_pdf_multi_cell(pdf: FPDF, text: str, field_label: str, height: int = 6) -> None:
+    safe_text = _sanitize_pdf_text(text)
+    try:
+        pdf.multi_cell(0, height, safe_text)
+    except Exception as exc:
+        snippet = safe_text if len(safe_text) <= 200 else f"{safe_text[:200]}..."
+        logging.error(
+            "[pdf] render failed field=%s error=%s text=%s",
+            field_label,
+            str(exc),
+            snippet,
+        )
+        raise
+
 def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int) -> bytes:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=18)
@@ -324,7 +357,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(32, 6, f"{label}:", ln=0)
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 6, value_text)
+        _safe_pdf_multi_cell(pdf, value_text, f"metadata:{label}", height=6)
 
     pdf.ln(2)
 
@@ -337,22 +370,22 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         pdf.set_text_color(*dark)
         pdf.set_font("Helvetica", "", 10)
 
-        for item in items:
+        for idx, item in enumerate(items, start=1):
             if item_type == "opportunity":
                 title_text = _sanitize_pdf_text(item.get("title") or "Opportunity")
                 impact_text = _sanitize_pdf_text(item.get("impact") or "")
                 rec_text = _sanitize_pdf_text(item.get("recommendation") or "")
                 pdf.set_font("Helvetica", "B", 10)
-                pdf.multi_cell(0, 6, f"Issue: {title_text}")
+                _safe_pdf_multi_cell(pdf, f"Issue: {title_text}", f"{title}:issue_{idx}", height=6)
                 pdf.set_font("Helvetica", "", 10)
                 if impact_text:
-                    pdf.multi_cell(0, 5, f"Impact: {impact_text}")
+                    _safe_pdf_multi_cell(pdf, f"Impact: {impact_text}", f"{title}:impact_{idx}", height=5)
                 if rec_text:
-                    pdf.multi_cell(0, 5, f"Recommendation: {rec_text}")
+                    _safe_pdf_multi_cell(pdf, f"Recommendation: {rec_text}", f"{title}:recommendation_{idx}", height=5)
                 pdf.ln(1)
             else:
                 text = _sanitize_pdf_text(item)
-                pdf.multi_cell(0, 5, f"- {text}")
+                _safe_pdf_multi_cell(pdf, f"- {text}", f"{title}:item_{idx}", height=5)
         pdf.ln(2)
 
     render_section("Improvement Opportunities", sections.get("opportunities", []), "opportunity")
@@ -365,7 +398,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         pdf.cell(0, 7, "Additional Notes", ln=1)
         pdf.set_text_color(*dark)
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 6, _sanitize_pdf_text(notes))
+        _safe_pdf_multi_cell(pdf, _sanitize_pdf_text(notes), "notes", height=6)
 
     pdf.set_y(-20)
     pdf.set_font("Helvetica", "", 9)
@@ -474,7 +507,7 @@ def _render_admin_css() -> None:
             background-color: #061551 !important;
             color: #EBFEFF !important;
         }
-        [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] p {
+        .client-submissions-scope [data-testid="column"] p {
             font-size: 0.8rem !important;
             line-height: 1.25 !important;
             margin: 0.2rem 0 !important;
@@ -482,29 +515,85 @@ def _render_admin_css() -> None:
             overflow: hidden !important;
             text-overflow: ellipsis !important;
         }
-        [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] .stMarkdown strong {
+        .client-submissions-scope [data-testid="column"] .stMarkdown strong {
             font-size: 0.85rem !important;
             font-weight: 600 !important;
         }
-        [data-baseweb="tab-panel"]:first-of-type .stButton > button {
+        .client-submissions-scope .stButton > button {
             padding: 0.15rem 0.3rem !important;
-            font-size: 1rem !important;
+            font-size: 0.75rem !important;
             min-height: 1.6rem !important;
             height: 1.6rem !important;
             line-height: 1 !important;
             border-radius: 4px !important;
         }
-        [data-baseweb="tab-panel"]:first-of-type [data-testid="column"] {
+        .client-submissions-scope [data-testid="column"] {
             padding: 0.15rem 0.4rem !important;
         }
-        [data-baseweb="tab-panel"]:first-of-type [data-testid="stTextArea"] p,
-        [data-baseweb="tab-panel"]:first-of-type .stAlert p,
-        [data-baseweb="tab-panel"]:first-of-type .stWarning p,
-        [data-baseweb="tab-panel"]:first-of-type .stError p,
-        [data-baseweb="tab-panel"]:first-of-type .stSuccess p,
-        [data-baseweb="tab-panel"]:first-of-type .stInfo p {
+        .client-submissions-scope [data-testid="stTextArea"] p,
+        .client-submissions-scope .stAlert p,
+        .client-submissions-scope .stWarning p,
+        .client-submissions-scope .stError p,
+        .client-submissions-scope .stSuccess p,
+        .client-submissions-scope .stInfo p {
             font-size: 1rem !important;
             white-space: normal !important;
+        }
+        .as-upload-header {
+            color: #A9B2C9;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: block;
+            max-width: 100%;
+            line-height: 1.2;
+        }
+        .client-submissions-scope [data-testid="stButton"] button:has([data-testid="stButtonIcon"]) {
+            padding: 0 !important;
+            min-width: 2rem !important;
+            width: 2rem !important;
+            height: 2rem !important;
+            border-radius: 6px !important;
+            border: 1px solid rgba(255, 255, 255, 0.7) !important;
+            background: transparent !important;
+            color: #EBFEFF !important;
+            box-shadow: none !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+        .client-submissions-scope [data-testid="stButton"] button:has([data-testid="stButtonIcon"]):hover {
+            border-color: rgba(0, 207, 200, 0.9) !important;
+            color: #00CFC8 !important;
+            background: rgba(0, 207, 200, 0.12) !important;
+        }
+        .client-submissions-scope [data-testid="stButton"] button:has([data-testid="stButtonIcon"]):focus-visible {
+            outline: 2px solid rgba(0, 207, 200, 0.6) !important;
+            outline-offset: 2px !important;
+        }
+        .client-submissions-scope [data-testid="stButton"] button:has([data-testid="stButtonIcon"]) [data-testid="stButtonLabel"] {
+            display: none !important;
+        }
+        .client-submissions-scope [data-testid="stButton"] button:has([data-testid="stButtonIcon"]) [data-testid="stButtonIcon"] {
+            font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 24;
+            font-size: 1.1rem;
+        }
+        .stRadio div[role="radiogroup"] {
+            gap: 0.4rem;
+        }
+        .stRadio label {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 999px;
+            padding: 0.35rem 0.8rem;
+            font-size: 0.85rem;
+            color: #EBFEFF;
+        }
+        .stRadio label:hover {
+            border-color: rgba(255, 255, 255, 0.4);
         }
         .as-card {
             background: rgba(10, 21, 70, 0.65);
@@ -619,7 +708,7 @@ def _render_admin_login() -> None:
 
         col1, col2, col3 = st.columns([1, 1, 1])
         with col2:
-            submit_button = st.form_submit_button("Login", use_container_width=True)
+            submit_button = st.form_submit_button("Login", width="stretch")
 
         if submit_button:
             auth_result, error = sign_in_admin(email, password)
@@ -649,7 +738,7 @@ def _render_admin_login() -> None:
     if st.session_state.admin_user and not st.session_state.is_admin_logged_in:
         col1, col2, col3 = st.columns([1, 1, 1])
         with col2:
-            if st.button("Logout", key="admin_logout_unauthorized", use_container_width=True):
+            if st.button("Logout", key="admin_logout_unauthorized", width="stretch"):
                 st.session_state.admin_session = None
                 st.session_state.admin_user = None
                 st.session_state.is_admin_logged_in = False
@@ -658,7 +747,7 @@ def _render_admin_login() -> None:
     st.markdown("<br>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        if st.button("Back to Analyzer", key="back_to_analyzer_from_login", use_container_width=True):
+        if st.button("Back to Analyzer", key="back_to_analyzer_from_login", width="stretch"):
             st.session_state.page = "Analyzer"
             st.rerun()
 
@@ -692,23 +781,36 @@ def display_admin_dashboard():
 
     perf.log("tabs_render_start")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["Client Submissions", "Document Analysis", "Admin Management", "Secure Uploads", "PDF Generator"]
+    tab_labels = [
+        "Client Submissions",
+        "Document Analysis",
+        "Admin Management",
+        "Secure Uploads",
+        "PDF Generator",
+    ]
+    if "admin_active_tab" not in st.session_state:
+        st.session_state.admin_active_tab = tab_labels[0]
+    active_index = tab_labels.index(st.session_state.admin_active_tab) if st.session_state.admin_active_tab in tab_labels else 0
+    selected_tab = st.radio(
+        "Admin Navigation",
+        tab_labels,
+        index=active_index,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="admin_tab_selector",
     )
+    if selected_tab != st.session_state.admin_active_tab:
+        st.session_state.admin_active_tab = selected_tab
 
-    with tab1:
+    if selected_tab == "Client Submissions":
         display_client_submissions(perf)
-
-    with tab2:
+    elif selected_tab == "Document Analysis":
         display_document_analysis(perf)
-
-    with tab3:
+    elif selected_tab == "Admin Management":
         display_admin_management()
-
-    with tab4:
+    elif selected_tab == "Secure Uploads":
         display_upload_requests(perf)
-
-    with tab5:
+    elif selected_tab == "PDF Generator":
         display_pdf_generator(perf)
 
     perf.log("render_done")
@@ -838,7 +940,7 @@ def display_uploads_inbox(perf: AdminPerfTracker):
 
         st.dataframe(
             items,
-            use_container_width=True,
+            width="stretch",
             column_config={
                 "console_url": st.column_config.LinkColumn("Console link", display_text="View file"),
             },
@@ -1045,23 +1147,23 @@ def display_client_submissions(perf: AdminPerfTracker):
                             else:
                                 upload_header_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.8, 0.8, 1.0])
                                 with upload_header_cols[0]:
-                                    st.markdown("**File Name**")
+                                    st.markdown('<div class="as-upload-header">File Name</div>', unsafe_allow_html=True)
                                 with upload_header_cols[1]:
-                                    st.markdown("**Tool**")
+                                    st.markdown('<div class="as-upload-header">Tool</div>', unsafe_allow_html=True)
                                 with upload_header_cols[2]:
-                                    st.markdown("**Upload Time**")
+                                    st.markdown('<div class="as-upload-header">Upload Time</div>', unsafe_allow_html=True)
                                 with upload_header_cols[3]:
-                                    st.markdown("**Paid**")
+                                    st.markdown('<div class="as-upload-header">Paid</div>', unsafe_allow_html=True)
                                 with upload_header_cols[4]:
-                                    st.markdown("**PDF**")
+                                    st.markdown('<div class="as-upload-header">PDF</div>', unsafe_allow_html=True)
                                 with upload_header_cols[5]:
-                                    st.markdown("**Version**")
+                                    st.markdown('<div class="as-upload-header">Version</div>', unsafe_allow_html=True)
                                 with upload_header_cols[6]:
-                                    st.markdown("**Summary**")
+                                    st.markdown('<div class="as-upload-header">Summary</div>', unsafe_allow_html=True)
                                 with upload_header_cols[7]:
-                                    st.markdown("**Analysis**")
+                                    st.markdown('<div class="as-upload-header">Analysis</div>', unsafe_allow_html=True)
                                 with upload_header_cols[8]:
-                                    st.markdown("**Generate**")
+                                    st.markdown('<div class="as-upload-header">Generate</div>', unsafe_allow_html=True)
 
                                 for row_idx, upload in enumerate(uploads_for_submission):
                                     key_suffix = f"{submission.id}_{upload.id}_{submission_index}_{row_idx}"
@@ -1079,7 +1181,12 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     with upload_cols[3]:
                                         paid_key = f"paid_toggle_{key_suffix}"
                                         current_paid = bool(getattr(upload, "paid", False))
-                                        paid_value = st.checkbox("", value=current_paid, key=paid_key)
+                                        paid_value = st.checkbox(
+                                            "Paid",
+                                            value=current_paid,
+                                            key=paid_key,
+                                            label_visibility="collapsed",
+                                        )
                                         if paid_value != current_paid:
                                             paid_db = SessionLocal()
                                             try:
@@ -1107,24 +1214,45 @@ def display_client_submissions(perf: AdminPerfTracker):
                                         st.write(getattr(upload, "pdf_version", 0) or 0)
                                     with upload_cols[6]:
                                         if has_analysis:
-                                            if st.button("📥", key=f"open_summary_{key_suffix}"):
+                                            if st.button(
+                                                "Summary",
+                                                key=f"open_summary_{key_suffix}",
+                                                type="secondary",
+                                                icon=":material/description:",
+                                                help="Summary",
+                                            ):
                                                 st.session_state[summary_state_key] = True
                                                 st.rerun()
                                         else:
                                             st.write("-")
                                     with upload_cols[7]:
                                         if has_analysis:
-                                            if st.button("📄", key=f"open_analysis_{key_suffix}"):
+                                            if st.button(
+                                                "Analysis",
+                                                key=f"open_analysis_{key_suffix}",
+                                                type="secondary",
+                                                icon=":material/analytics:",
+                                                help="Analysis",
+                                            ):
                                                 st.session_state[analysis_state_key] = True
                                                 st.rerun()
                                         else:
                                             st.write("-")
                                     with upload_cols[8]:
                                         if has_analysis:
-                                            if st.button("Generate", key=f"pdf_generate_{key_suffix}"):
+                                            if st.button(
+                                                "Generate PDF",
+                                                key=f"pdf_generate_{key_suffix}",
+                                                type="secondary",
+                                                icon=":material/picture_as_pdf:",
+                                                help="Generate PDF",
+                                            ):
                                                 st.session_state.admin_pdf_upload_id = str(upload.id)
                                                 st.session_state.admin_pdf_client_email = submission.user_email or client_email
-                                                st.session_state.admin_pdf_notice = "Open the PDF Generator tab to finish building this report."
+                                                st.session_state.admin_pdf_notice = "PDF Generator opened with the selected upload."
+                                                st.session_state.admin_active_tab = "PDF Generator"
+                                                st.session_state.admin_tab_selector = "PDF Generator"
+                                                st.rerun()
                                         else:
                                             st.write("-")
 
@@ -1884,9 +2012,13 @@ def display_pdf_generator(perf: AdminPerfTracker):
             st.info("No client submissions available for PDF generation.")
             return
 
+        preselect_id = st.session_state.get("admin_pdf_preselect_id")
+        apply_preselect = bool(preselected_upload_id) and preselected_upload_id != preselect_id
         client_index = 0
         if preselected_email and preselected_email in client_emails:
             client_index = client_emails.index(preselected_email)
+            if apply_preselect:
+                st.session_state.pdf_generator_client = preselected_email
         selected_email = st.selectbox(
             "Client",
             client_emails,
@@ -1912,6 +2044,12 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 if row.id == preselected_upload.id:
                     upload_index = idx
                     break
+        if apply_preselect and preselected_upload_id:
+            for row in upload_rows:
+                if str(row.id) == preselected_upload_id:
+                    st.session_state.pdf_generator_upload = row
+                    break
+            st.session_state.admin_pdf_preselect_id = preselected_upload_id
 
         selected_upload = st.selectbox(
             "Upload",
@@ -1975,6 +2113,27 @@ def display_pdf_generator(perf: AdminPerfTracker):
         selected_opportunities = []
         selected_trends = []
         selected_key_trends = []
+
+        include_keys = []
+        if opportunities:
+            include_keys.extend([f"{builder_prefix}_opp_include_{idx}" for idx in range(len(opportunities))])
+        if trends:
+            include_keys.extend([f"{builder_prefix}_trend_include_{idx}" for idx in range(len(trends))])
+        if key_trends:
+            include_keys.extend([f"{builder_prefix}_key_include_{idx}" for idx in range(len(key_trends))])
+
+        if include_keys:
+            toggle_cols = st.columns([1, 1])
+            with toggle_cols[0]:
+                if st.button("Check All", key=f"{builder_prefix}_check_all", type="secondary"):
+                    for key in include_keys:
+                        st.session_state[key] = True
+                    st.rerun()
+            with toggle_cols[1]:
+                if st.button("Uncheck All", key=f"{builder_prefix}_uncheck_all", type="secondary"):
+                    for key in include_keys:
+                        st.session_state[key] = False
+                    st.rerun()
 
         st.markdown("#### Improvement Opportunities")
         if opportunities:
