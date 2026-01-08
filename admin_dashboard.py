@@ -745,25 +745,30 @@ def _render_admin_css() -> None:
             max-width: 100%;
             line-height: 1.2;
         }
-        .as-uploads-scope .as-upload-legend {
+        .as-uploads-scope [class*="st-key-as_upload_legend"] {
+            margin: 0 0 0.4rem 0;
+        }
+        .as-uploads-scope [class*="st-key-as_upload_legend"] button {
+            min-width: 32px !important;
+            width: 32px !important;
+            min-height: 32px !important;
+            height: 32px !important;
+            padding: 0 !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            line-height: 1 !important;
+        }
+        .as-uploads-scope [class*="st-key-as_upload_legend"] button:disabled {
+            opacity: 1 !important;
+            cursor: default !important;
+        }
+        .as-uploads-scope .as-upload-legend-label {
             color: #A9B2C9;
             font-size: 0.75rem;
             letter-spacing: 0.02em;
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-            flex-wrap: nowrap;
             white-space: nowrap;
-            margin: 0 0 0.4rem 0;
-        }
-        .as-uploads-scope .as-upload-legend-item {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.35rem;
-        }
-        .as-uploads-scope .as-upload-legend .material-symbols-outlined {
-            font-size: 1rem;
-            line-height: 1;
+            margin-top: 0.2rem;
         }
         .as-uploads-scope [class*="st-key-as_upload_actions_"],
         .as-uploads-scope [class*="st-key-as_upload_actions_"] > div,
@@ -965,7 +970,13 @@ def _render_admin_login() -> None:
                 }
                 st.session_state.admin_user = auth_result.get("user")
 
-                if is_admin_user(st.session_state.admin_user.get("id")):
+                is_admin = is_admin_user(st.session_state.admin_user.get("id"))
+                logging.info(
+                    "[auth] admin login result user_id=%s is_admin=%s",
+                    st.session_state.admin_user.get("id"),
+                    is_admin,
+                )
+                if is_admin:
                     st.session_state.is_admin_logged_in = True
                     if "admin_email" in st.session_state:
                         del st.session_state["admin_email"]
@@ -1394,23 +1405,49 @@ def display_client_submissions(perf: AdminPerfTracker):
                             if not uploads_for_submission:
                                 st.write("No uploads linked to this submission.")
                             else:
-                                st.markdown(
-                                    """
-                                    <div class="as-upload-legend">
-                                        <span class="as-upload-legend-item">
-                                            <span class="material-symbols-outlined">receipt_long</span>Summary
-                                        </span>
-                                        <span class="as-upload-legend-item">
-                                            <span class="material-symbols-outlined">psychology</span>Analysis
-                                        </span>
-                                        <span class="as-upload-legend-item">
-                                            <span class="material-symbols-outlined">picture_as_pdf</span>Generate PDF
-                                        </span>
-                                    </div>
-                                    """,
-                                    unsafe_allow_html=True,
-                                )
-                                upload_header_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.6, 0.6, 0.6])
+                                legend_container = st.container(key=f"as_upload_legend_{submission.id}")
+                                with legend_container:
+                                    legend_cols = st.columns([0.25, 0.9, 0.25, 0.9, 0.25, 1.2])
+                                    with legend_cols[0]:
+                                        st.button(
+                                            "",
+                                            icon=":material/receipt_long:",
+                                            disabled=True,
+                                            key=f"legend_summary_{submission.id}",
+                                            **action_button_kwargs,
+                                        )
+                                    with legend_cols[1]:
+                                        st.markdown(
+                                            '<div class="as-upload-legend-label">Summary</div>',
+                                            unsafe_allow_html=True,
+                                        )
+                                    with legend_cols[2]:
+                                        st.button(
+                                            "",
+                                            icon=":material/psychology:",
+                                            disabled=True,
+                                            key=f"legend_analysis_{submission.id}",
+                                            **action_button_kwargs,
+                                        )
+                                    with legend_cols[3]:
+                                        st.markdown(
+                                            '<div class="as-upload-legend-label">Analysis</div>',
+                                            unsafe_allow_html=True,
+                                        )
+                                    with legend_cols[4]:
+                                        st.button(
+                                            "",
+                                            icon=":material/picture_as_pdf:",
+                                            disabled=True,
+                                            key=f"legend_generate_{submission.id}",
+                                            **action_button_kwargs,
+                                        )
+                                    with legend_cols[5]:
+                                        st.markdown(
+                                            '<div class="as-upload-legend-label">Generate PDF</div>',
+                                            unsafe_allow_html=True,
+                                        )
+                                upload_header_cols = st.columns([2.6, 1.6, 1.6, 0.8, 0.9, 0.6, 0.6, 0.6])
                                 with upload_header_cols[0]:
                                     st.markdown('<div class="as-upload-header">File Name</div>', unsafe_allow_html=True)
                                 with upload_header_cols[1]:
@@ -1422,12 +1459,10 @@ def display_client_submissions(perf: AdminPerfTracker):
                                 with upload_header_cols[4]:
                                     st.markdown('<div class="as-upload-header">PDF</div>', unsafe_allow_html=True)
                                 with upload_header_cols[5]:
-                                    st.markdown('<div class="as-upload-header">Version</div>', unsafe_allow_html=True)
+                                    st.markdown("&nbsp;", unsafe_allow_html=True)
                                 with upload_header_cols[6]:
                                     st.markdown("&nbsp;", unsafe_allow_html=True)
                                 with upload_header_cols[7]:
-                                    st.markdown("&nbsp;", unsafe_allow_html=True)
-                                with upload_header_cols[8]:
                                     st.markdown("&nbsp;", unsafe_allow_html=True)
 
                                 for row_idx, upload in enumerate(uploads_for_submission):
@@ -1436,7 +1471,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     analysis_state_key = f"show_analysis_{key_suffix}"
                                     analysis_payload = _parse_analysis_json(upload.analysis_data)
                                     has_analysis = bool(analysis_payload)
-                                    upload_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.6, 0.6, 0.6])
+                                    upload_cols = st.columns([2.6, 1.6, 1.6, 0.8, 0.9, 0.6, 0.6, 0.6])
                                     with upload_cols[0]:
                                         st.write(upload.file_name or "-")
                                     with upload_cols[1]:
@@ -1505,8 +1540,6 @@ def display_client_submissions(perf: AdminPerfTracker):
                                             pdf_markup = "<span class=\"as-muted\">—</span>"
                                         st.markdown(pdf_markup, unsafe_allow_html=True)
                                     with upload_cols[5]:
-                                        st.write(getattr(upload, "pdf_version", 0) or 0)
-                                    with upload_cols[6]:
                                         summary_container = st.container(
                                             key=f"as_upload_actions_summary_{upload.id}"
                                         )
@@ -1521,9 +1554,9 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 ):
                                                     st.session_state[summary_state_key] = True
                                                     st.rerun()
-                                            else:
-                                                st.write("-")
-                                    with upload_cols[7]:
+                                                else:
+                                                    st.write("-")
+                                    with upload_cols[6]:
                                         analysis_container = st.container(
                                             key=f"as_upload_actions_analysis_{upload.id}"
                                         )
@@ -1538,9 +1571,9 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 ):
                                                     st.session_state[analysis_state_key] = True
                                                     st.rerun()
-                                            else:
-                                                st.write("-")
-                                    with upload_cols[8]:
+                                                else:
+                                                    st.write("-")
+                                    with upload_cols[7]:
                                         generate_container = st.container(
                                             key=f"as_upload_actions_generate_{upload.id}"
                                         )

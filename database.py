@@ -12,7 +12,11 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
-    pool_recycle=300
+    pool_recycle=1800,
+    connect_args={
+        "connect_timeout": 5,
+        "options": "-c statement_timeout=5000",
+    },
 )
 
 # Base class for models
