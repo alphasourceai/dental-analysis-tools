@@ -770,13 +770,12 @@ def _render_admin_css() -> None:
             white-space: nowrap;
             margin-top: 0.2rem;
         }
-        .as-uploads-scope [class*="st-key-as_upload_legend_box_"],
-        .as-uploads-scope [class*="st-key-as_upload_legend_box_"] > div {
-            padding: 0.55rem 0.65rem !important;
-            border: 1px solid rgba(0, 207, 200, 0.22) !important;
-            background: rgba(255, 255, 255, 0.03) !important;
-            border-radius: 10px !important;
-            margin-bottom: 0.6rem !important;
+        .as-uploads-scope .as-upload-legend-shell {
+            padding: 0.6rem 0.7rem;
+            border: 1px solid rgba(0, 207, 200, 0.25);
+            background: rgba(255, 255, 255, 0.035);
+            border-radius: 10px;
+            margin-bottom: 0.6rem;
         }
         .as-uploads-scope .as-upload-legend-title {
             font-size: 0.68rem;
@@ -1423,6 +1422,9 @@ def display_client_submissions(perf: AdminPerfTracker):
                                 legend_box = st.container(key=f"as_upload_legend_box_{submission.id}")
                                 with legend_box:
                                     st.markdown(
+                                        '<div class="as-upload-legend-shell">', unsafe_allow_html=True
+                                    )
+                                    st.markdown(
                                         '<div class="as-upload-legend-title">Actions</div>',
                                         unsafe_allow_html=True,
                                     )
@@ -1468,6 +1470,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 '<div class="as-upload-legend-label">Generate PDF</div>',
                                                 unsafe_allow_html=True,
                                             )
+                                    st.markdown("</div>", unsafe_allow_html=True)
                                 upload_header_cols = st.columns([2.6, 1.6, 1.6, 0.8, 0.9, 0.6, 0.6, 0.6])
                                 with upload_header_cols[0]:
                                     st.markdown('<div class="as-upload-header">File Name</div>', unsafe_allow_html=True)
