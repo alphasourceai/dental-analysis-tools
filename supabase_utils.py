@@ -202,7 +202,7 @@ def is_admin_user(user_id):
         "Accept": "application/json",
     }
     params = {
-        "select": "id",
+        "select": "user_id",
         "user_id": f"eq.{normalized_user_id}",
         "role": "eq.admin",
         "limit": "1",
