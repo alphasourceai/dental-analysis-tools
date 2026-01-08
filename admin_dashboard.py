@@ -1,4 +1,5 @@
 import html
+import inspect
 import json
 import logging
 import os
@@ -33,6 +34,10 @@ from upload_portal import PortalError, create_upload_request
 
 MST_FALLBACK = timezone(timedelta(hours=-7), name="MST")
 MST_TZ = ZoneInfo("America/Denver") if ZoneInfo else MST_FALLBACK
+try:
+    _BUTTON_SUPPORTS_WIDTH = "width" in inspect.signature(st.button).parameters
+except (TypeError, ValueError):
+    _BUTTON_SUPPORTS_WIDTH = False
 
 
 class AdminPerfTracker:
@@ -740,14 +745,14 @@ def _render_admin_css() -> None:
             max-width: 100%;
             line-height: 1.2;
         }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"],
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div,
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div > div,
-        .as-uploads-scope .as-upload-actions button {
+        .as-uploads-scope [class*="st-key-as_upload_actions_"],
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] > div,
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] > div > div {
+            background-color: transparent !important;
             background: transparent !important;
             box-shadow: none !important;
             border: 0 !important;
-            outline: none !important;
+            outline: 0 !important;
             padding: 0 !important;
             margin: 0 !important;
             min-width: 32px !important;
@@ -755,22 +760,49 @@ def _render_admin_css() -> None:
             min-height: 32px !important;
             height: 32px !important;
             border-radius: 6px !important;
-            overflow: hidden !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"],
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div,
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div > div {
             display: flex !important;
             align-items: center !important;
             justify-content: center !important;
+            overflow: hidden !important;
         }
-        .as-uploads-scope .as-upload-actions button {
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] *,
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] *::before,
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] *::after {
+            background-color: transparent !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            border: 0 !important;
+            outline: 0 !important;
+            padding: 0 !important;
+            margin: 0 !important;
+        }
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] button,
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] button *,
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] button::before,
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] button::after {
+            background-color: transparent !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            border: 0 !important;
+            outline: 0 !important;
+            padding: 0 !important;
+            margin: 0 !important;
+        }
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] button {
+            min-width: 32px !important;
+            width: 32px !important;
+            min-height: 32px !important;
+            height: 32px !important;
+            border-radius: 6px !important;
+            border: 1px solid rgba(0, 207, 200, 0.85) !important;
             display: inline-flex !important;
             align-items: center !important;
             justify-content: center !important;
+            overflow: hidden !important;
             cursor: pointer !important;
-            font-size: 18px !important;
-            line-height: 1 !important;
+        }
+        .as-uploads-scope [class*="st-key-as_upload_actions_"] button:hover {
+            background: rgba(0, 207, 200, 0.1) !important;
         }
         .stRadio div[role="radiogroup"] {
             gap: 0.4rem;
@@ -1176,6 +1208,8 @@ def display_client_submissions(perf: AdminPerfTracker):
             st.write("No client submissions available")
             return
 
+        action_button_kwargs = {"width": 32} if _BUTTON_SUPPORTS_WIDTH else {}
+
         header_cols = st.columns([3.6, 1.4, 2.2, 0.8])
         with header_cols[0]:
             st.markdown("**Email**")
@@ -1437,48 +1471,60 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     with upload_cols[5]:
                                         st.write(getattr(upload, "pdf_version", 0) or 0)
                                     with upload_cols[6]:
-                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
-                                        if has_analysis:
-                                            if st.button(
-                                                "🧾",
-                                                key=f"open_summary_{key_suffix}",
-                                                type="secondary",
-                                            ):
-                                                st.session_state[summary_state_key] = True
-                                                st.rerun()
-                                        else:
-                                            st.write("-")
-                                        st.markdown("</div>", unsafe_allow_html=True)
+                                        summary_container = st.container(
+                                            key=f"as_upload_actions_summary_{upload.id}"
+                                        )
+                                        with summary_container:
+                                            if has_analysis:
+                                                if st.button(
+                                                    "",
+                                                    key=f"open_summary_{key_suffix}",
+                                                    type="secondary",
+                                                    icon=":material/receipt_long:",
+                                                    **action_button_kwargs,
+                                                ):
+                                                    st.session_state[summary_state_key] = True
+                                                    st.rerun()
+                                            else:
+                                                st.write("-")
                                     with upload_cols[7]:
-                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
-                                        if has_analysis:
-                                            if st.button(
-                                                "🧠",
-                                                key=f"open_analysis_{key_suffix}",
-                                                type="secondary",
-                                            ):
-                                                st.session_state[analysis_state_key] = True
-                                                st.rerun()
-                                        else:
-                                            st.write("-")
-                                        st.markdown("</div>", unsafe_allow_html=True)
+                                        analysis_container = st.container(
+                                            key=f"as_upload_actions_analysis_{upload.id}"
+                                        )
+                                        with analysis_container:
+                                            if has_analysis:
+                                                if st.button(
+                                                    "",
+                                                    key=f"open_analysis_{key_suffix}",
+                                                    type="secondary",
+                                                    icon=":material/psychology:",
+                                                    **action_button_kwargs,
+                                                ):
+                                                    st.session_state[analysis_state_key] = True
+                                                    st.rerun()
+                                            else:
+                                                st.write("-")
                                     with upload_cols[8]:
-                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
-                                        if has_analysis:
-                                            if st.button(
-                                                "📄",
-                                                key=f"pdf_generate_{key_suffix}",
-                                                type="secondary",
-                                            ):
-                                                st.session_state.admin_pdf_upload_id = str(upload.id)
-                                                st.session_state.admin_pdf_client_email = submission.user_email or client_email
-                                                st.session_state.admin_pdf_notice = "PDF Generator opened with the selected upload."
-                                                st.session_state.admin_pending_tab = "PDF Generator"
-                                                st.session_state.admin_pdf_preselect_id = str(upload.id)
-                                                st.rerun()
-                                        else:
-                                            st.write("-")
-                                        st.markdown("</div>", unsafe_allow_html=True)
+                                        generate_container = st.container(
+                                            key=f"as_upload_actions_generate_{upload.id}"
+                                        )
+                                        with generate_container:
+                                            if has_analysis:
+                                                if st.button(
+                                                    "",
+                                                    key=f"pdf_generate_{key_suffix}",
+                                                    type="secondary",
+                                                    icon=":material/picture_as_pdf:",
+                                                    **action_button_kwargs,
+                                                ):
+                                                    st.session_state.admin_pdf_upload_id = str(upload.id)
+                                                    st.session_state.admin_pdf_client_email = submission.user_email or client_email
+                                                    st.session_state.admin_pdf_notice = "PDF Generator opened with the selected upload."
+                                                    st.session_state.admin_pending_tab = "PDF Generator"
+                                                    st.session_state.admin_pdf_preselect_id = str(upload.id)
+                                                    st.rerun()
+                                            else:
+                                                st.write("-")
 
                                     if st.session_state.get(summary_state_key, False):
                                         st.markdown("---")
