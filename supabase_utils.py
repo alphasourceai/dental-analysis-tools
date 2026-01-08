@@ -3,6 +3,7 @@ import os
 from datetime import datetime
 from uuid import UUID, uuid4
 
+import requests
 from supabase import create_client
 
 from database import SessionLocal
@@ -187,19 +188,45 @@ def is_admin_user(user_id):
     normalized_user_id = _normalize_uuid(user_id)
     if not normalized_user_id:
         return False
-    db = SessionLocal()
-    try:
-        return (
-            db.query(AdminUser)
-            .filter(AdminUser.user_id == normalized_user_id, AdminUser.role == "admin")
-            .first()
-            is not None
-        )
-    except Exception as exc:
-        logging.error(f"Error checking admin_users for {user_id}: {str(exc)}")
+    if not SUPABASE_URL:
+        logging.error("[auth] admin_users rest check missing SUPABASE_URL user_id=%s", user_id)
         return False
-    finally:
-        db.close()
+    rest_key = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
+    if not rest_key:
+        logging.error("[auth] admin_users rest check missing key user_id=%s", user_id)
+        return False
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/admin_users"
+    headers = {
+        "apikey": rest_key,
+        "Authorization": f"Bearer {rest_key}",
+        "Accept": "application/json",
+    }
+    params = {
+        "select": "id",
+        "user_id": f"eq.{normalized_user_id}",
+        "role": "eq.admin",
+        "limit": "1",
+    }
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=3)
+    except requests.RequestException as exc:
+        logging.error("[auth] admin_users rest check failed user_id=%s err=%s", user_id, str(exc))
+        return False
+    if response.status_code != 200:
+        logging.error(
+            "[auth] admin_users rest check bad status user_id=%s status=%s",
+            user_id,
+            response.status_code,
+        )
+        return False
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        logging.error("[auth] admin_users rest check invalid json user_id=%s err=%s", user_id, str(exc))
+        return False
+    is_admin = bool(payload)
+    logging.info("[auth] admin_users rest check user_id=%s result=%s", user_id, is_admin)
+    return is_admin
 
 
 def get_admin_user_count():
