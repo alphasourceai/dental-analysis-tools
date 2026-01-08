@@ -33,6 +33,8 @@ from upload_portal import PortalError, create_upload_request
 
 MST_FALLBACK = timezone(timedelta(hours=-7), name="MST")
 MST_TZ = ZoneInfo("America/Denver") if ZoneInfo else MST_FALLBACK
+AS_DEBUG_UPLOAD_BUTTONS = True
+AS_BUILD_MARKER = "BUILD_MARKER_2026_01_08_A"
 
 
 class AdminPerfTracker:
@@ -316,7 +318,10 @@ def _extract_key_trends(payload: dict) -> list:
         return []
 
 def _safe_pdf_multi_cell(pdf: FPDF, text: str, field_label: str, height: int = 6, width: float = 0) -> None:
-    safe_text = _sanitize_pdf_text(text)
+    raw_text = "" if text is None else str(text)
+    safe_text = _sanitize_pdf_text(raw_text)
+    if safe_text != raw_text:
+        logging.info("[pdf] normalized text build=%s field=%s", AS_BUILD_MARKER, field_label)
     safe_width = 0.0
     try:
         safe_width = float(width or 0)
@@ -426,10 +431,10 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
 
     pdf.set_text_color(*dark)
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, "AlphaSource", ln=1)
+    pdf.cell(0, 10, _sanitize_pdf_text("AlphaSource"), ln=1)
     pdf.set_text_color(*accent)
     pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, "Analysis Results", ln=1)
+    pdf.cell(0, 8, _sanitize_pdf_text("Analysis Results"), ln=1)
     pdf.set_text_color(*dark)
     pdf.ln(2)
 
@@ -439,7 +444,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     pdf.ln(6)
 
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, "Client & Upload Details", ln=1)
+    pdf.cell(0, 7, _sanitize_pdf_text("Client & Upload Details"), ln=1)
     pdf.set_font("Helvetica", "", 10)
 
     content_width = pdf.w - pdf.l_margin - pdf.r_margin
@@ -461,7 +466,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             return
         pdf.set_text_color(*accent)
         pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 7, title, ln=1)
+        pdf.cell(0, 7, _sanitize_pdf_text(title), ln=1)
         pdf.set_text_color(*dark)
         pdf.set_font("Helvetica", "", 10)
 
@@ -518,7 +523,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     if notes:
         pdf.set_text_color(*accent)
         pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 7, "Additional Notes", ln=1)
+        pdf.cell(0, 7, _sanitize_pdf_text("Additional Notes"), ln=1)
         pdf.set_text_color(*dark)
         pdf.set_font("Helvetica", "", 10)
         pdf.set_x(pdf.l_margin)
@@ -527,7 +532,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     pdf.set_y(-20)
     pdf.set_font("Helvetica", "", 9)
     footer = f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} • Version v{version}"
-    pdf.cell(0, 8, footer, align="C")
+    pdf.cell(0, 8, _sanitize_pdf_text(footer), align="C")
 
     return pdf.output(dest="S").encode("latin-1")
 
@@ -617,8 +622,18 @@ def _ensure_admin_state() -> None:
 
 
 def _render_admin_css() -> None:
-    st.markdown(
+    debug_css = ""
+    if AS_DEBUG_UPLOAD_BUTTONS:
+        debug_css = """
+        .as-uploads-scope .as-upload-actions button {
+            outline: 2px solid rgba(255, 0, 0, 0.65) !important;
+        }
+        .as-uploads-scope button {
+            outline: 2px dashed rgba(255, 165, 0, 0.55) !important;
+        }
         """
+    logging.info("[ui] admin css injected build=%s debug=%s", AS_BUILD_MARKER, AS_DEBUG_UPLOAD_BUTTONS)
+    css = """
         <style>
         details > summary {
             background-color: #061551 !important;
@@ -674,6 +689,50 @@ def _render_admin_css() -> None:
             display: block;
             max-width: 100%;
             line-height: 1.2;
+        }
+        .as-build-marker {
+            position: fixed;
+            bottom: 8px;
+            right: 8px;
+            opacity: 0.35;
+            font-size: 10px;
+            z-index: 99999;
+            color: #EBFEFF;
+            pointer-events: none;
+        }
+        .as-uploads-scope .as-upload-actions button {
+            all: unset !important;
+            width: 32px !important;
+            height: 32px !important;
+            min-width: 32px !important;
+            min-height: 32px !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            border-radius: 6px !important;
+            border: 1px solid rgba(0, 207, 200, 0.85) !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            cursor: pointer !important;
+            overflow: hidden !important;
+            font-size: 0 !important;
+            line-height: 0 !important;
+            color: #EBFEFF !important;
+        }
+        .as-uploads-scope .as-upload-actions button * {
+            background: transparent !important;
+            box-shadow: none !important;
+            border: 0 !important;
+        }
+        .as-uploads-scope .as-upload-actions button [data-testid="stButtonLabel"] {
+            display: none !important;
+        }
+        .as-uploads-scope .as-upload-actions button svg {
+            width: 18px !important;
+            height: 18px !important;
+            display: block !important;
         }
         .as-uploads-scope .as-upload-actions [data-testid="stButton"],
         .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div,
@@ -853,9 +912,10 @@ def _render_admin_css() -> None:
             margin-top: 0.55rem;
         }
         </style>
-        """,
-        unsafe_allow_html=True,
-    )
+        """
+    if debug_css:
+        css = css.replace("</style>", f"{debug_css}\n        </style>")
+    st.markdown(css, unsafe_allow_html=True)
 
 
 def _render_admin_login() -> None:
@@ -941,6 +1001,11 @@ def display_admin_dashboard():
 
     _ensure_admin_state()
     _render_admin_css()
+    st.caption(f"admin:{AS_BUILD_MARKER} [TEMP]")
+    st.markdown(
+        f'<div class="as-build-marker">admin:{AS_BUILD_MARKER} [TEMP]</div>',
+        unsafe_allow_html=True,
+    )
 
     is_authenticated = bool(st.session_state.get("is_admin_logged_in"))
     perf.log("auth_checked")
@@ -1328,6 +1393,9 @@ def display_client_submissions(perf: AdminPerfTracker):
                             if not uploads_for_submission:
                                 st.write("No uploads linked to this submission.")
                             else:
+                                st.caption(
+                                    f"wrappers: uploads_scope=on actions_scope=on build={AS_BUILD_MARKER} [TEMP]"
+                                )
                                 upload_header_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.8, 0.8, 1.0])
                                 with upload_header_cols[0]:
                                     st.markdown('<div class="as-upload-header">File Name</div>', unsafe_allow_html=True)
@@ -1354,6 +1422,11 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     analysis_state_key = f"show_analysis_{key_suffix}"
                                     analysis_payload = _parse_analysis_json(upload.analysis_data)
                                     has_analysis = bool(analysis_payload)
+                                    logging.info(
+                                        "[ui] rendered upload action buttons build=%s upload_id=%s",
+                                        AS_BUILD_MARKER,
+                                        str(upload.id),
+                                    )
                                     upload_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.8, 0.8, 1.0])
                                     with upload_cols[0]:
                                         st.write(upload.file_name or "-")
@@ -2458,7 +2531,12 @@ def display_pdf_generator(perf: AdminPerfTracker):
             try:
                 pdf_bytes = _generate_pdf_bytes(metadata, sections, notes, next_version)
             except Exception as exc:
-                logging.error("PDF generation failed for upload %s: %s", selected_upload.id, str(exc))
+                logging.error(
+                    "[pdf] failed build=%s upload_id=%s err=%r",
+                    AS_BUILD_MARKER,
+                    selected_upload.id,
+                    exc,
+                )
                 st.error("Unable to generate PDF. Please try again.")
                 return
 
