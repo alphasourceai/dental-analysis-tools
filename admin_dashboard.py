@@ -315,20 +315,25 @@ def _safe_pdf_multi_cell(pdf: FPDF, text: str, field_label: str, height: int = 6
     if not math.isfinite(safe_width):
         safe_width = 0.0
     if safe_width <= 0:
-        computed_width = pdf.w - pdf.r_margin - pdf.get_x()
-        if not math.isfinite(computed_width):
-            computed_width = 0.0
-        safe_width = computed_width
-    if safe_width <= 0:
+        full_line_width = pdf.w - pdf.l_margin - pdf.r_margin
+        if not math.isfinite(full_line_width):
+            full_line_width = 0.0
+        if pdf.get_x() > (pdf.l_margin + 1):
+            pdf.set_x(pdf.l_margin)
+        safe_width = full_line_width
+    if safe_width <= 1:
         logging.error(
-            "[pdf] invalid width field=%s width=%s computed=%.2f x=%.2f y=%.2f",
+            "[pdf] invalid width field=%s width=%s computed=%.2f x=%.2f y=%.2f page=%s l_margin=%.2f r_margin=%.2f",
             field_label,
             width,
             safe_width,
             pdf.get_x(),
             pdf.get_y(),
+            pdf.page_no(),
+            pdf.l_margin,
+            pdf.r_margin,
         )
-        safe_width = 1.0
+        safe_width = 10.0
     try:
         pdf.multi_cell(safe_width, height, safe_text)
     except Exception as exc:
@@ -427,6 +432,8 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     pdf.cell(0, 7, "Client & Upload Details", ln=1)
     pdf.set_font("Helvetica", "", 10)
 
+    content_width = pdf.w - pdf.l_margin - pdf.r_margin
+
     details = [
         ("Client Name", metadata.get("client_name")),
         ("Office/Group", metadata.get("office_name")),
@@ -454,16 +461,44 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
                 impact_text = _sanitize_pdf_text(item.get("impact") or "")
                 rec_text = _sanitize_pdf_text(item.get("recommendation") or "")
                 pdf.set_font("Helvetica", "B", 10)
-                _safe_pdf_multi_cell(pdf, f"Issue: {title_text}", f"{title}:issue_{idx}", height=6)
+                pdf.set_x(pdf.l_margin)
+                _safe_pdf_multi_cell(
+                    pdf,
+                    f"Issue: {title_text}",
+                    f"{title}:issue_{idx}",
+                    height=6,
+                    width=content_width,
+                )
                 pdf.set_font("Helvetica", "", 10)
                 if impact_text:
-                    _safe_pdf_multi_cell(pdf, f"Impact: {impact_text}", f"{title}:impact_{idx}", height=5)
+                    pdf.set_x(pdf.l_margin)
+                    _safe_pdf_multi_cell(
+                        pdf,
+                        f"Impact: {impact_text}",
+                        f"{title}:impact_{idx}",
+                        height=5,
+                        width=content_width,
+                    )
                 if rec_text:
-                    _safe_pdf_multi_cell(pdf, f"Recommendation: {rec_text}", f"{title}:recommendation_{idx}", height=5)
+                    pdf.set_x(pdf.l_margin)
+                    _safe_pdf_multi_cell(
+                        pdf,
+                        f"Recommendation: {rec_text}",
+                        f"{title}:recommendation_{idx}",
+                        height=5,
+                        width=content_width,
+                    )
                 pdf.ln(1)
             else:
                 text = _sanitize_pdf_text(item)
-                _safe_pdf_multi_cell(pdf, f"- {text}", f"{title}:item_{idx}", height=5)
+                pdf.set_x(pdf.l_margin)
+                _safe_pdf_multi_cell(
+                    pdf,
+                    f"- {text}",
+                    f"{title}:item_{idx}",
+                    height=5,
+                    width=content_width,
+                )
         pdf.ln(2)
 
     render_section("Improvement Opportunities", sections.get("opportunities", []), "opportunity")
@@ -476,7 +511,8 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         pdf.cell(0, 7, "Additional Notes", ln=1)
         pdf.set_text_color(*dark)
         pdf.set_font("Helvetica", "", 10)
-        _safe_pdf_multi_cell(pdf, _sanitize_pdf_text(notes), "notes", height=6)
+        pdf.set_x(pdf.l_margin)
+        _safe_pdf_multi_cell(pdf, _sanitize_pdf_text(notes), "notes", height=6, width=content_width)
 
     pdf.set_y(-20)
     pdf.set_font("Helvetica", "", 9)
@@ -629,41 +665,59 @@ def _render_admin_css() -> None:
             max-width: 100%;
             line-height: 1.2;
         }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button {
-            padding: 0 !important;
-            min-width: 32px !important;
-            width: 32px !important;
-            height: 32px !important;
-            border-radius: 6px !important;
-            border: 1px solid rgba(255, 255, 255, 0.7) !important;
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"],
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div,
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div > div {
             background: transparent !important;
-            color: #EBFEFF !important;
             box-shadow: none !important;
-            gap: 0 !important;
+        }
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button {
+            width: 32px !important;
+            min-width: 32px !important;
+            height: 32px !important;
+            padding: 0 !important;
             display: inline-flex !important;
             align-items: center !important;
             justify-content: center !important;
+            gap: 0 !important;
+            border-radius: 6px !important;
+            border: 1px solid rgba(0, 207, 200, 0.85) !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            text-decoration: none !important;
+            overflow: hidden !important;
+            font-size: 0 !important;
+            line-height: 0 !important;
         }
         .as-uploads-scope .as-upload-actions [data-testid="stButton"] button * {
             background: transparent !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:hover {
-            border-color: rgba(0, 207, 200, 0.9) !important;
-            color: #00CFC8 !important;
-            background: rgba(0, 207, 200, 0.12) !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:focus-visible {
-            outline: 2px solid rgba(0, 207, 200, 0.6) !important;
-            outline-offset: 2px !important;
+            box-shadow: none !important;
+            border: 0 !important;
         }
         .as-uploads-scope .as-upload-actions [data-testid="stButton"] button [data-testid="stButtonLabel"] {
             display: none !important;
         }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button [data-testid="stButtonIcon"] {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button :not(svg):not([data-testid="stButtonIcon"]) {
+            font-size: 0 !important;
+            line-height: 0 !important;
+        }
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button [data-testid="stButtonIcon"],
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button svg {
             font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 24;
-            font-size: 1.1rem;
+            font-size: 18px !important;
+            width: 18px !important;
+            height: 18px !important;
+            line-height: 1 !important;
+            display: block !important;
             margin: 0 !important;
-            padding: 0 !important;
+        }
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:hover {
+            background: rgba(0, 207, 200, 0.1) !important;
+        }
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:focus,
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:focus-visible {
+            outline: none !important;
+            box-shadow: 0 0 0 2px rgba(0, 207, 200, 0.25) !important;
         }
         .stRadio div[role="radiogroup"] {
             gap: 0.4rem;
