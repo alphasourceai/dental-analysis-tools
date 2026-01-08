@@ -7,7 +7,7 @@ import time
 import uuid
 import math
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 import requests
 try:
     from zoneinfo import ZoneInfo
@@ -279,6 +279,29 @@ def _safe_path_component(value: str) -> str:
         return "unknown"
     safe = value.strip().replace("/", "_").replace("\\", "_").replace(" ", "_")
     return safe
+
+def _extract_supabase_report_path(pdf_url: str, bucket: str = "consulting-uploads") -> str:
+    if not pdf_url:
+        return ""
+    if pdf_url.startswith("reports/"):
+        return pdf_url
+    if pdf_url.startswith(f"{bucket}/"):
+        return pdf_url[len(bucket) + 1:]
+    try:
+        parsed = urlparse(pdf_url)
+        path = unquote(parsed.path or "")
+    except Exception:
+        path = pdf_url
+    markers = [
+        f"/storage/v1/object/public/{bucket}/",
+        f"/storage/v1/object/sign/{bucket}/",
+        f"/storage/v1/object/{bucket}/",
+        f"/{bucket}/",
+    ]
+    for marker in markers:
+        if marker in path:
+            return path.split(marker, 1)[1]
+    return ""
 
 def _extract_opportunities(payload: dict) -> list:
     items = []
@@ -1513,10 +1536,40 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 paid_db.close()
                                     with upload_cols[4]:
                                         pdf_url = getattr(upload, "pdf_url", "") or ""
-                                        if pdf_url:
+                                        report_path = (
+                                            getattr(upload, "report_path", "")
+                                            or getattr(upload, "pdf_path", "")
+                                            or ""
+                                        )
+                                        if not report_path and pdf_url:
+                                            report_path = _extract_supabase_report_path(pdf_url)
+                                        signed_url = None
+                                        err = None
+                                        if report_path:
+                                            try:
+                                                signed_url = _create_report_signed_url(report_path)
+                                                if not signed_url:
+                                                    err = "signed_url_unavailable"
+                                            except Exception as exc:
+                                                err = exc
+                                            logging.info(
+                                                "[pdf] signed url build=%s upload_id=%s bucket=%s path=%s ok=%s err=%r",
+                                                AS_BUILD_MARKER,
+                                                str(upload.id),
+                                                "consulting-uploads",
+                                                report_path,
+                                                bool(signed_url),
+                                                err,
+                                            )
+                                        if signed_url:
                                             pdf_markup = (
-                                                f"<a href=\"{pdf_url}\" target=\"_blank\" "
+                                                f"<a href=\"{signed_url}\" target=\"_blank\" "
                                                 f"rel=\"noopener noreferrer\">PDF</a>"
+                                            )
+                                        elif report_path:
+                                            pdf_markup = (
+                                                "<span class=\"as-muted\" "
+                                                "title=\"Signed link unavailable\">PDF</span>"
                                             )
                                         else:
                                             pdf_markup = "<span class=\"as-muted\">—</span>"
