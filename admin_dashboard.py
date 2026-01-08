@@ -374,6 +374,15 @@ def _safe_pdf_multi_cell(pdf: FPDF, text: str, field_label: str, height: int = 6
         )
         raise
 
+def _pdf_output_bytes(pdf: FPDF) -> bytes:
+    out = pdf.output(dest="S")
+    logging.info("[pdf] output type build=%s type=%s", AS_BUILD_MARKER, type(out).__name__)
+    if isinstance(out, (bytes, bytearray)):
+        return bytes(out)
+    if isinstance(out, str):
+        return out.encode("latin-1", errors="replace")
+    return str(out).encode("latin-1", errors="replace")
+
 def _render_pdf_metadata_row(
     pdf: FPDF,
     label: str,
@@ -547,7 +556,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     footer = f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} • Version v{version}"
     pdf.cell(0, 8, _sanitize_pdf_text(footer), align="C")
 
-    return pdf.output(dest="S").encode("latin-1")
+    return _pdf_output_bytes(pdf)
 
 def _upload_pdf_report(pdf_bytes: bytes, object_path: str) -> tuple[str, str]:
     client = _get_supabase_admin_client()
