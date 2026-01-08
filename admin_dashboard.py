@@ -245,6 +245,16 @@ def _sanitize_pdf_text(value: object) -> str:
     if value is None:
         return ""
     text = value if isinstance(value, str) else str(value)
+    text = (
+        text.replace("\u2022", "- ")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201C", '"')
+        .replace("\u201D", '"')
+        .replace("\u00A0", " ")
+    )
     cleaned = re.sub(r"[\r\n\t]+", " ", text)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     cleaned = _wrap_long_tokens(cleaned)
@@ -667,14 +677,38 @@ def _render_admin_css() -> None:
         }
         .as-uploads-scope .as-upload-actions [data-testid="stButton"],
         .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div,
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div > div {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div > div,
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"],
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] > div {
             background: transparent !important;
             box-shadow: none !important;
         }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div,
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div > div,
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"],
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] > div,
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button > span,
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button > div {
+            height: 32px !important;
+            min-height: 32px !important;
+            width: 32px !important;
+            min-width: 32px !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            overflow: hidden !important;
+        }
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button,
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button {
+            all: unset !important;
             width: 32px !important;
             min-width: 32px !important;
             height: 32px !important;
+            min-height: 32px !important;
             padding: 0 !important;
             display: inline-flex !important;
             align-items: center !important;
@@ -686,23 +720,30 @@ def _render_admin_css() -> None:
             box-shadow: none !important;
             text-decoration: none !important;
             overflow: hidden !important;
+            cursor: pointer !important;
+            color: #EBFEFF !important;
             font-size: 0 !important;
             line-height: 0 !important;
         }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button * {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button * ,
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button * {
             background: transparent !important;
             box-shadow: none !important;
             border: 0 !important;
         }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button [data-testid="stButtonLabel"] {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button [data-testid="stButtonLabel"],
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button [data-testid="stButtonLabel"] {
             display: none !important;
         }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button :not(svg):not([data-testid="stButtonIcon"]) {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button :not(svg):not([data-testid="stButtonIcon"]),
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button :not(svg):not([data-testid="stButtonIcon"]) {
             font-size: 0 !important;
             line-height: 0 !important;
         }
         .as-uploads-scope .as-upload-actions [data-testid="stButton"] button [data-testid="stButtonIcon"],
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button svg {
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button [data-testid="stButtonIcon"],
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button svg,
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button svg {
             font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 24;
             font-size: 18px !important;
             width: 18px !important;
@@ -711,11 +752,14 @@ def _render_admin_css() -> None:
             display: block !important;
             margin: 0 !important;
         }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:hover {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:hover,
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button:hover {
             background: rgba(0, 207, 200, 0.1) !important;
         }
         .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:focus,
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:focus-visible {
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:focus-visible,
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button:focus,
+        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button:focus-visible {
             outline: none !important;
             box-shadow: 0 0 0 2px rgba(0, 207, 200, 0.25) !important;
         }
