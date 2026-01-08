@@ -33,8 +33,6 @@ from upload_portal import PortalError, create_upload_request
 
 MST_FALLBACK = timezone(timedelta(hours=-7), name="MST")
 MST_TZ = ZoneInfo("America/Denver") if ZoneInfo else MST_FALLBACK
-AS_DEBUG_UPLOAD_BUTTONS = True
-AS_BUILD_MARKER = "BUILD_MARKER_2026_01_08_A"
 
 
 class AdminPerfTracker:
@@ -251,12 +249,6 @@ def _sanitize_pdf_text(value: object, field_label: str | None = None) -> str:
             text = value.decode("utf-8", errors="replace")
         except Exception:
             text = bytes(value).decode("latin-1", errors="replace")
-        logging.info(
-            "[pdf] decoded bytes build=%s field=%s type=%s",
-            AS_BUILD_MARKER,
-            field_label or "unknown",
-            type(value).__name__,
-        )
     else:
         text = value if isinstance(value, str) else str(value)
     text = (
@@ -356,8 +348,6 @@ def _safe_pdf_multi_cell(pdf: FPDF, text: str, field_label: str, height: int = 6
     raw_value = text
     raw_text = "" if raw_value is None else (raw_value if isinstance(raw_value, str) else str(raw_value))
     safe_text = _sanitize_pdf_text(raw_value, field_label=field_label)
-    if safe_text != raw_text:
-        logging.info("[pdf] normalized text build=%s field=%s", AS_BUILD_MARKER, field_label)
     safe_width = 0.0
     try:
         safe_width = float(width or 0)
@@ -399,7 +389,6 @@ def _safe_pdf_multi_cell(pdf: FPDF, text: str, field_label: str, height: int = 6
 
 def _pdf_output_bytes(pdf: FPDF) -> bytes:
     out = pdf.output(dest="S")
-    logging.info("[pdf] output type build=%s type=%s", AS_BUILD_MARKER, type(out).__name__)
     if isinstance(out, (bytes, bytearray)):
         return bytes(out)
     if isinstance(out, str):
@@ -615,15 +604,14 @@ def _create_report_signed_url(path: str, expires_in: int = 3600) -> str | None:
         return None
     client = _get_supabase_admin_client()
     if not client:
-        logging.warning("[pdf] signed url missing client build=%s path=%s", AS_BUILD_MARKER, path)
+        logging.warning("[pdf] signed url missing client path=%s", path)
         return None
     bucket = "consulting-uploads"
     try:
         response = client.storage.from_(bucket).create_signed_url(path, expires_in)
     except Exception as exc:
         logging.warning(
-            "[pdf] signed url failed build=%s path=%s err=%s",
-            AS_BUILD_MARKER,
+            "[pdf] signed url failed path=%s err=%s",
             path,
             str(exc),
         )
@@ -634,9 +622,8 @@ def _create_report_signed_url(path: str, expires_in: int = 3600) -> str | None:
     elif isinstance(response, str):
         signed_url = response
     if signed_url:
-        logging.info("[pdf] signed url ok build=%s path=%s", AS_BUILD_MARKER, path)
         return signed_url
-    logging.warning("[pdf] signed url empty build=%s path=%s", AS_BUILD_MARKER, path)
+    logging.warning("[pdf] signed url empty path=%s", path)
     return None
 
 
@@ -696,17 +683,6 @@ def _ensure_admin_state() -> None:
 
 
 def _render_admin_css() -> None:
-    debug_css = ""
-    if AS_DEBUG_UPLOAD_BUTTONS:
-        debug_css = """
-        .as-uploads-scope .as-upload-actions button {
-            outline: 2px solid rgba(255, 0, 0, 0.65) !important;
-        }
-        .as-uploads-scope button {
-            outline: 2px dashed rgba(255, 165, 0, 0.55) !important;
-        }
-        """
-    logging.info("[ui] admin css injected build=%s debug=%s", AS_BUILD_MARKER, AS_DEBUG_UPLOAD_BUTTONS)
     css = """
         <style>
         details > summary {
@@ -763,138 +739,6 @@ def _render_admin_css() -> None:
             display: block;
             max-width: 100%;
             line-height: 1.2;
-        }
-        .as-build-marker {
-            position: fixed;
-            bottom: 8px;
-            right: 8px;
-            opacity: 0.35;
-            font-size: 10px;
-            z-index: 99999;
-            color: #EBFEFF;
-            pointer-events: none;
-        }
-        .as-uploads-scope .as-upload-actions button {
-            all: unset !important;
-            width: 32px !important;
-            height: 32px !important;
-            min-width: 32px !important;
-            min-height: 32px !important;
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            padding: 0 !important;
-            margin: 0 !important;
-            border-radius: 6px !important;
-            border: 1px solid rgba(0, 207, 200, 0.85) !important;
-            background: transparent !important;
-            box-shadow: none !important;
-            cursor: pointer !important;
-            overflow: hidden !important;
-            font-size: 0 !important;
-            line-height: 0 !important;
-            color: #EBFEFF !important;
-        }
-        .as-uploads-scope .as-upload-actions button * {
-            background: transparent !important;
-            box-shadow: none !important;
-            border: 0 !important;
-        }
-        .as-uploads-scope .as-upload-actions button [data-testid="stButtonLabel"] {
-            display: none !important;
-        }
-        .as-uploads-scope .as-upload-actions button svg {
-            width: 18px !important;
-            height: 18px !important;
-            display: block !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"],
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div,
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div > div,
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"],
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] > div {
-            background: transparent !important;
-            box-shadow: none !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div,
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div > div,
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"],
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] > div,
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button > span,
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button > div {
-            height: 32px !important;
-            min-height: 32px !important;
-            width: 32px !important;
-            min-width: 32px !important;
-            padding: 0 !important;
-            margin: 0 !important;
-            background: transparent !important;
-            box-shadow: none !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            overflow: hidden !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button,
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button {
-            all: unset !important;
-            width: 32px !important;
-            min-width: 32px !important;
-            height: 32px !important;
-            min-height: 32px !important;
-            padding: 0 !important;
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            gap: 0 !important;
-            border-radius: 6px !important;
-            border: 1px solid rgba(0, 207, 200, 0.85) !important;
-            background: transparent !important;
-            box-shadow: none !important;
-            text-decoration: none !important;
-            overflow: hidden !important;
-            cursor: pointer !important;
-            color: #EBFEFF !important;
-            font-size: 0 !important;
-            line-height: 0 !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button * ,
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button * {
-            background: transparent !important;
-            box-shadow: none !important;
-            border: 0 !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button [data-testid="stButtonLabel"],
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button [data-testid="stButtonLabel"] {
-            display: none !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button :not(svg):not([data-testid="stButtonIcon"]),
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button :not(svg):not([data-testid="stButtonIcon"]) {
-            font-size: 0 !important;
-            line-height: 0 !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button [data-testid="stButtonIcon"],
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button [data-testid="stButtonIcon"],
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button svg,
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button svg {
-            font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 24;
-            font-size: 18px !important;
-            width: 18px !important;
-            height: 18px !important;
-            line-height: 1 !important;
-            display: block !important;
-            margin: 0 !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:hover,
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button:hover {
-            background: rgba(0, 207, 200, 0.1) !important;
-        }
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:focus,
-        .as-uploads-scope .as-upload-actions [data-testid="stButton"] button:focus-visible,
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button:focus,
-        .as-uploads-scope .as-upload-actions [data-testid="stTooltipHoverTarget"] button:focus-visible {
-            outline: none !important;
-            box-shadow: 0 0 0 2px rgba(0, 207, 200, 0.25) !important;
         }
         .stRadio div[role="radiogroup"] {
             gap: 0.4rem;
@@ -987,8 +831,6 @@ def _render_admin_css() -> None:
         }
         </style>
         """
-    if debug_css:
-        css = css.replace("</style>", f"{debug_css}\n        </style>")
     st.markdown(css, unsafe_allow_html=True)
 
 
@@ -1075,11 +917,6 @@ def display_admin_dashboard():
 
     _ensure_admin_state()
     _render_admin_css()
-    st.caption(f"admin:{AS_BUILD_MARKER} [TEMP]")
-    st.markdown(
-        f'<div class="as-build-marker">admin:{AS_BUILD_MARKER} [TEMP]</div>',
-        unsafe_allow_html=True,
-    )
 
     is_authenticated = bool(st.session_state.get("is_admin_logged_in"))
     perf.log("auth_checked")
@@ -1471,10 +1308,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                             if not uploads_for_submission:
                                 st.write("No uploads linked to this submission.")
                             else:
-                                st.caption(
-                                    f"wrappers: uploads_scope=on actions_scope=on build={AS_BUILD_MARKER} [TEMP]"
-                                )
-                                upload_header_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.8, 0.8, 1.0])
+                                upload_header_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.6, 0.6, 0.6])
                                 with upload_header_cols[0]:
                                     st.markdown('<div class="as-upload-header">File Name</div>', unsafe_allow_html=True)
                                 with upload_header_cols[1]:
@@ -1500,12 +1334,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     analysis_state_key = f"show_analysis_{key_suffix}"
                                     analysis_payload = _parse_analysis_json(upload.analysis_data)
                                     has_analysis = bool(analysis_payload)
-                                    logging.info(
-                                        "[ui] rendered upload action buttons build=%s upload_id=%s",
-                                        AS_BUILD_MARKER,
-                                        str(upload.id),
-                                    )
-                                    upload_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.8, 0.8, 1.0])
+                                    upload_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.6, 0.6, 0.6])
                                     with upload_cols[0]:
                                         st.write(upload.file_name or "-")
                                     with upload_cols[1]:
@@ -1552,15 +1381,14 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                     err = "signed_url_unavailable"
                                             except Exception as exc:
                                                 err = exc
-                                            logging.info(
-                                                "[pdf] signed url build=%s upload_id=%s bucket=%s path=%s ok=%s err=%r",
-                                                AS_BUILD_MARKER,
-                                                str(upload.id),
-                                                "consulting-uploads",
-                                                report_path,
-                                                bool(signed_url),
-                                                err,
-                                            )
+                                            if err:
+                                                logging.warning(
+                                                    "[pdf] signed url failed upload_id=%s bucket=%s path=%s err=%r",
+                                                    str(upload.id),
+                                                    "consulting-uploads",
+                                                    report_path,
+                                                    err,
+                                                )
                                         if signed_url:
                                             pdf_markup = (
                                                 f"<a href=\"{signed_url}\" target=\"_blank\" "
@@ -1577,43 +1405,35 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     with upload_cols[5]:
                                         st.write(getattr(upload, "pdf_version", 0) or 0)
                                     with upload_cols[6]:
-                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
                                         if has_analysis:
                                             if st.button(
-                                                "Summary",
+                                                "🧾",
                                                 key=f"open_summary_{key_suffix}",
                                                 type="secondary",
-                                                icon=":material/description:",
                                                 help="Summary",
                                             ):
                                                 st.session_state[summary_state_key] = True
                                                 st.rerun()
                                         else:
                                             st.write("-")
-                                        st.markdown("</div>", unsafe_allow_html=True)
                                     with upload_cols[7]:
-                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
                                         if has_analysis:
                                             if st.button(
-                                                "Analysis",
+                                                "🧠",
                                                 key=f"open_analysis_{key_suffix}",
                                                 type="secondary",
-                                                icon=":material/analytics:",
                                                 help="Analysis",
                                             ):
                                                 st.session_state[analysis_state_key] = True
                                                 st.rerun()
                                         else:
                                             st.write("-")
-                                        st.markdown("</div>", unsafe_allow_html=True)
                                     with upload_cols[8]:
-                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
                                         if has_analysis:
                                             if st.button(
-                                                "Generate PDF",
+                                                "📄",
                                                 key=f"pdf_generate_{key_suffix}",
                                                 type="secondary",
-                                                icon=":material/picture_as_pdf:",
                                                 help="Generate PDF",
                                             ):
                                                 st.session_state.admin_pdf_upload_id = str(upload.id)
@@ -1624,7 +1444,6 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 st.rerun()
                                         else:
                                             st.write("-")
-                                        st.markdown("</div>", unsafe_allow_html=True)
 
                                     if st.session_state.get(summary_state_key, False):
                                         st.markdown("---")
@@ -2639,8 +2458,7 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 pdf_bytes = _generate_pdf_bytes(metadata, sections, notes, next_version)
             except Exception as exc:
                 logging.error(
-                    "[pdf] failed build=%s upload_id=%s err=%r",
-                    AS_BUILD_MARKER,
+                    "[pdf] failed upload_id=%s err=%r",
                     selected_upload.id,
                     exc,
                 )
