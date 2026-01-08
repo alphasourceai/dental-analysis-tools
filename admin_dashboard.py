@@ -745,6 +745,26 @@ def _render_admin_css() -> None:
             max-width: 100%;
             line-height: 1.2;
         }
+        .as-uploads-scope .as-upload-legend {
+            color: #A9B2C9;
+            font-size: 0.75rem;
+            letter-spacing: 0.02em;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: nowrap;
+            white-space: nowrap;
+            margin: 0 0 0.4rem 0;
+        }
+        .as-uploads-scope .as-upload-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+        }
+        .as-uploads-scope .as-upload-legend .material-symbols-outlined {
+            font-size: 1rem;
+            line-height: 1;
+        }
         .as-uploads-scope [class*="st-key-as_upload_actions_"],
         .as-uploads-scope [class*="st-key-as_upload_actions_"] > div,
         .as-uploads-scope [class*="st-key-as_upload_actions_"] > div > div {
@@ -1374,6 +1394,22 @@ def display_client_submissions(perf: AdminPerfTracker):
                             if not uploads_for_submission:
                                 st.write("No uploads linked to this submission.")
                             else:
+                                st.markdown(
+                                    """
+                                    <div class="as-upload-legend">
+                                        <span class="as-upload-legend-item">
+                                            <span class="material-symbols-outlined">receipt_long</span>Summary
+                                        </span>
+                                        <span class="as-upload-legend-item">
+                                            <span class="material-symbols-outlined">psychology</span>Analysis
+                                        </span>
+                                        <span class="as-upload-legend-item">
+                                            <span class="material-symbols-outlined">picture_as_pdf</span>Generate PDF
+                                        </span>
+                                    </div>
+                                    """,
+                                    unsafe_allow_html=True,
+                                )
                                 upload_header_cols = st.columns([2.4, 1.6, 1.6, 0.8, 0.9, 0.8, 0.6, 0.6, 0.6])
                                 with upload_header_cols[0]:
                                     st.markdown('<div class="as-upload-header">File Name</div>', unsafe_allow_html=True)
@@ -1388,11 +1424,11 @@ def display_client_submissions(perf: AdminPerfTracker):
                                 with upload_header_cols[5]:
                                     st.markdown('<div class="as-upload-header">Version</div>', unsafe_allow_html=True)
                                 with upload_header_cols[6]:
-                                    st.markdown('<div class="as-upload-header">Summary</div>', unsafe_allow_html=True)
+                                    st.markdown("&nbsp;", unsafe_allow_html=True)
                                 with upload_header_cols[7]:
-                                    st.markdown('<div class="as-upload-header">Analysis</div>', unsafe_allow_html=True)
+                                    st.markdown("&nbsp;", unsafe_allow_html=True)
                                 with upload_header_cols[8]:
-                                    st.markdown('<div class="as-upload-header">Generate</div>', unsafe_allow_html=True)
+                                    st.markdown("&nbsp;", unsafe_allow_html=True)
 
                                 for row_idx, upload in enumerate(uploads_for_submission):
                                     key_suffix = f"{submission.id}_{upload.id}_{submission_index}_{row_idx}"
