@@ -587,6 +587,35 @@ def _upload_pdf_report(pdf_bytes: bytes, object_path: str) -> tuple[str, str]:
 
     return public_url, ""
 
+def _create_report_signed_url(path: str, expires_in: int = 3600) -> str | None:
+    if not path:
+        return None
+    client = _get_supabase_admin_client()
+    if not client:
+        logging.warning("[pdf] signed url missing client build=%s path=%s", AS_BUILD_MARKER, path)
+        return None
+    bucket = "consulting-uploads"
+    try:
+        response = client.storage.from_(bucket).create_signed_url(path, expires_in)
+    except Exception as exc:
+        logging.warning(
+            "[pdf] signed url failed build=%s path=%s err=%s",
+            AS_BUILD_MARKER,
+            path,
+            str(exc),
+        )
+        return None
+    signed_url = ""
+    if isinstance(response, dict):
+        signed_url = response.get("signedURL") or response.get("signedUrl") or ""
+    elif isinstance(response, str):
+        signed_url = response
+    if signed_url:
+        logging.info("[pdf] signed url ok build=%s path=%s", AS_BUILD_MARKER, path)
+        return signed_url
+    logging.warning("[pdf] signed url empty build=%s path=%s", AS_BUILD_MARKER, path)
+    return None
+
 
 def _render_email_html(raw_email: str, height: int = 24) -> None:
     if not raw_email:
@@ -2570,6 +2599,7 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 logging.error("PDF upload failed for upload %s: %s", selected_upload.id, err)
                 st.error("Unable to save PDF to storage.")
                 return
+            signed_url = _create_report_signed_url(object_path)
 
             update_db = SessionLocal()
             try:
@@ -2583,6 +2613,11 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 )
                 update_db.commit()
                 logging.info("[pdf] generated upload_id=%s version=%s", selected_upload.id, next_version)
+                st.session_state["admin_last_report_path"] = object_path
+                st.session_state["admin_last_report_signed_url"] = signed_url
+                st.session_state["admin_last_report_bytes"] = pdf_bytes
+                st.session_state["admin_last_report_file_name"] = file_name
+                st.session_state["admin_last_report_upload_id"] = str(selected_upload.id)
                 st.success("PDF generated and saved successfully.")
                 st.rerun()
             except Exception as exc:
@@ -2591,6 +2626,30 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 st.error("PDF saved but metadata update failed.")
             finally:
                 update_db.close()
+
+        last_report_bytes = st.session_state.get("admin_last_report_bytes")
+        last_report_file_name = st.session_state.get("admin_last_report_file_name")
+        last_report_signed_url = st.session_state.get("admin_last_report_signed_url")
+        last_report_upload_id = st.session_state.get("admin_last_report_upload_id")
+        if last_report_bytes and last_report_file_name:
+            st.markdown("**Latest Generated Report**")
+            st.download_button(
+                label="Download PDF",
+                data=last_report_bytes,
+                file_name=last_report_file_name,
+                mime="application/pdf",
+                key=f"admin_download_pdf_{last_report_upload_id or 'latest'}",
+            )
+            if last_report_signed_url:
+                st.markdown(
+                    f'<a href="{last_report_signed_url}" target="_blank" rel="noopener noreferrer">'
+                    "Open PDF in new tab</a>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.warning(
+                    "PDF generated and stored, but an open-link could not be created. Use Download PDF."
+                )
     finally:
         db.close()
 
