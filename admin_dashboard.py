@@ -243,10 +243,22 @@ def _wrap_long_tokens(text: str, max_token_length: int = 28) -> str:
         wrapped.append(" ".join(chunks))
     return "".join(wrapped)
 
-def _sanitize_pdf_text(value: object) -> str:
+def _sanitize_pdf_text(value: object, field_label: str | None = None) -> str:
     if value is None:
         return ""
-    text = value if isinstance(value, str) else str(value)
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            text = value.decode("utf-8", errors="replace")
+        except Exception:
+            text = bytes(value).decode("latin-1", errors="replace")
+        logging.info(
+            "[pdf] decoded bytes build=%s field=%s type=%s",
+            AS_BUILD_MARKER,
+            field_label or "unknown",
+            type(value).__name__,
+        )
+    else:
+        text = value if isinstance(value, str) else str(value)
     text = (
         text.replace("\u2022", "- ")
         .replace("\u2013", "-")
@@ -318,8 +330,9 @@ def _extract_key_trends(payload: dict) -> list:
         return []
 
 def _safe_pdf_multi_cell(pdf: FPDF, text: str, field_label: str, height: int = 6, width: float = 0) -> None:
-    raw_text = "" if text is None else str(text)
-    safe_text = _sanitize_pdf_text(raw_text)
+    raw_value = text
+    raw_text = "" if raw_value is None else (raw_value if isinstance(raw_value, str) else str(raw_value))
+    safe_text = _sanitize_pdf_text(raw_value, field_label=field_label)
     if safe_text != raw_text:
         logging.info("[pdf] normalized text build=%s field=%s", AS_BUILD_MARKER, field_label)
     safe_width = 0.0
@@ -371,7 +384,7 @@ def _render_pdf_metadata_row(
     min_value_width: float = 30,
 ) -> None:
     safe_label = _sanitize_pdf_text(label)
-    safe_value = _sanitize_pdf_text(value or "-")
+    safe_value = _sanitize_pdf_text(value or "-", field_label=field_label)
     full_width = pdf.w - pdf.l_margin - pdf.r_margin
     if not math.isfinite(full_width) or full_width <= 0:
         full_width = label_width + min_value_width
