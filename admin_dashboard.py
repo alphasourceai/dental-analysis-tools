@@ -740,6 +740,38 @@ def _render_admin_css() -> None:
             max-width: 100%;
             line-height: 1.2;
         }
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"],
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div,
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div > div,
+        .as-uploads-scope .as-upload-actions button {
+            background: transparent !important;
+            box-shadow: none !important;
+            border: 0 !important;
+            outline: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            min-width: 32px !important;
+            width: 32px !important;
+            min-height: 32px !important;
+            height: 32px !important;
+            border-radius: 6px !important;
+            overflow: hidden !important;
+        }
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"],
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div,
+        .as-uploads-scope .as-upload-actions [data-testid="stButton"] > div > div {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+        .as-uploads-scope .as-upload-actions button {
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            cursor: pointer !important;
+            font-size: 18px !important;
+            line-height: 1 !important;
+        }
         .stRadio div[role="radiogroup"] {
             gap: 0.4rem;
         }
@@ -1405,36 +1437,38 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     with upload_cols[5]:
                                         st.write(getattr(upload, "pdf_version", 0) or 0)
                                     with upload_cols[6]:
+                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
                                         if has_analysis:
                                             if st.button(
                                                 "🧾",
                                                 key=f"open_summary_{key_suffix}",
                                                 type="secondary",
-                                                help="Summary",
                                             ):
                                                 st.session_state[summary_state_key] = True
                                                 st.rerun()
                                         else:
                                             st.write("-")
+                                        st.markdown("</div>", unsafe_allow_html=True)
                                     with upload_cols[7]:
+                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
                                         if has_analysis:
                                             if st.button(
                                                 "🧠",
                                                 key=f"open_analysis_{key_suffix}",
                                                 type="secondary",
-                                                help="Analysis",
                                             ):
                                                 st.session_state[analysis_state_key] = True
                                                 st.rerun()
                                         else:
                                             st.write("-")
+                                        st.markdown("</div>", unsafe_allow_html=True)
                                     with upload_cols[8]:
+                                        st.markdown('<div class="as-upload-actions">', unsafe_allow_html=True)
                                         if has_analysis:
                                             if st.button(
                                                 "📄",
                                                 key=f"pdf_generate_{key_suffix}",
                                                 type="secondary",
-                                                help="Generate PDF",
                                             ):
                                                 st.session_state.admin_pdf_upload_id = str(upload.id)
                                                 st.session_state.admin_pdf_client_email = submission.user_email or client_email
@@ -1444,6 +1478,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 st.rerun()
                                         else:
                                             st.write("-")
+                                        st.markdown("</div>", unsafe_allow_html=True)
 
                                     if st.session_state.get(summary_state_key, False):
                                         st.markdown("---")
