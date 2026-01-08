@@ -770,6 +770,20 @@ def _render_admin_css() -> None:
             white-space: nowrap;
             margin-top: 0.2rem;
         }
+        .as-uploads-scope .as-upload-legend-box {
+            padding: 0.5rem 0.6rem;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 8px;
+            margin-bottom: 0.5rem;
+        }
+        .as-uploads-scope .as-upload-legend-title {
+            font-size: 0.68rem;
+            letter-spacing: 0.08em;
+            color: #A9B2C9;
+            text-transform: uppercase;
+            margin-bottom: 0.25rem;
+        }
         .as-uploads-scope [class*="st-key-as_upload_actions_"],
         .as-uploads-scope [class*="st-key-as_upload_actions_"] > div,
         .as-uploads-scope [class*="st-key-as_upload_actions_"] > div > div {
@@ -1405,6 +1419,11 @@ def display_client_submissions(perf: AdminPerfTracker):
                             if not uploads_for_submission:
                                 st.write("No uploads linked to this submission.")
                             else:
+                                st.markdown('<div class="as-upload-legend-box">', unsafe_allow_html=True)
+                                st.markdown(
+                                    '<div class="as-upload-legend-title">Actions</div>',
+                                    unsafe_allow_html=True,
+                                )
                                 legend_container = st.container(key=f"as_upload_legend_{submission.id}")
                                 with legend_container:
                                     legend_cols = st.columns([0.25, 0.9, 0.25, 0.9, 0.25, 1.2])
@@ -1447,6 +1466,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                                             '<div class="as-upload-legend-label">Generate PDF</div>',
                                             unsafe_allow_html=True,
                                         )
+                                st.markdown("</div>", unsafe_allow_html=True)
                                 upload_header_cols = st.columns([2.6, 1.6, 1.6, 0.8, 0.9, 0.6, 0.6, 0.6])
                                 with upload_header_cols[0]:
                                     st.markdown('<div class="as-upload-header">File Name</div>', unsafe_allow_html=True)
@@ -2318,9 +2338,7 @@ def display_document_analysis(perf: AdminPerfTracker):
 
 def display_pdf_generator(perf: AdminPerfTracker):
     st.markdown("<h3 style='margin-top: 1.5rem;'>PDF Generator</h3>", unsafe_allow_html=True)
-    notice = st.session_state.pop("admin_pdf_notice", None)
-    if notice:
-        st.info(notice)
+    st.session_state.pop("admin_pdf_notice", None)
 
     if "admin_pdf_upload_id" not in st.session_state:
         st.session_state.admin_pdf_upload_id = ""
