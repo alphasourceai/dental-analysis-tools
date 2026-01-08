@@ -213,10 +213,14 @@ def is_admin_user(user_id):
         logging.error("[auth] admin_users rest check failed user_id=%s err=%s", user_id, str(exc))
         return False
     if response.status_code != 200:
+        body = (response.text or "").replace("\n", " ")
+        truncated = body[:500]
         logging.error(
-            "[auth] admin_users rest check bad status user_id=%s status=%s",
+            "[auth] admin_users rest check bad status user_id=%s status=%s params=%s body=%s",
             user_id,
             response.status_code,
+            params,
+            truncated,
         )
         return False
     try:
