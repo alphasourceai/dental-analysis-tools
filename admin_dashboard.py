@@ -1037,6 +1037,10 @@ def display_admin_dashboard():
     ]
     if "admin_active_tab" not in st.session_state:
         st.session_state.admin_active_tab = tab_labels[0]
+    pending_tab = st.session_state.pop("admin_pending_tab", None)
+    if pending_tab in tab_labels:
+        st.session_state.admin_active_tab = pending_tab
+        st.session_state.admin_tab_selector = pending_tab
     active_index = tab_labels.index(st.session_state.admin_active_tab) if st.session_state.admin_active_tab in tab_labels else 0
     selected_tab = st.radio(
         "Admin Navigation",
@@ -1511,8 +1515,8 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 st.session_state.admin_pdf_upload_id = str(upload.id)
                                                 st.session_state.admin_pdf_client_email = submission.user_email or client_email
                                                 st.session_state.admin_pdf_notice = "PDF Generator opened with the selected upload."
-                                                st.session_state.admin_active_tab = "PDF Generator"
-                                                st.session_state.admin_tab_selector = "PDF Generator"
+                                                st.session_state.admin_pending_tab = "PDF Generator"
+                                                st.session_state.admin_pdf_preselect_id = str(upload.id)
                                                 st.rerun()
                                         else:
                                             st.write("-")
@@ -2254,12 +2258,14 @@ def display_pdf_generator(perf: AdminPerfTracker):
     db = SessionLocal()
     try:
         preselected_upload_id = st.session_state.get("admin_pdf_upload_id")
+        pending_preselect_id = st.session_state.get("admin_pdf_preselect_id") or ""
+        lookup_upload_id = pending_preselect_id or preselected_upload_id
         preselected_email = st.session_state.get("admin_pdf_client_email")
         preselected_upload = None
         upload_id_uuid = None
-        if preselected_upload_id:
+        if lookup_upload_id:
             try:
-                upload_id_uuid = uuid.UUID(preselected_upload_id)
+                upload_id_uuid = uuid.UUID(lookup_upload_id)
             except (ValueError, TypeError):
                 upload_id_uuid = None
         if upload_id_uuid is not None:
@@ -2275,13 +2281,9 @@ def display_pdf_generator(perf: AdminPerfTracker):
             st.info("No client submissions available for PDF generation.")
             return
 
-        preselect_id = st.session_state.get("admin_pdf_preselect_id")
-        apply_preselect = bool(preselected_upload_id) and preselected_upload_id != preselect_id
         client_index = 0
         if preselected_email and preselected_email in client_emails:
             client_index = client_emails.index(preselected_email)
-            if apply_preselect:
-                st.session_state.pdf_generator_client = preselected_email
         selected_email = st.selectbox(
             "Client",
             client_emails,
@@ -2301,26 +2303,27 @@ def display_pdf_generator(perf: AdminPerfTracker):
             upload_time = _format_admin_dt(row.upload_time) or "-"
             return f"{row.tool_name} — {row.file_name} ({upload_time})"
 
+        upload_option_ids = [str(row.id) for row in upload_rows]
+        id_to_row = {str(row.id): row for row in upload_rows}
         upload_index = 0
-        if preselected_upload:
-            for idx, row in enumerate(upload_rows):
-                if row.id == preselected_upload.id:
-                    upload_index = idx
-                    break
-        if apply_preselect and preselected_upload_id:
-            for row in upload_rows:
-                if str(row.id) == preselected_upload_id:
-                    st.session_state.pdf_generator_upload = row
-                    break
-            st.session_state.admin_pdf_preselect_id = preselected_upload_id
+        if pending_preselect_id and pending_preselect_id in upload_option_ids:
+            upload_index = upload_option_ids.index(pending_preselect_id)
+        elif preselected_upload and str(preselected_upload.id) in upload_option_ids:
+            upload_index = upload_option_ids.index(str(preselected_upload.id))
 
-        selected_upload = st.selectbox(
+        selected_upload_id = st.selectbox(
             "Upload",
-            upload_rows,
-            format_func=_upload_label,
+            upload_option_ids,
+            format_func=lambda oid: _upload_label(id_to_row.get(oid)) if id_to_row.get(oid) else "Unknown upload",
             index=upload_index,
-            key="pdf_generator_upload",
+            key="pdf_generator_upload_id",
         )
+        selected_upload = id_to_row.get(selected_upload_id)
+        if pending_preselect_id:
+            st.session_state.admin_pdf_preselect_id = ""
+        if not selected_upload:
+            st.warning("Selected upload is no longer available.")
+            return
 
         submission = None
         if selected_upload.submission_id:
