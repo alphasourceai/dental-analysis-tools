@@ -770,19 +770,20 @@ def _render_admin_css() -> None:
             white-space: nowrap;
             margin-top: 0.2rem;
         }
-        .as-uploads-scope .as-upload-legend-box {
-            padding: 0.5rem 0.6rem;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            background: rgba(255, 255, 255, 0.03);
-            border-radius: 8px;
-            margin-bottom: 0.5rem;
+        .as-uploads-scope [class*="st-key-as_upload_legend_box_"],
+        .as-uploads-scope [class*="st-key-as_upload_legend_box_"] > div {
+            padding: 0.55rem 0.65rem !important;
+            border: 1px solid rgba(0, 207, 200, 0.22) !important;
+            background: rgba(255, 255, 255, 0.03) !important;
+            border-radius: 10px !important;
+            margin-bottom: 0.6rem !important;
         }
         .as-uploads-scope .as-upload-legend-title {
             font-size: 0.68rem;
-            letter-spacing: 0.08em;
-            color: #A9B2C9;
+            letter-spacing: 0.10em;
+            color: rgba(235, 254, 255, 0.75);
             text-transform: uppercase;
-            margin-bottom: 0.25rem;
+            margin: 0 0 0.35rem 0;
         }
         .as-uploads-scope [class*="st-key-as_upload_actions_"],
         .as-uploads-scope [class*="st-key-as_upload_actions_"] > div,
@@ -1419,54 +1420,54 @@ def display_client_submissions(perf: AdminPerfTracker):
                             if not uploads_for_submission:
                                 st.write("No uploads linked to this submission.")
                             else:
-                                st.markdown('<div class="as-upload-legend-box">', unsafe_allow_html=True)
-                                st.markdown(
-                                    '<div class="as-upload-legend-title">Actions</div>',
-                                    unsafe_allow_html=True,
-                                )
-                                legend_container = st.container(key=f"as_upload_legend_{submission.id}")
-                                with legend_container:
-                                    legend_cols = st.columns([0.25, 0.9, 0.25, 0.9, 0.25, 1.2])
-                                    with legend_cols[0]:
-                                        st.button(
-                                            "",
-                                            icon=":material/receipt_long:",
-                                            disabled=True,
-                                            key=f"legend_summary_{submission.id}",
-                                            **action_button_kwargs,
-                                        )
-                                    with legend_cols[1]:
-                                        st.markdown(
-                                            '<div class="as-upload-legend-label">Summary</div>',
-                                            unsafe_allow_html=True,
-                                        )
-                                    with legend_cols[2]:
-                                        st.button(
-                                            "",
-                                            icon=":material/psychology:",
-                                            disabled=True,
-                                            key=f"legend_analysis_{submission.id}",
-                                            **action_button_kwargs,
-                                        )
-                                    with legend_cols[3]:
-                                        st.markdown(
-                                            '<div class="as-upload-legend-label">Analysis</div>',
-                                            unsafe_allow_html=True,
-                                        )
-                                    with legend_cols[4]:
-                                        st.button(
-                                            "",
-                                            icon=":material/picture_as_pdf:",
-                                            disabled=True,
-                                            key=f"legend_generate_{submission.id}",
-                                            **action_button_kwargs,
-                                        )
-                                    with legend_cols[5]:
-                                        st.markdown(
-                                            '<div class="as-upload-legend-label">Generate PDF</div>',
-                                            unsafe_allow_html=True,
-                                        )
-                                st.markdown("</div>", unsafe_allow_html=True)
+                                legend_box = st.container(key=f"as_upload_legend_box_{submission.id}")
+                                with legend_box:
+                                    st.markdown(
+                                        '<div class="as-upload-legend-title">Actions</div>',
+                                        unsafe_allow_html=True,
+                                    )
+                                    legend_container = st.container(key=f"as_upload_legend_{submission.id}")
+                                    with legend_container:
+                                        legend_cols = st.columns([0.25, 0.9, 0.25, 0.9, 0.25, 1.2])
+                                        with legend_cols[0]:
+                                            st.button(
+                                                "",
+                                                icon=":material/receipt_long:",
+                                                disabled=True,
+                                                key=f"legend_summary_{submission.id}",
+                                                **action_button_kwargs,
+                                            )
+                                        with legend_cols[1]:
+                                            st.markdown(
+                                                '<div class="as-upload-legend-label">Summary</div>',
+                                                unsafe_allow_html=True,
+                                            )
+                                        with legend_cols[2]:
+                                            st.button(
+                                                "",
+                                                icon=":material/psychology:",
+                                                disabled=True,
+                                                key=f"legend_analysis_{submission.id}",
+                                                **action_button_kwargs,
+                                            )
+                                        with legend_cols[3]:
+                                            st.markdown(
+                                                '<div class="as-upload-legend-label">Analysis</div>',
+                                                unsafe_allow_html=True,
+                                            )
+                                        with legend_cols[4]:
+                                            st.button(
+                                                "",
+                                                icon=":material/picture_as_pdf:",
+                                                disabled=True,
+                                                key=f"legend_generate_{submission.id}",
+                                                **action_button_kwargs,
+                                            )
+                                        with legend_cols[5]:
+                                            st.markdown(
+                                                '<div class="as-upload-legend-label">Generate PDF</div>',
+                                                unsafe_allow_html=True,
+                                            )
                                 upload_header_cols = st.columns([2.6, 1.6, 1.6, 0.8, 0.9, 0.6, 0.6, 0.6])
                                 with upload_header_cols[0]:
                                     st.markdown('<div class="as-upload-header">File Name</div>', unsafe_allow_html=True)
