@@ -525,7 +525,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     def section_title(title: str) -> None:
         ensure_space(10)
         pdf.set_text_color(*primary)
-        pdf.set_font(font_family, "", 16)
+        pdf.set_font(font_family, "", 12)
         pdf.cell(0, 8, _sanitize_pdf_text(title), ln=1)
         pdf.ln(1)
 
@@ -558,8 +558,8 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         line_height: float,
         label_color: tuple[int, int, int],
         value_color: tuple[int, int, int],
-        label_size: int = 12,
-        value_size: int = 12,
+        label_size: int = 9,
+        value_size: int = 9,
         start_x: float | None = None,
     ) -> None:
         _render_pdf_metadata_row(
@@ -582,7 +582,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         if not safe_text:
             return
         pdf.set_text_color(*secondary)
-        pdf.set_font(font_family, "", 14)
+        pdf.set_font(font_family, "", 10)
         _safe_pdf_multi_cell(
             pdf,
             f"- {safe_text}",
@@ -620,7 +620,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
 
     pdf.set_text_color(*primary)
     pdf.set_font(font_family, "", 22)
-    pdf.cell(0, 12, _sanitize_pdf_text("Your Financial Analysis Results"), ln=1)
+    pdf.cell(0, 12, _sanitize_pdf_text("Your Detailed Analysis Report"), ln=1)
     pdf.ln(1)
 
     section_title("Client & Upload Details")
@@ -638,7 +638,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     detail_value_width = content_width - (detail_padding_x * 2) - detail_label_width
     detail_height = detail_padding_y * 2
     for _, value in details:
-        detail_height += estimate_text_height(value, detail_value_width, detail_line_height, 12)
+        detail_height += estimate_text_height(value, detail_value_width, detail_line_height, 9)
     if len(details) > 1:
         detail_height += detail_gap * (len(details) - 1)
     ensure_space(detail_height + 2)
@@ -656,8 +656,8 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             line_height=detail_line_height,
             label_color=subtle,
             value_color=secondary,
-            label_size=12,
-            value_size=12,
+            label_size=9,
+            value_size=9,
             start_x=pdf.l_margin + detail_padding_x,
         )
         if row_idx < len(details):
@@ -685,7 +685,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     if notes:
         section_title("Additional Notes")
         pdf.set_text_color(*secondary)
-        pdf.set_font(font_family, "", 14)
+        pdf.set_font(font_family, "", 10)
         _safe_pdf_multi_cell(
             pdf,
             notes,
@@ -695,33 +695,20 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         )
         pdf.ln(1)
 
-    ensure_space(10)
-    pdf.set_font(font_family, "", 12)
-    help_prefix = "Need help or have questions? Email: "
-    help_email = "info@alphasourceai.com"
+    pdf.set_y(-18)
     pdf.set_text_color(*subtle)
-    prefix_width = pdf.get_string_width(_sanitize_pdf_text(help_prefix))
-    email_width = pdf.get_string_width(_sanitize_pdf_text(help_email))
-    if prefix_width + email_width <= content_width:
-        pdf.cell(prefix_width, 6, _sanitize_pdf_text(help_prefix), ln=0)
-        pdf.set_text_color(*secondary)
-        pdf.cell(0, 6, _sanitize_pdf_text(help_email), ln=1)
-    else:
-        _safe_pdf_multi_cell(
-            pdf,
-            f"{help_prefix}{help_email}",
-            "help_line",
-            height=6,
-            width=content_width,
-        )
-
-    pdf.set_y(-15)
-    pdf.set_text_color(*subtle)
-    pdf.set_font(font_family, "", 11)
+    pdf.set_font(font_family, "", 9)
     pdf.cell(
         0,
         6,
-        _sanitize_pdf_text("© alphaSource AI - All rights reserved."),
+        _sanitize_pdf_text("Need help or have questions? Email: info@alphasourceai.com"),
+        align="L",
+        ln=1,
+    )
+    pdf.cell(
+        0,
+        6,
+        _sanitize_pdf_text("alphaSource Consulting — All rights reserved."),
         align="L",
     )
 
