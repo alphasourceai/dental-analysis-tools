@@ -502,7 +502,13 @@ def _render_pdf_metadata_row(
         raise
     pdf.set_x(pdf.l_margin)
 
-def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int) -> bytes:
+def _generate_pdf_bytes(
+    metadata: dict,
+    sections: dict,
+    notes: str,
+    version: int,
+    debug: bool = False,
+) -> bytes | tuple[bytes, dict]:
     background = (10, 21, 71)
     card = (15, 30, 93)
     border = (34, 48, 106)
@@ -693,7 +699,8 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             render_bullet(combined, f"opportunity:{idx}")
 
     logo_path = os.path.join(repo_root, "public", "logo with bg color 1128.png")
-    if os.path.exists(logo_path):
+    logo_exists = os.path.exists(logo_path)
+    if logo_exists:
         logo_y = pdf.get_y()
         try:
             pdf.image(logo_path, x=pdf.l_margin, y=logo_y, w=85)
@@ -783,7 +790,22 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
 
     pdf.total_pages = pdf.page_no()
 
-    return _pdf_output_bytes(pdf)
+    pdf_bytes = _pdf_output_bytes(pdf)
+    if debug:
+        pdf_asset_debug = {
+            "repo_root": repo_root,
+            "font_path": font_path,
+            "font_exists": has_regular,
+            "bold_font_path": bold_font_path,
+            "bold_exists": has_bold,
+            "logo_path": logo_path,
+            "logo_exists": logo_exists,
+            "has_bold_face": has_bold_face,
+            "regular_family": regular_family,
+            "bold_family": bold_family if has_bold_face else "",
+        }
+        return pdf_bytes, pdf_asset_debug
+    return pdf_bytes
 
 def _upload_pdf_report(pdf_bytes: bytes, object_path: str) -> tuple[str, str]:
     client = _get_supabase_admin_client()
@@ -2826,6 +2848,10 @@ def display_pdf_generator(perf: AdminPerfTracker):
             key=f"{builder_prefix}_notes",
             height=120,
         )
+        show_pdf_debug = st.checkbox(
+            "Show PDF font/logo debug",
+            key=f"{builder_prefix}_show_pdf_debug",
+        )
 
         if st.button("Generate PDF", type="primary", key=f"{builder_prefix}_generate"):
             if not any([selected_opportunities, selected_trends, selected_key_trends, notes.strip()]):
@@ -2854,7 +2880,17 @@ def display_pdf_generator(perf: AdminPerfTracker):
             }
 
             try:
-                pdf_bytes = _generate_pdf_bytes(metadata, sections, notes, next_version)
+                if show_pdf_debug:
+                    pdf_bytes, pdf_asset_debug = _generate_pdf_bytes(
+                        metadata,
+                        sections,
+                        notes,
+                        next_version,
+                        debug=True,
+                    )
+                    st.session_state[f"{builder_prefix}_pdf_asset_debug"] = pdf_asset_debug
+                else:
+                    pdf_bytes = _generate_pdf_bytes(metadata, sections, notes, next_version)
             except Exception as exc:
                 logging.error(
                     "[pdf] failed upload_id=%s err=%r",
@@ -2896,6 +2932,11 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 st.error("PDF saved but metadata update failed.")
             finally:
                 update_db.close()
+
+        if show_pdf_debug:
+            debug_data = st.session_state.get(f"{builder_prefix}_pdf_asset_debug")
+            if debug_data:
+                st.json(debug_data)
 
         if st.session_state.get(f"{builder_prefix}_no_selection_warning"):
             if any([selected_opportunities, selected_trends, selected_key_trends, notes.strip()]):
