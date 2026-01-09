@@ -54,6 +54,23 @@ class AdminPerfTracker:
             self.first_db_logged = True
             self.log("first_db_query")
 
+def try_first_db_query(fn, attempts: int = 3, sleep_s: float = 0.5):
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            logging.exception(
+                "[db] first_query_failed attempt=%s/%s type=%s msg=%s",
+                attempt,
+                attempts,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            if attempt < attempts:
+                time.sleep(sleep_s * attempt)
+            else:
+                raise
+
 
 def normalize_email(raw_email: str) -> str:
     if not raw_email:
@@ -619,7 +636,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         pdf.set_text_color(*secondary)
         pdf.set_font(font_family, "", 10)
         pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(content_width, 6, f"- {safe_text}", align="L")
+        pdf.multi_cell(content_width, 6, _sanitize_pdf_text(f"- {safe_text}"), align="L")
         pdf.ln(1)
 
     def render_opportunity(item: object, idx: int) -> None:
@@ -629,15 +646,17 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             rec_text = (item.get("recommendation") or "").strip()
             parts = []
             if title_text:
-                parts.append(f"Issue: {title_text}")
+                parts.append(("issue", f"Issue: {title_text}"))
             if impact_text:
-                parts.append(f"Impact: {impact_text}")
+                parts.append(("impact", f"Impact: {impact_text}"))
             if rec_text:
-                parts.append(f"Recommendation: {rec_text}")
-            combined = "\n".join(parts)
-        else:
-            combined = str(item).strip() if item is not None else ""
-        render_bullet(combined, f"opportunity:{idx}")
+                parts.append(("recommendation", f"Recommendation: {rec_text}"))
+            for label, text in parts:
+                render_bullet(text, f"opportunity:{idx}:{label}")
+            return
+        combined = str(item).strip() if item is not None else ""
+        if combined:
+            render_bullet(combined, f"opportunity:{idx}")
 
     logo_path = os.path.join(repo_root, "public", "logo with bg color 1128.png")
     if os.path.exists(logo_path):
@@ -695,7 +714,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         )
         if row_idx < len(details):
             pdf.ln(detail_gap)
-    pdf.ln(6)
+    pdf.ln(12)
 
     section_specs = [
         ("opportunities", "Improvement Opportunities"),
@@ -1389,8 +1408,10 @@ def display_client_submissions(perf: AdminPerfTracker):
     normalized_search = search_term.strip().lower() if search_term else ""
 
     perf.mark_first_db_query()
-    db = next(get_db())
-    try:
+    logging.info("[db] url_present=%s", bool(os.getenv("DATABASE_URL")))
+
+    def _load_client_rows():
+        db = next(get_db())
         query = db.query(
             ClientSubmission.user_email.label("email"),
             func.count(ClientSubmission.id).label("submission_count"),
@@ -1401,8 +1422,20 @@ def display_client_submissions(perf: AdminPerfTracker):
         clients = query.group_by(ClientSubmission.user_email).order_by(
             func.max(ClientSubmission.submitted_at).desc()
         ).all()
-
         total_submissions = sum(row.submission_count for row in clients)
+        return db, clients, total_submissions
+
+    try:
+        db, clients, total_submissions = try_first_db_query(_load_client_rows)
+    except Exception:
+        st.error(
+            "We couldn't load the dashboard due to a database connection issue. Please try again."
+        )
+        if st.button("Retry"):
+            st.rerun()
+        return
+
+    try:
         logging.info(
             "Dashboard query counts: clients=%d, submissions=%d",
             len(clients),
@@ -2504,12 +2537,15 @@ def display_pdf_generator(perf: AdminPerfTracker):
         st.session_state.admin_pdf_client_email = ""
 
     perf.mark_first_db_query()
-    db = SessionLocal()
-    try:
-        preselected_upload_id = st.session_state.get("admin_pdf_upload_id")
-        pending_preselect_id = st.session_state.get("admin_pdf_preselect_id") or ""
-        lookup_upload_id = pending_preselect_id or preselected_upload_id
-        preselected_email = st.session_state.get("admin_pdf_client_email")
+    logging.info("[db] url_present=%s", bool(os.getenv("DATABASE_URL")))
+
+    preselected_upload_id = st.session_state.get("admin_pdf_upload_id")
+    pending_preselect_id = st.session_state.get("admin_pdf_preselect_id") or ""
+    lookup_upload_id = pending_preselect_id or preselected_upload_id
+    preselected_email = st.session_state.get("admin_pdf_client_email")
+
+    def _load_pdf_context():
+        db = SessionLocal()
         preselected_upload = None
         upload_id_uuid = None
         if lookup_upload_id:
@@ -2519,13 +2555,26 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 upload_id_uuid = None
         if upload_id_uuid is not None:
             preselected_upload = db.query(Upload).filter(Upload.id == upload_id_uuid).first()
-            if preselected_upload and preselected_upload.user_email:
-                preselected_email = preselected_upload.user_email
-
+        resolved_email = preselected_email
+        if preselected_upload and preselected_upload.user_email:
+            resolved_email = preselected_upload.user_email
         client_rows = db.query(ClientSubmission.user_email).distinct().order_by(
             ClientSubmission.user_email.asc()
         ).all()
         client_emails = [row[0] for row in client_rows if row[0]]
+        return db, preselected_upload, resolved_email, client_emails
+
+    try:
+        db, preselected_upload, preselected_email, client_emails = try_first_db_query(_load_pdf_context)
+    except Exception:
+        st.error(
+            "We couldn't load the dashboard due to a database connection issue. Please try again."
+        )
+        if st.button("Retry"):
+            st.rerun()
+        return
+
+    try:
         if not client_emails:
             st.info("No client submissions available for PDF generation.")
             return
@@ -2638,6 +2687,8 @@ def display_pdf_generator(perf: AdminPerfTracker):
             include_keys.extend([f"{builder_prefix}_key_include_{idx}" for idx in range(len(key_trends))])
 
         if include_keys:
+            for key in include_keys:
+                st.session_state.setdefault(key, True)
             toggle_cols = st.columns([1, 1])
             with toggle_cols[0]:
                 if st.button("Check All", key=f"{builder_prefix}_check_all", type="secondary"):
@@ -2654,11 +2705,7 @@ def display_pdf_generator(perf: AdminPerfTracker):
         if opportunities:
             for idx, item in enumerate(opportunities):
                 include_key = f"{builder_prefix}_opp_include_{idx}"
-                include = st.checkbox(
-                    f"Include opportunity {idx + 1}",
-                    value=True,
-                    key=include_key,
-                )
+                include = st.checkbox(f"Include opportunity {idx + 1}", key=include_key)
                 if include:
                     title = st.text_input(
                         "Issue",
@@ -2695,11 +2742,7 @@ def display_pdf_generator(perf: AdminPerfTracker):
         if trends:
             for idx, trend in enumerate(trends):
                 include_key = f"{builder_prefix}_trend_include_{idx}"
-                include = st.checkbox(
-                    f"Include trend {idx + 1}",
-                    value=True,
-                    key=include_key,
-                )
+                include = st.checkbox(f"Include trend {idx + 1}", key=include_key)
                 if include:
                     text = st.text_area(
                         "Trend Text",
@@ -2723,11 +2766,7 @@ def display_pdf_generator(perf: AdminPerfTracker):
         if key_trends:
             for idx, trend in enumerate(key_trends):
                 include_key = f"{builder_prefix}_key_include_{idx}"
-                include = st.checkbox(
-                    f"Include key trend {idx + 1}",
-                    value=True,
-                    key=include_key,
-                )
+                include = st.checkbox(f"Include key trend {idx + 1}", key=include_key)
                 if include:
                     text = st.text_area(
                         "Key Trend Text",
@@ -2756,9 +2795,8 @@ def display_pdf_generator(perf: AdminPerfTracker):
 
         if st.button("Generate PDF", type="primary", key=f"{builder_prefix}_generate"):
             if not any([selected_opportunities, selected_trends, selected_key_trends, notes.strip()]):
-                st.warning("Please include at least one section or add notes before generating a PDF.")
+                st.warning("Please make at least one selection to create a report.")
                 return
-
             current_version = getattr(selected_upload, "pdf_version", 0) or 0
             next_version = current_version + 1
             date_prefix = datetime.utcnow().strftime("%Y-%m-%d")

@@ -5,6 +5,8 @@ from sqlalchemy.orm import sessionmaker
 
 # Database connection string using environment variable
 DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL is not set. Please configure the database connection.")
 
 # Create a database engine with Neon serverless optimizations
 # pool_pre_ping: Test connections before use to catch stale connections
