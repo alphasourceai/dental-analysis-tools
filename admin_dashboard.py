@@ -551,7 +551,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
 
     pdf = StyledPDF(background)
     pdf.set_margins(16, 16, 16)
-    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.set_auto_page_break(auto=True, margin=28)
 
     repo_root = find_repo_root(os.path.abspath(os.path.dirname(__file__)))
     font_family = "Raleway"
@@ -559,13 +559,15 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     bold_font_path = os.path.join(repo_root, "raleway", "static", "Raleway-Bold.ttf")
     has_regular = os.path.exists(font_path)
     has_bold = os.path.exists(bold_font_path)
+    has_bold_face = False
     if has_regular:
         pdf.add_font(font_family, "", font_path, uni=True)
         if has_bold:
             pdf.add_font(font_family, "B", bold_font_path, uni=True)
+            has_bold_face = True
     else:
         font_family = "Helvetica"
-        has_bold = False
+        has_bold_face = False
     pdf.footer_font_family = font_family
 
     pdf.add_page()
@@ -635,13 +637,27 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             font_family=font_family,
         )
 
-    def render_bullet(text: str, field_label: str) -> None:
+    BULLET_FONT_SIZE = 10
+    BULLET_LINE_HEIGHT = 6
+
+    def render_bullet(
+        text: str,
+        field_label: str,
+        style: str = "",
+        size: int = BULLET_FONT_SIZE,
+    ) -> None:
         safe_text = text.strip()
         if not safe_text:
             return
         pdf.set_text_color(*secondary)
+        pdf.set_font(font_family, style, size)
         pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(content_width, 6, _sanitize_pdf_text(f"- {safe_text}"), align="L")
+        pdf.multi_cell(
+            content_width,
+            BULLET_LINE_HEIGHT,
+            _sanitize_pdf_text(f"- {safe_text}"),
+            align="L",
+        )
         pdf.ln(1)
 
     def render_opportunity(item: object, idx: int) -> None:
@@ -657,11 +673,10 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             if rec_text:
                 parts.append(("recommendation", f"Recommendation: {rec_text}"))
             for label, text in parts:
-                if label == "issue" and font_family != "Helvetica" and has_bold:
-                    pdf.set_font(font_family, "B", 10)
+                if label == "issue" and font_family != "Helvetica" and has_bold_face:
+                    render_bullet(text, f"opportunity:{idx}:{label}", style="B")
                 else:
-                    pdf.set_font(font_family, "", 10)
-                render_bullet(text, f"opportunity:{idx}:{label}")
+                    render_bullet(text, f"opportunity:{idx}:{label}")
             return
         combined = str(item).strip() if item is not None else ""
         if combined:
