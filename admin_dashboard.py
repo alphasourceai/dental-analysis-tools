@@ -497,10 +497,40 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         def __init__(self, bg_color: tuple[int, int, int]):
             super().__init__()
             self._bg_color = bg_color
+            self.total_pages = None
+            self.footer_font_family = "Helvetica"
+            self.footer_subtle = subtle
+            self.footer_secondary = secondary
 
         def header(self) -> None:
             self.set_fill_color(*self._bg_color)
             self.rect(0, 0, self.w, self.h, "F")
+
+        def footer(self) -> None:
+            if not self.total_pages or self.page_no() != self.total_pages:
+                return
+            font_family = self.footer_font_family or "Helvetica"
+            line_height = 5
+            self.set_y(-18)
+            self.set_font(font_family, "", 9)
+            self.set_text_color(*self.footer_subtle)
+            prefix = "Need help or have questions? Email: "
+            email = "info@alphasourceai.com"
+            self.set_x(self.l_margin)
+            try:
+                self.write(line_height, _sanitize_pdf_text(prefix))
+                self.set_text_color(*self.footer_secondary)
+                self.write(line_height, _sanitize_pdf_text(email), link=f"mailto:{email}")
+            except Exception:
+                self.set_text_color(*self.footer_subtle)
+                self.cell(0, line_height, _sanitize_pdf_text(f"{prefix}{email}"), ln=1)
+            else:
+                self.ln(line_height)
+            self.set_text_color(*self.footer_subtle)
+            footer_line = "alphaSource Consulting — All rights reserved."
+            if font_family == "Helvetica":
+                footer_line = _sanitize_pdf_text(footer_line)
+            self.cell(0, line_height, footer_line, ln=0)
 
     pdf = StyledPDF(background)
     pdf.set_margins(16, 16, 16)
@@ -513,6 +543,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         pdf.add_font(font_family, "", font_path, uni=True)
     else:
         font_family = "Helvetica"
+    pdf.footer_font_family = font_family
 
     pdf.add_page()
 
@@ -522,11 +553,15 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         if pdf.get_y() + min_height > pdf.h - pdf.b_margin:
             pdf.add_page()
 
-    def section_title(title: str) -> None:
+    def section_title(title: str, underline: bool = False) -> None:
         ensure_space(10)
         pdf.set_text_color(*primary)
         pdf.set_font(font_family, "", 12)
         pdf.cell(0, 8, _sanitize_pdf_text(title), ln=1)
+        if underline:
+            y = pdf.get_y()
+            pdf.set_draw_color(*border)
+            pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
         pdf.ln(1)
 
     def estimate_text_height(value: object, width: float, line_height: float, size: int) -> float:
@@ -583,13 +618,8 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             return
         pdf.set_text_color(*secondary)
         pdf.set_font(font_family, "", 10)
-        _safe_pdf_multi_cell(
-            pdf,
-            f"- {safe_text}",
-            field_label,
-            height=6,
-            width=content_width,
-        )
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(content_width, 6, f"- {safe_text}", align="L")
         pdf.ln(1)
 
     def render_opportunity(item: object, idx: int) -> None:
@@ -623,12 +653,15 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     pdf.cell(0, 12, _sanitize_pdf_text("Your Detailed Analysis Report"), ln=1)
     pdf.ln(1)
 
-    section_title("Client & Upload Details")
+    section_title("Client Details")
+    report_date = datetime.utcnow()
+    report_date_text = f"{report_date:%b} {report_date.day}, {report_date:%Y}"
     details = [
         ("Client Name", metadata.get("client_name")),
         ("Office/Group", metadata.get("office_name")),
         ("Client Email", metadata.get("client_email")),
         ("Tool", metadata.get("tool_name")),
+        ("Date", report_date_text),
     ]
     detail_padding_x = 6
     detail_padding_y = 4
@@ -662,7 +695,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         )
         if row_idx < len(details):
             pdf.ln(detail_gap)
-    pdf.ln(4)
+    pdf.ln(6)
 
     section_specs = [
         ("opportunities", "Improvement Opportunities"),
@@ -673,7 +706,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         items = sections.get(key) or []
         if not items:
             continue
-        section_title(title)
+        section_title(title, underline=True)
         if key == "opportunities":
             for idx, item in enumerate(items, start=1):
                 render_opportunity(item, idx)
@@ -695,22 +728,7 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         )
         pdf.ln(1)
 
-    pdf.set_y(-18)
-    pdf.set_text_color(*subtle)
-    pdf.set_font(font_family, "", 9)
-    pdf.cell(
-        0,
-        6,
-        _sanitize_pdf_text("Need help or have questions? Email: info@alphasourceai.com"),
-        align="L",
-        ln=1,
-    )
-    pdf.cell(
-        0,
-        6,
-        _sanitize_pdf_text("alphaSource Consulting — All rights reserved."),
-        align="L",
-    )
+    pdf.total_pages = pdf.page_no()
 
     return _pdf_output_bytes(pdf)
 
