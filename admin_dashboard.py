@@ -640,7 +640,6 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         if not safe_text:
             return
         pdf.set_text_color(*secondary)
-        pdf.set_font(font_family, "", 10)
         pdf.set_x(pdf.l_margin)
         pdf.multi_cell(content_width, 6, _sanitize_pdf_text(f"- {safe_text}"), align="L")
         pdf.ln(1)
@@ -660,10 +659,9 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             for label, text in parts:
                 if label == "issue" and font_family != "Helvetica" and has_bold:
                     pdf.set_font(font_family, "B", 10)
-                    render_bullet(text, f"opportunity:{idx}:{label}")
-                    pdf.set_font(font_family, "", 10)
                 else:
-                    render_bullet(text, f"opportunity:{idx}:{label}")
+                    pdf.set_font(font_family, "", 10)
+                render_bullet(text, f"opportunity:{idx}:{label}")
             return
         combined = str(item).strip() if item is not None else ""
         if combined:
