@@ -271,6 +271,20 @@ def _sanitize_pdf_text(value: object, field_label: str | None = None) -> str:
     cleaned = _wrap_long_tokens(cleaned)
     return cleaned.encode("latin-1", "replace").decode("latin-1")
 
+def find_repo_root(start_dir: str) -> str:
+    current = start_dir
+    for _ in range(7):
+        if (
+            os.path.isdir(os.path.join(current, "public"))
+            and os.path.isdir(os.path.join(current, "raleway"))
+        ):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return start_dir
+
 def _safe_path_component(value: str) -> str:
     if not value:
         return "unknown"
@@ -413,6 +427,7 @@ def _render_pdf_metadata_row(
     label_size: int = 9,
     value_size: int = 10,
     start_x: float | None = None,
+    font_family: str = "Helvetica",
 ) -> None:
     safe_label = _sanitize_pdf_text(label)
     safe_value = _sanitize_pdf_text(value or "-", field_label=field_label)
@@ -427,12 +442,12 @@ def _render_pdf_metadata_row(
     pdf.set_x(left_x)
     if label_color:
         pdf.set_text_color(*label_color)
-    pdf.set_font("Helvetica", "B", label_size)
+    pdf.set_font(font_family, "", label_size)
     if value_width < min_value_width:
         pdf.cell(full_width, height, f"{safe_label}:", ln=1)
         if value_color:
             pdf.set_text_color(*value_color)
-        pdf.set_font("Helvetica", "", value_size)
+        pdf.set_font(font_family, "", value_size)
         try:
             _safe_pdf_multi_cell(pdf, safe_value, field_label, height=height, width=full_width)
         except Exception:
@@ -453,7 +468,7 @@ def _render_pdf_metadata_row(
     pdf.cell(label_width, height, f"{safe_label}:", ln=0)
     if value_color:
         pdf.set_text_color(*value_color)
-    pdf.set_font("Helvetica", "", value_size)
+    pdf.set_font(font_family, "", value_size)
     pdf.set_xy(left_x + label_width, start_y)
     try:
         _safe_pdf_multi_cell(pdf, safe_value, field_label, height=height, width=value_width)
@@ -471,13 +486,12 @@ def _render_pdf_metadata_row(
     pdf.set_x(pdf.l_margin)
 
 def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int) -> bytes:
-    background = (37, 42, 52)
-    card = background
-    accent = (0, 207, 200)
-    text = (235, 254, 255)
-    muted = (169, 178, 201)
-    subtle = muted
-    divider = muted
+    background = (10, 21, 71)
+    card = (15, 30, 93)
+    border = (34, 48, 106)
+    primary = (230, 235, 255)
+    secondary = (201, 211, 255)
+    subtle = (107, 119, 201)
 
     class StyledPDF(FPDF):
         def __init__(self, bg_color: tuple[int, int, int]):
@@ -491,27 +505,35 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     pdf = StyledPDF(background)
     pdf.set_margins(16, 16, 16)
     pdf.set_auto_page_break(auto=True, margin=18)
+
+    repo_root = find_repo_root(os.path.abspath(os.path.dirname(__file__)))
+    font_family = "Raleway"
+    font_path = os.path.join(repo_root, "raleway", "static", "Raleway-Regular.ttf")
+    if os.path.exists(font_path):
+        pdf.add_font(font_family, "", font_path, uni=True)
+    else:
+        font_family = "Helvetica"
+
     pdf.add_page()
 
     content_width = pdf.w - pdf.l_margin - pdf.r_margin
 
-    def section_title(title: str) -> None:
-        pdf.set_text_color(*text)
-        pdf.set_font("Helvetica", "B", 13)
-        pdf.cell(0, 7, _sanitize_pdf_text(title), ln=1)
-        pdf.ln(1)
+    def ensure_space(min_height: float) -> None:
+        if pdf.get_y() + min_height > pdf.h - pdf.b_margin:
+            pdf.add_page()
 
-    def divider_line(color: tuple[int, int, int] = divider) -> None:
-        y = pdf.get_y()
-        pdf.set_draw_color(*color)
-        pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
-        pdf.ln(4)
+    def section_title(title: str) -> None:
+        ensure_space(10)
+        pdf.set_text_color(*primary)
+        pdf.set_font(font_family, "", 16)
+        pdf.cell(0, 8, _sanitize_pdf_text(title), ln=1)
+        pdf.ln(1)
 
     def estimate_text_height(value: object, width: float, line_height: float, size: int) -> float:
         safe = _sanitize_pdf_text(value or "")
         if not safe:
             return line_height
-        pdf.set_font("Helvetica", "", size)
+        pdf.set_font(font_family, "", size)
         words = safe.split()
         space_w = pdf.get_string_width(" ")
         lines = 1
@@ -536,8 +558,8 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         line_height: float,
         label_color: tuple[int, int, int],
         value_color: tuple[int, int, int],
-        label_size: int = 9,
-        value_size: int = 10,
+        label_size: int = 12,
+        value_size: int = 12,
         start_x: float | None = None,
     ) -> None:
         _render_pdf_metadata_row(
@@ -552,87 +574,54 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             label_size=label_size,
             value_size=value_size,
             start_x=start_x,
+            font_family=font_family,
         )
 
-    def issue_block(issue: object, idx: int) -> None:
-        if isinstance(issue, dict):
-            title_text = issue.get("title") or ""
-            impact_text = issue.get("impact") or ""
-            rec_text = issue.get("recommendation") or ""
-        else:
-            title_text = str(issue) if issue is not None else ""
-            impact_text = ""
-            rec_text = ""
-        if not any([title_text, impact_text, rec_text]):
+    def render_bullet(text: str, field_label: str) -> None:
+        safe_text = text.strip()
+        if not safe_text:
             return
-        rows = [
-            ("Issue", title_text or "Opportunity", accent, text),
-        ]
-        if impact_text:
-            rows.append(("Impact", impact_text, muted, text))
-        if rec_text:
-            rows.append(("Recommendation", rec_text, muted, text))
+        pdf.set_text_color(*secondary)
+        pdf.set_font(font_family, "", 14)
+        _safe_pdf_multi_cell(
+            pdf,
+            f"- {safe_text}",
+            field_label,
+            height=6,
+            width=content_width,
+        )
+        pdf.ln(1)
 
-        padding_x = 6
-        padding_y = 4
-        row_gap = 1
-        label_width = 32
-        line_height = 5
-        value_width = content_width - (padding_x * 2) - label_width
-        total_height = padding_y * 2
-        for label, value, _, _ in rows:
-            total_height += estimate_text_height(value, value_width, line_height, 10)
-        if len(rows) > 1:
-            total_height += row_gap * (len(rows) - 1)
+    def render_opportunity(item: object, idx: int) -> None:
+        if isinstance(item, dict):
+            title_text = (item.get("title") or "").strip()
+            impact_text = (item.get("impact") or "").strip()
+            rec_text = (item.get("recommendation") or "").strip()
+            parts = []
+            if title_text:
+                parts.append(f"Issue: {title_text}")
+            if impact_text:
+                parts.append(f"Impact: {impact_text}")
+            if rec_text:
+                parts.append(f"Recommendation: {rec_text}")
+            combined = "\n".join(parts)
+        else:
+            combined = str(item).strip() if item is not None else ""
+        render_bullet(combined, f"opportunity:{idx}")
 
-        if pdf.get_y() + total_height > pdf.h - pdf.b_margin:
-            pdf.add_page()
-        card_x = pdf.l_margin
-        card_y = pdf.get_y()
-        pdf.set_fill_color(*card)
-        pdf.set_draw_color(*divider)
-        pdf.rect(card_x, card_y, content_width, total_height, "FD")
-        pdf.set_xy(card_x + padding_x, card_y + padding_y)
+    logo_path = os.path.join(repo_root, "public", "logo with bg color 1128.png")
+    if os.path.exists(logo_path):
+        logo_y = pdf.get_y()
+        try:
+            pdf.image(logo_path, x=pdf.l_margin, y=logo_y, w=85)
+            pdf.set_y(logo_y + 24)
+        except Exception:
+            pass
 
-        for row_idx, (label, value, label_color, value_color) in enumerate(rows, start=1):
-            kv_row(
-                label,
-                value,
-                f"opportunity:{label.lower()}_{idx}",
-                label_width=label_width,
-                line_height=line_height,
-                label_color=label_color,
-                value_color=value_color,
-                start_x=card_x + padding_x,
-            )
-            if row_idx < len(rows):
-                pdf.ln(row_gap)
-        pdf.ln(3)
-
-    pdf.set_text_color(*text)
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 10, _sanitize_pdf_text("Your Financial Analysis Results"), ln=1)
-    pdf.set_text_color(*muted)
-    pdf.set_font("Helvetica", "", 10)
-    first_name = (metadata.get("client_name") or "").split(" ")[0].strip()
-    greeting_name = first_name or "there"
-    _safe_pdf_multi_cell(
-        pdf,
-        f"Hi {greeting_name},",
-        "intro:greeting",
-        height=5,
-        width=content_width,
-    )
+    pdf.set_text_color(*primary)
+    pdf.set_font(font_family, "", 22)
+    pdf.cell(0, 12, _sanitize_pdf_text("Your Financial Analysis Results"), ln=1)
     pdf.ln(1)
-    _safe_pdf_multi_cell(
-        pdf,
-        "Thank you for submitting your financial documents to our AI analysis platform. "
-        "Our multi-model analysis has completed its review.",
-        "intro:thank_you",
-        height=5,
-        width=content_width,
-    )
-    pdf.ln(3)
 
     section_title("Client & Upload Details")
     details = [
@@ -640,24 +629,22 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
         ("Office/Group", metadata.get("office_name")),
         ("Client Email", metadata.get("client_email")),
         ("Tool", metadata.get("tool_name")),
-        ("Upload Time", metadata.get("upload_time")),
     ]
     detail_padding_x = 6
     detail_padding_y = 4
     detail_gap = 1
-    detail_label_width = 36
-    detail_line_height = 5
+    detail_label_width = 40
+    detail_line_height = 6
     detail_value_width = content_width - (detail_padding_x * 2) - detail_label_width
     detail_height = detail_padding_y * 2
     for _, value in details:
-        detail_height += estimate_text_height(value, detail_value_width, detail_line_height, 10)
+        detail_height += estimate_text_height(value, detail_value_width, detail_line_height, 12)
     if len(details) > 1:
         detail_height += detail_gap * (len(details) - 1)
-    if pdf.get_y() + detail_height > pdf.h - pdf.b_margin:
-        pdf.add_page()
+    ensure_space(detail_height + 2)
     detail_card_y = pdf.get_y()
     pdf.set_fill_color(*card)
-    pdf.set_draw_color(*divider)
+    pdf.set_draw_color(*border)
     pdf.rect(pdf.l_margin, detail_card_y, content_width, detail_height, "FD")
     pdf.set_xy(pdf.l_margin + detail_padding_x, detail_card_y + detail_padding_y)
     for row_idx, (label, value) in enumerate(details, start=1):
@@ -667,90 +654,70 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             f"metadata:{label}",
             label_width=detail_label_width,
             line_height=detail_line_height,
-            label_color=muted,
-            value_color=text,
-            label_size=9,
-            value_size=10,
+            label_color=subtle,
+            value_color=secondary,
+            label_size=12,
+            value_size=12,
             start_x=pdf.l_margin + detail_padding_x,
         )
         if row_idx < len(details):
             pdf.ln(detail_gap)
     pdf.ln(4)
 
-    section_title("Key Insights Identified")
-    opportunities = sections.get("opportunities", [])
-    for idx, item in enumerate(opportunities, start=1):
-        issue_block(item, idx)
+    section_specs = [
+        ("opportunities", "Improvement Opportunities"),
+        ("trends", "Trends"),
+        ("key_trends", "Key Trends Identified"),
+    ]
+    for key, title in section_specs:
+        items = sections.get(key) or []
+        if not items:
+            continue
+        section_title(title)
+        if key == "opportunities":
+            for idx, item in enumerate(items, start=1):
+                render_opportunity(item, idx)
+        else:
+            for idx, item in enumerate(items, start=1):
+                render_bullet(str(item).strip(), f"{key}:{idx}")
+        pdf.ln(1)
 
-    section_title("What's Next?")
-    pdf.set_text_color(*muted)
-    pdf.set_font("Helvetica", "", 10)
-    _safe_pdf_multi_cell(
-        pdf,
-        "These findings represent just a preview of the detailed analysis we've prepared. "
-        "The complete report includes specific recommendations, benchmarking insights, "
-        "and prioritized action items tailored to your practice.",
-        "next:preview",
-        height=5,
-        width=content_width,
-    )
-    pdf.ln(1)
-    _safe_pdf_multi_cell(
-        pdf,
-        "Ready to dive into the full details? Book a complimentary consultation or simply reply to this email.",
-        "next:cta",
-        height=5,
-        width=content_width,
-    )
-    pdf.ln(1)
-    _safe_pdf_multi_cell(
-        pdf,
-        "Destinee",
-        "next:signature_name",
-        height=5,
-        width=content_width,
-    )
-    pdf.set_text_color(*subtle)
-    _safe_pdf_multi_cell(
-        pdf,
-        "alphaSource Consulting",
-        "next:signature_org",
-        height=5,
-        width=content_width,
-    )
-    pdf.set_text_color(*muted)
-    _safe_pdf_multi_cell(
-        pdf,
-        "Book Free Consultation: https://calendar.app.google/QWQor8w5MqDqGXHv7",
-        "next:link",
-        height=5,
-        width=content_width,
-    )
     if notes:
-        pdf.ln(3)
         section_title("Additional Notes")
-        pdf.set_text_color(*muted)
-        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(*secondary)
+        pdf.set_font(font_family, "", 14)
         _safe_pdf_multi_cell(
             pdf,
             notes,
             "notes:body",
-            height=5,
+            height=6,
             width=content_width,
         )
-    pdf.ln(2)
-    pdf.set_text_color(*subtle)
-    _safe_pdf_multi_cell(
-        pdf,
-        "Need help? Email info@alphasourceai.com",
-        "next:help",
-        height=5,
-        width=content_width,
-    )
+        pdf.ln(1)
 
-    pdf.set_y(-18)
+    ensure_space(10)
+    pdf.set_font(font_family, "", 12)
+    help_prefix = "Need help or have questions? Email: "
+    help_email = "info@alphasourceai.com"
     pdf.set_text_color(*subtle)
-    pdf.set_font("Helvetica", "", 9)
+    prefix_width = pdf.get_string_width(_sanitize_pdf_text(help_prefix))
+    email_width = pdf.get_string_width(_sanitize_pdf_text(help_email))
+    if prefix_width + email_width <= content_width:
+        pdf.cell(prefix_width, 6, _sanitize_pdf_text(help_prefix), ln=0)
+        pdf.set_text_color(*secondary)
+        pdf.cell(0, 6, _sanitize_pdf_text(help_email), ln=1)
+    else:
+        _safe_pdf_multi_cell(
+            pdf,
+            f"{help_prefix}{help_email}",
+            "help_line",
+            height=6,
+            width=content_width,
+        )
+
+    pdf.set_y(-15)
+    pdf.set_text_color(*subtle)
+    pdf.set_font(font_family, "", 11)
     pdf.cell(
         0,
         6,
