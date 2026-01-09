@@ -556,10 +556,16 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
     repo_root = find_repo_root(os.path.abspath(os.path.dirname(__file__)))
     font_family = "Raleway"
     font_path = os.path.join(repo_root, "raleway", "static", "Raleway-Regular.ttf")
-    if os.path.exists(font_path):
+    bold_font_path = os.path.join(repo_root, "raleway", "static", "Raleway-Bold.ttf")
+    has_regular = os.path.exists(font_path)
+    has_bold = os.path.exists(bold_font_path)
+    if has_regular:
         pdf.add_font(font_family, "", font_path, uni=True)
+        if has_bold:
+            pdf.add_font(font_family, "B", bold_font_path, uni=True)
     else:
         font_family = "Helvetica"
+        has_bold = False
     pdf.footer_font_family = font_family
 
     pdf.add_page()
@@ -652,7 +658,12 @@ def _generate_pdf_bytes(metadata: dict, sections: dict, notes: str, version: int
             if rec_text:
                 parts.append(("recommendation", f"Recommendation: {rec_text}"))
             for label, text in parts:
-                render_bullet(text, f"opportunity:{idx}:{label}")
+                if label == "issue" and font_family != "Helvetica" and has_bold:
+                    pdf.set_font(font_family, "B", 10)
+                    render_bullet(text, f"opportunity:{idx}:{label}")
+                    pdf.set_font(font_family, "", 10)
+                else:
+                    render_bullet(text, f"opportunity:{idx}:{label}")
             return
         combined = str(item).strip() if item is not None else ""
         if combined:
@@ -2795,8 +2806,9 @@ def display_pdf_generator(perf: AdminPerfTracker):
 
         if st.button("Generate PDF", type="primary", key=f"{builder_prefix}_generate"):
             if not any([selected_opportunities, selected_trends, selected_key_trends, notes.strip()]):
+                st.session_state[f"{builder_prefix}_no_selection_warning"] = True
                 st.warning("Please make at least one selection to create a report.")
-                return
+                st.stop()
             current_version = getattr(selected_upload, "pdf_version", 0) or 0
             next_version = current_version + 1
             date_prefix = datetime.utcnow().strftime("%Y-%m-%d")
@@ -2861,6 +2873,10 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 st.error("PDF saved but metadata update failed.")
             finally:
                 update_db.close()
+
+        if st.session_state.get(f"{builder_prefix}_no_selection_warning"):
+            if any([selected_opportunities, selected_trends, selected_key_trends, notes.strip()]):
+                st.session_state[f"{builder_prefix}_no_selection_warning"] = False
 
         last_report_bytes = st.session_state.get("admin_last_report_bytes")
         last_report_file_name = st.session_state.get("admin_last_report_file_name")
