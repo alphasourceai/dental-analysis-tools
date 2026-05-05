@@ -316,6 +316,19 @@ def is_admin_user(user_id):
     normalized_user_id = _normalize_uuid(user_id)
     if not normalized_user_id:
         return False
+
+    db = SessionLocal()
+    try:
+        admin_user = db.query(AdminUser).filter(AdminUser.user_id == normalized_user_id).first()
+        is_admin = bool(admin_user and (admin_user.role or "").strip().lower() == "admin")
+        logging.info("[auth] admin_users db check user_id=%s result=%s", user_id, is_admin)
+        if is_admin:
+            return True
+    except Exception as exc:
+        logging.error("[auth] admin_users db check failed user_id=%s err=%s", user_id, str(exc))
+    finally:
+        db.close()
+
     if not SUPABASE_URL:
         logging.error("[auth] admin_users rest check missing SUPABASE_URL user_id=%s", user_id)
         return False
