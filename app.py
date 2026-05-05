@@ -36,7 +36,11 @@ from analysis_utils import (
     categorize_issue,
     extract_compelling_insights
 )
-from admin_dashboard import display_admin_dashboard
+from admin_dashboard import (
+    display_admin_dashboard,
+    display_admin_forgot_password,
+    display_admin_password_reset,
+)
 from upload_portal import PortalError, complete_upload, create_signed_upload_url, verify_upload_token
 
 # Configure logging
@@ -644,6 +648,14 @@ if _page_param in ("admin", "admin_login", "admin_dashboard"):
     st.session_state.page = "Admin Dashboard"
     if SHOW_DEBUG_ADMIN_ROUTE:
         logging.info("admin_route page_param=%s -> Admin Dashboard", _page_param)
+elif _page_param in ("admin_forgot_password", "forgot_password"):
+    st.session_state.page = "Admin Forgot Password"
+    if SHOW_DEBUG_ADMIN_ROUTE:
+        logging.info("admin_route page_param=%s -> Admin Forgot Password", _page_param)
+elif _page_param in ("admin_password_reset", "admin_reset_password", "reset_password"):
+    st.session_state.page = "Admin Password Reset"
+    if SHOW_DEBUG_ADMIN_ROUTE:
+        logging.info("admin_route page_param=%s -> Admin Password Reset", _page_param)
 elif _page_param in ("analyzer", "home", "public"):
     st.session_state.page = "Analyzer"
     if SHOW_DEBUG_ADMIN_ROUTE:
@@ -1375,6 +1387,12 @@ if st.session_state.page == "Analyzer":
                         st.session_state.pnl_uploader_key_version += 1
                         logging.error("[analysis] error run_id=%s: %s", run_id, str(exc))
                         st.rerun()
+
+elif st.session_state.page == "Admin Forgot Password":
+    display_admin_forgot_password()
+
+elif st.session_state.page == "Admin Password Reset":
+    display_admin_password_reset(_query_params)
 
 # Admin Setup Page (for initial production setup)
 elif st.session_state.page == "Admin Setup":
