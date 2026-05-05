@@ -60,6 +60,134 @@ def _normalize_uuid(value):
     return None
 
 
+def _get_supabase_auth_key():
+    return SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY
+
+
+def _supabase_auth_headers(access_token=None):
+    auth_key = _get_supabase_auth_key()
+    if not SUPABASE_URL or not auth_key:
+        return None
+    return {
+        "apikey": auth_key,
+        "Authorization": f"Bearer {access_token or auth_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+def _auth_error_message(response):
+    body = (response.text or "").replace("\n", " ").strip()
+    return f"status {response.status_code} body {body[:500]}"
+
+
+def send_admin_password_reset(email, redirect_to):
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        return False, "Email is required"
+    if not redirect_to:
+        return False, "Password reset redirect URL is not configured"
+
+    headers = _supabase_auth_headers()
+    if not headers:
+        return False, "Supabase auth is not configured"
+
+    url = f"{SUPABASE_URL.rstrip('/')}/auth/v1/recover"
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            params={"redirect_to": redirect_to},
+            json={"email": normalized_email},
+            timeout=8,
+        )
+    except requests.RequestException as exc:
+        logging.error("[auth] password reset request failed email=%s err=%s", normalized_email, str(exc))
+        return False, "Unable to contact Supabase Auth"
+
+    if response.status_code not in (200, 201, 204):
+        message = _auth_error_message(response)
+        logging.error("[auth] password reset request bad status email=%s %s", normalized_email, message)
+        return False, message
+    logging.info("[auth] password reset requested email=%s redirect_to=%s", normalized_email, redirect_to)
+    return True, None
+
+
+def verify_password_recovery_token(token_hash):
+    token_hash = (token_hash or "").strip()
+    if not token_hash:
+        return None, "Recovery token is missing"
+
+    headers = _supabase_auth_headers()
+    if not headers:
+        return None, "Supabase auth is not configured"
+
+    url = f"{SUPABASE_URL.rstrip('/')}/auth/v1/verify"
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json={"token_hash": token_hash, "type": "recovery"},
+            timeout=8,
+        )
+    except requests.RequestException as exc:
+        logging.error("[auth] password recovery verify failed err=%s", str(exc))
+        return None, "Unable to contact Supabase Auth"
+
+    if response.status_code not in (200, 201):
+        message = _auth_error_message(response)
+        logging.error("[auth] password recovery verify bad status %s", message)
+        return None, message
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return None, "Invalid Supabase Auth response"
+
+    session = payload.get("session") or payload
+    user = payload.get("user") or session.get("user") or {}
+    access_token = session.get("access_token")
+    refresh_token = session.get("refresh_token")
+    if not access_token:
+        return None, "Recovery session is missing an access token"
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "user": {"id": user.get("id"), "email": user.get("email")},
+    }, None
+
+
+def update_password_with_recovery_token(access_token, new_password):
+    if not access_token:
+        return False, "Recovery session is missing"
+    if not new_password:
+        return False, "Password is required"
+
+    headers = _supabase_auth_headers(access_token=access_token)
+    if not headers:
+        return False, "Supabase auth is not configured"
+
+    url = f"{SUPABASE_URL.rstrip('/')}/auth/v1/user"
+    try:
+        response = requests.put(
+            url,
+            headers=headers,
+            json={"password": new_password},
+            timeout=8,
+        )
+    except requests.RequestException as exc:
+        logging.error("[auth] password update failed err=%s", str(exc))
+        return False, "Unable to contact Supabase Auth"
+
+    if response.status_code not in (200, 201):
+        message = _auth_error_message(response)
+        logging.error("[auth] password update bad status %s", message)
+        return False, message
+    logging.info("[auth] password updated via recovery token")
+    return True, None
+
+
 def persist_upload_file(file_bytes, user_email, tool_name, original_filename, content_type=None, upload_id=None):
     client = _get_supabase_admin_client()
     if not client:

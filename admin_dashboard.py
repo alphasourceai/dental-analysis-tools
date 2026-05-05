@@ -8,7 +8,7 @@ import time
 import uuid
 import math
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 import requests
 try:
     from zoneinfo import ZoneInfo
@@ -27,6 +27,9 @@ from supabase_utils import (
     update_upload_file_upload_id,
     sign_in_admin,
     is_admin_user,
+    send_admin_password_reset,
+    update_password_with_recovery_token,
+    verify_password_recovery_token,
     _get_supabase_admin_client,
     SUPABASE_URL,
 )
@@ -1150,6 +1153,240 @@ def _render_admin_css() -> None:
     st.markdown(css, unsafe_allow_html=True)
 
 
+def _query_value(params: dict | None, key: str) -> str:
+    if not params:
+        return ""
+    value = params.get(key)
+    if isinstance(value, (list, tuple)):
+        return str(value[0]) if value else ""
+    return str(value or "")
+
+
+def _set_page_query(page: str) -> None:
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params.clear()
+            st.query_params["page"] = page
+        else:
+            st.experimental_set_query_params(page=page)
+    except Exception as exc:
+        logging.warning("[auth] unable to update page query param: %s", str(exc))
+
+
+def _url_with_page(base_url: str, page: str) -> str:
+    raw_url = base_url.strip()
+    parsed = urlparse(raw_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        scheme = "http" if raw_url.startswith(("localhost", "127.0.0.1", "0.0.0.0")) else "https"
+        parsed = urlparse(f"{scheme}://{raw_url.lstrip('/')}")
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["page"] = page
+    path = parsed.path or "/"
+    return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, urlencode(query), ""))
+
+
+def _admin_password_reset_redirect_url() -> str:
+    explicit_url = os.getenv("ADMIN_PASSWORD_RESET_REDIRECT_URL", "").strip()
+    if explicit_url:
+        return explicit_url
+
+    base_url = (
+        os.getenv("APP_BASE_URL", "").strip()
+        or os.getenv("PUBLIC_BASE_URL", "").strip()
+        or os.getenv("PORTAL_BASE_URL", "").strip()
+        or os.getenv("RENDER_EXTERNAL_URL", "").strip()
+        or os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+    )
+    if not base_url:
+        replit_domain = (
+            os.getenv("REPLIT_DOMAINS", "").split(",")[0].strip()
+            or os.getenv("REPLIT_DEV_DOMAIN", "").strip()
+        )
+        if replit_domain:
+            base_url = f"https://{replit_domain}"
+
+    if base_url:
+        return _url_with_page(base_url, "admin_password_reset")
+
+    port = os.getenv("STREAMLIT_SERVER_PORT") or os.getenv("PORT") or "5000"
+    return f"http://localhost:{port}/?page=admin_password_reset"
+
+
+def _render_password_recovery_hash_bridge() -> None:
+    components.html(
+        """
+        <script>
+        (function () {
+          try {
+            const target = window.parent || window.top || window;
+            const url = new URL(target.location.href);
+            const hash = target.location.hash ? target.location.hash.substring(1) : "";
+            if (!hash) return;
+
+            const hashParams = new URLSearchParams(hash);
+            const keys = [
+              "access_token",
+              "refresh_token",
+              "expires_at",
+              "expires_in",
+              "token_type",
+              "type",
+              "error",
+              "error_code",
+              "error_description"
+            ];
+            let copied = false;
+            keys.forEach(function (key) {
+              const value = hashParams.get(key);
+              if (value) {
+                url.searchParams.set("sb_" + key, value);
+                copied = true;
+              }
+            });
+            if (!copied) return;
+
+            url.searchParams.set("page", "admin_password_reset");
+            url.hash = "";
+            target.location.replace(url.toString());
+          } catch (err) {
+            console.error("Supabase recovery redirect handling failed", err);
+          }
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def display_admin_forgot_password() -> None:
+    _render_admin_css()
+    st.markdown(
+        """
+        <div class="title-container" style="margin-top: 1.5rem;">
+            <h1>Reset Admin Password</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<p style='text-align: center; margin-bottom: 2rem; margin-top: 1.5rem;'>Enter your admin email and Supabase Auth will send a password reset link.</p>",
+        unsafe_allow_html=True,
+    )
+
+    default_email = st.session_state.get("admin_email", "")
+    with st.form("admin_forgot_password_form"):
+        email = st.text_input("Email", value=default_email, key="admin_reset_email")
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            submit_button = st.form_submit_button("Send reset link", width="stretch")
+
+        if submit_button:
+            redirect_to = _admin_password_reset_redirect_url()
+            ok, error = send_admin_password_reset(email, redirect_to)
+            if ok:
+                st.success("If that email exists in Supabase Auth, a password reset link has been sent.")
+                st.caption(f"Recovery links will return to: {redirect_to}")
+            else:
+                st.error(f"Could not send password reset link: {error}")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("Back to Admin Login", key="forgot_password_to_login", width="stretch"):
+            _set_page_query("admin")
+            st.session_state.page = "Admin Dashboard"
+            st.rerun()
+
+
+def display_admin_password_reset(query_params: dict | None = None) -> None:
+    _render_admin_css()
+    _render_password_recovery_hash_bridge()
+
+    st.markdown(
+        """
+        <div class="title-container" style="margin-top: 1.5rem;">
+            <h1>Set New Password</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    recovery_error = _query_value(query_params, "sb_error_description") or _query_value(
+        query_params, "error_description"
+    )
+    if recovery_error:
+        st.error(f"Password reset link failed: {unquote(recovery_error)}")
+
+    access_token = (
+        _query_value(query_params, "sb_access_token")
+        or _query_value(query_params, "access_token")
+        or st.session_state.get("admin_password_reset_access_token", "")
+    )
+    refresh_token = (
+        _query_value(query_params, "sb_refresh_token")
+        or _query_value(query_params, "refresh_token")
+        or st.session_state.get("admin_password_reset_refresh_token", "")
+    )
+    token_hash = _query_value(query_params, "token_hash") or _query_value(query_params, "sb_token_hash")
+
+    if token_hash and not access_token:
+        recovery_session, error = verify_password_recovery_token(token_hash)
+        if error:
+            st.error(f"Could not verify password reset link: {error}")
+        else:
+            access_token = recovery_session.get("access_token", "")
+            refresh_token = recovery_session.get("refresh_token", "")
+
+    if access_token:
+        st.session_state.admin_password_reset_access_token = access_token
+        st.session_state.admin_password_reset_refresh_token = refresh_token
+
+    if not access_token:
+        st.info("Loading your password reset link. If this message stays visible, request a new reset link.")
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("Request New Link", key="password_reset_request_new", width="stretch"):
+                _set_page_query("admin_forgot_password")
+                st.session_state.page = "Admin Forgot Password"
+                st.rerun()
+        return
+
+    with st.form("admin_password_reset_form"):
+        new_password = st.text_input("New password", type="password", key="admin_new_password")
+        confirm_password = st.text_input("Confirm new password", type="password", key="admin_new_password_confirm")
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            submit_button = st.form_submit_button("Update password", width="stretch")
+
+        if submit_button:
+            if len(new_password or "") < 8:
+                st.error("Password must be at least 8 characters.")
+            elif new_password != confirm_password:
+                st.error("Passwords do not match.")
+            else:
+                ok, error = update_password_with_recovery_token(access_token, new_password)
+                if ok:
+                    for key in (
+                        "admin_password_reset_access_token",
+                        "admin_password_reset_refresh_token",
+                        "admin_new_password",
+                        "admin_new_password_confirm",
+                    ):
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.success("Password updated. You can now log in with the new password.")
+                else:
+                    st.error(f"Could not update password: {error}")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("Go to Admin Login", key="password_reset_to_login", width="stretch"):
+            _set_page_query("admin")
+            st.session_state.page = "Admin Dashboard"
+            st.rerun()
+
+
 def _render_admin_login() -> None:
     st.markdown(
         """
@@ -1213,7 +1450,16 @@ def _render_admin_login() -> None:
                     st.rerun()
                 else:
                     st.session_state.is_admin_logged_in = False
-                    st.error("Not authorized")
+                    st.error("Not authorized. This Supabase Auth user is not listed in admin_users with role admin.")
+
+    st.markdown(
+        """
+        <div style="text-align: center; margin-top: 0.75rem;">
+            <a href="?page=admin_forgot_password" style="color: #A78BFA; text-decoration: none;">Forgot password?</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if st.session_state.admin_user and not st.session_state.is_admin_logged_in:
         col1, col2, col3 = st.columns([1, 1, 1])
