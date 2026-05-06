@@ -17,7 +17,7 @@ except ImportError:
 
 import streamlit as st
 import streamlit.components.v1 as components
-from sqlalchemy import func, text
+from sqlalchemy import func, or_, text
 from fpdf import FPDF
 
 from database import SessionLocal
@@ -1684,29 +1684,125 @@ def display_uploads_inbox(perf: AdminPerfTracker):
 def display_client_submissions(perf: AdminPerfTracker):
     st.markdown("<h3 style='margin-top: 1.5rem;'>Client Submissions</h3>", unsafe_allow_html=True)
     st.markdown('<div class="client-submissions-scope">', unsafe_allow_html=True)
-    search_term = st.text_input("Search by email", placeholder="Search by email")
+    search_term = st.text_input(
+        "Search clients",
+        placeholder="Search by email, name, office/group, or phone",
+    )
     normalized_search = search_term.strip().lower() if search_term else ""
+
+    def _display_text(value: object) -> str:
+        if value is None:
+            return "—"
+        text_value = str(value).strip()
+        return text_value if text_value else "—"
+
+    def _display_html(value: object) -> str:
+        return html.escape(_display_text(value))
+
+    def _full_name(submission: object) -> str:
+        if not submission:
+            return "—"
+        first_name = (getattr(submission, "first_name", None) or "").strip()
+        last_name = (getattr(submission, "last_name", None) or "").strip()
+        return f"{first_name} {last_name}".strip() or "—"
+
+    def _status_markup(status: object) -> str:
+        status_value = (str(status).strip() if status is not None else "")
+        if not status_value:
+            return "<span class=\"as-muted\">—</span>"
+        status_label = status_value.replace("_", " ").title()
+        return f"<span class=\"as-pill\">{html.escape(status_label)}</span>"
+
+    def _detail_markup(label: str, value: object) -> str:
+        return (
+            f"<div class=\"as-muted\">{html.escape(label)}</div>"
+            f"<div>{_display_html(value)}</div>"
+        )
+
+    def _acknowledgement_value(value: object) -> str:
+        if value is None:
+            return "—"
+        return "Yes" if bool(value) else "No"
 
     perf.mark_first_db_query()
     logging.info("[db] url_present=%s", bool(os.getenv("DATABASE_URL")))
 
     def _load_client_rows():
         db = next(get_db())
+        matching_emails = None
+        if normalized_search:
+            search_like = f"%{normalized_search}%"
+            matching_submission_rows = db.query(ClientSubmission.user_email).filter(
+                or_(
+                    ClientSubmission.user_email.ilike(search_like),
+                    ClientSubmission.first_name.ilike(search_like),
+                    ClientSubmission.last_name.ilike(search_like),
+                    ClientSubmission.office_name.ilike(search_like),
+                    ClientSubmission.phone.ilike(search_like),
+                )
+            ).distinct().all()
+            matching_user_rows = db.query(User.email).filter(
+                or_(
+                    User.email.ilike(search_like),
+                    User.first_name.ilike(search_like),
+                    User.last_name.ilike(search_like),
+                    User.office_name.ilike(search_like),
+                    User.phone.ilike(search_like),
+                )
+            ).distinct().all()
+            matching_emails = {
+                row[0] for row in [*matching_submission_rows, *matching_user_rows] if row[0]
+            }
+            if not matching_emails:
+                return db, [], 0, 0, {}, {}, {}
+
         query = db.query(
             ClientSubmission.user_email.label("email"),
             func.count(ClientSubmission.id).label("submission_count"),
             func.max(ClientSubmission.submitted_at).label("last_submitted_at"),
         )
-        if normalized_search:
-            query = query.filter(ClientSubmission.user_email.ilike(f"%{normalized_search}%"))
+        if matching_emails is not None:
+            query = query.filter(ClientSubmission.user_email.in_(matching_emails))
         clients = query.group_by(ClientSubmission.user_email).order_by(
             func.max(ClientSubmission.submitted_at).desc()
         ).all()
         total_submissions = sum(row.submission_count for row in clients)
-        return db, clients, total_submissions
+        client_emails = [row.email for row in clients if row.email]
+
+        upload_counts = {}
+        latest_submissions = {}
+        users_by_email = {}
+        if client_emails:
+            upload_count_rows = db.query(
+                ClientSubmission.user_email,
+                func.count(Upload.id).label("upload_count"),
+            ).outerjoin(
+                Upload, Upload.submission_id == ClientSubmission.id
+            ).filter(
+                ClientSubmission.user_email.in_(client_emails)
+            ).group_by(
+                ClientSubmission.user_email
+            ).all()
+            upload_counts = {row[0]: row[1] for row in upload_count_rows}
+
+            latest_rows = db.query(ClientSubmission).filter(
+                ClientSubmission.user_email.in_(client_emails)
+            ).order_by(
+                ClientSubmission.user_email.asc(),
+                ClientSubmission.submitted_at.desc(),
+            ).all()
+            for submission in latest_rows:
+                if submission.user_email not in latest_submissions:
+                    latest_submissions[submission.user_email] = submission
+
+            users = db.query(User).filter(User.email.in_(client_emails)).all()
+            users_by_email = {user.email: user for user in users if user.email}
+
+        total_uploads = sum(upload_counts.values())
+        return db, clients, total_submissions, total_uploads, upload_counts, latest_submissions, users_by_email
 
     try:
-        db, clients, total_submissions = try_first_db_query(_load_client_rows)
+        db, clients, total_submissions, total_uploads, upload_counts, latest_submissions, users_by_email = try_first_db_query(_load_client_rows)
     except Exception:
         st.error(
             "We couldn't load the dashboard due to a database connection issue. Please try again."
@@ -1717,9 +1813,10 @@ def display_client_submissions(perf: AdminPerfTracker):
 
     try:
         logging.info(
-            "Dashboard query counts: clients=%d, submissions=%d",
+            "Dashboard query counts: clients=%d, submissions=%d, uploads=%d",
             len(clients),
             total_submissions,
+            total_uploads,
         )
 
         if not clients:
@@ -1727,40 +1824,63 @@ def display_client_submissions(perf: AdminPerfTracker):
             return
 
         action_button_kwargs = {"width": 32} if _BUTTON_SUPPORTS_WIDTH else {}
-
-        header_cols = st.columns([3.6, 1.4, 2.2, 0.8])
-        with header_cols[0]:
-            st.markdown("**Email**")
-        with header_cols[1]:
-            st.markdown("**Submissions**")
-        with header_cols[2]:
-            st.markdown("**Last Submitted**")
-        with header_cols[3]:
-            st.markdown("**Delete**")
-
-        st.markdown("<div style='margin-bottom: 0.6rem;'></div>", unsafe_allow_html=True)
+        st.caption(f"{len(clients)} clients | {total_submissions} submissions | {total_uploads} uploads")
 
         for client in clients:
             client_email = client.email or ""
             client_key = client_email.replace("@", "_at_").replace(".", "_")
+            latest_submission = latest_submissions.get(client_email)
+            user_record = users_by_email.get(client_email)
+            latest_submitted = _format_admin_dt(client.last_submitted_at) if client.last_submitted_at else "-"
+            latest_status = getattr(latest_submission, "status", None) if latest_submission else None
+            client_upload_count = upload_counts.get(client_email, 0)
+
             st.markdown('<div class="as-card">', unsafe_allow_html=True)
-            cols = st.columns([3.6, 1.4, 2.2, 0.8])
+            cols = st.columns([3.3, 1.1, 1.1, 2.0, 0.6])
             with cols[0]:
+                st.markdown("<div class=\"as-muted\">Email</div>", unsafe_allow_html=True)
                 _render_email_html(client_email)
             with cols[1]:
+                st.markdown("<div class=\"as-muted\">Submissions</div>", unsafe_allow_html=True)
                 st.markdown(
                     f"<span class=\"as-pill\">{client.submission_count}</span>",
                     unsafe_allow_html=True,
                 )
             with cols[2]:
-                if client.last_submitted_at:
-                    st.write(_format_admin_dt(client.last_submitted_at) or "-")
-                else:
-                    st.write("-")
+                st.markdown("<div class=\"as-muted\">Uploads</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<span class=\"as-pill\">{client_upload_count}</span>",
+                    unsafe_allow_html=True,
+                )
             with cols[3]:
+                st.markdown(_detail_markup("Latest Submitted", latest_submitted), unsafe_allow_html=True)
+            with cols[4]:
+                st.markdown("<div class=\"as-muted\">Delete</div>", unsafe_allow_html=True)
                 if st.button("🗑️", key=f"delete_btn_{client_key}"):
                     st.session_state[f"confirm_delete_{client_key}"] = client_email
                     st.rerun()
+
+            summary_cols = st.columns([1.8, 2.2, 1.4, 1.4, 1.3])
+            with summary_cols[0]:
+                st.markdown(_detail_markup("Latest Name", _full_name(latest_submission)), unsafe_allow_html=True)
+            with summary_cols[1]:
+                office_value = getattr(latest_submission, "office_name", None) if latest_submission else None
+                st.markdown(_detail_markup("Latest Office/Group", office_value), unsafe_allow_html=True)
+            with summary_cols[2]:
+                org_value = getattr(latest_submission, "org_type", None) if latest_submission else None
+                st.markdown(_detail_markup("Latest Org Type", org_value), unsafe_allow_html=True)
+            with summary_cols[3]:
+                phone_value = (
+                    getattr(latest_submission, "phone", None)
+                    if latest_submission and getattr(latest_submission, "phone", None)
+                    else getattr(user_record, "phone", None)
+                )
+                st.markdown(_detail_markup("Latest Phone", phone_value), unsafe_allow_html=True)
+            with summary_cols[4]:
+                st.markdown(
+                    f"<div class=\"as-muted\">Latest Status</div><div>{_status_markup(latest_status)}</div>",
+                    unsafe_allow_html=True,
+                )
 
             if st.session_state.get(f"confirm_delete_{client_key}"):
                 st.warning("Are you sure you want to delete all records for this client?")
@@ -1814,41 +1934,30 @@ def display_client_submissions(perf: AdminPerfTracker):
                     for submission_index, submission_row in enumerate(submission_rows):
                         submission = submission_row[0]
                         upload_count = submission_row[1]
-                        full_name = f"{submission.first_name} {submission.last_name}".strip()
+                        full_name = _full_name(submission)
                         submission_label = _format_admin_dt(submission.submitted_at) or "-"
 
                         st.markdown('<div class="as-subcard">', unsafe_allow_html=True)
-                        sub_cols = st.columns([1.8, 1.8, 2.2, 1.4, 1.5, 1.6, 1.0])
+                        sub_cols = st.columns([1.7, 1.7, 2.2, 1.4])
                         with sub_cols[0]:
                             st.markdown(
                                 f"<div class=\"as-muted\">Submitted At</div><div>{submission_label}</div>",
                                 unsafe_allow_html=True,
                             )
                         with sub_cols[1]:
-                            name_value = full_name if full_name.strip() else "-"
-                            st.markdown(
-                                f"<div class=\"as-muted\">Name</div><div>{name_value}</div>",
-                                unsafe_allow_html=True,
-                            )
+                            st.markdown(_detail_markup("Name", full_name), unsafe_allow_html=True)
                         with sub_cols[2]:
-                            office_value = submission.office_name or "-"
-                            st.markdown(
-                                f"<div class=\"as-muted\">Office/Group</div><div>{office_value}</div>",
-                                unsafe_allow_html=True,
-                            )
+                            st.markdown("<div class=\"as-muted\">Email</div>", unsafe_allow_html=True)
+                            _render_email_html(submission.user_email or client_email)
                         with sub_cols[3]:
-                            org_value = submission.org_type or "-"
-                            st.markdown(
-                                f"<div class=\"as-muted\">Org Type</div><div>{org_value}</div>",
-                                unsafe_allow_html=True,
-                            )
-                        with sub_cols[4]:
-                            status_value = (submission.status or "").strip()
-                            if status_value:
-                                status_label = status_value.capitalize()
-                                status_markup = f"<span class=\"as-pill\">{html.escape(status_label)}</span>"
-                            else:
-                                status_markup = "<span class=\"as-muted\">—</span>"
+                            st.markdown(_detail_markup("Phone", getattr(submission, "phone", None)), unsafe_allow_html=True)
+
+                        sub_detail_cols = st.columns([2.2, 1.2, 1.4, 1.0, 1.6])
+                        with sub_detail_cols[0]:
+                            st.markdown(_detail_markup("Office/Group", submission.office_name), unsafe_allow_html=True)
+                        with sub_detail_cols[1]:
+                            st.markdown(_detail_markup("Org Type", submission.org_type), unsafe_allow_html=True)
+                        with sub_detail_cols[2]:
                             run_id = submission.analysis_run_id or ""
                             run_id_markup = ""
                             if run_id:
@@ -1857,10 +1966,15 @@ def display_client_submissions(perf: AdminPerfTracker):
                                     f"{html.escape(run_id)}</div>"
                                 )
                             st.markdown(
-                                f"<div class=\"as-muted\">Status</div><div>{status_markup}</div>{run_id_markup}",
+                                f"<div class=\"as-muted\">Status</div><div>{_status_markup(submission.status)}</div>{run_id_markup}",
                                 unsafe_allow_html=True,
                             )
-                        with sub_cols[5]:
+                        with sub_detail_cols[3]:
+                            st.markdown(
+                                f"<div class=\"as-muted\">Uploads</div><span class=\"as-pill\">{upload_count}</span>",
+                                unsafe_allow_html=True,
+                            )
+                        with sub_detail_cols[4]:
                             ghl_cid = submission.ghl_cid or ""
                             ghl_url = _ghl_contact_url(ghl_cid)
                             if ghl_cid:
@@ -1877,11 +1991,44 @@ def display_client_submissions(perf: AdminPerfTracker):
                                 f"<div class=\"as-muted\">GHL CID</div><div>{ghl_markup}</div>",
                                 unsafe_allow_html=True,
                             )
-                        with sub_cols[6]:
-                            st.markdown(
-                                f"<div class=\"as-muted\">Uploads</div><span class=\"as-pill\">{upload_count}</span>",
-                                unsafe_allow_html=True,
-                            )
+
+                        with st.expander("Submission audit", expanded=False):
+                            audit_cols = st.columns([1.5, 1.7, 1.4, 1.6])
+                            with audit_cols[0]:
+                                st.markdown(
+                                    _detail_markup(
+                                        "Financial Ack",
+                                        _acknowledgement_value(
+                                            getattr(submission, "financial_only_acknowledgement", None)
+                                        ),
+                                    ),
+                                    unsafe_allow_html=True,
+                                )
+                            with audit_cols[1]:
+                                acknowledgement_ts = getattr(submission, "acknowledgement_timestamp", None)
+                                st.markdown(
+                                    _detail_markup(
+                                        "Ack Timestamp",
+                                        _format_admin_dt(acknowledgement_ts) if acknowledgement_ts else None,
+                                    ),
+                                    unsafe_allow_html=True,
+                                )
+                            with audit_cols[2]:
+                                st.markdown(
+                                    _detail_markup(
+                                        "Ack Version",
+                                        getattr(submission, "acknowledgement_version", None),
+                                    ),
+                                    unsafe_allow_html=True,
+                                )
+                            with audit_cols[3]:
+                                st.markdown(
+                                    _detail_markup(
+                                        "Ack IP",
+                                        getattr(submission, "acknowledgement_ip", None),
+                                    ),
+                                    unsafe_allow_html=True,
+                                )
 
                         uploads_for_submission = uploads_by_submission.get(submission.id, [])
                         with st.expander(
@@ -2114,6 +2261,7 @@ First Name: {submission.first_name}
 Last Name: {submission.last_name}
 Office/Group: {submission.office_name}
 Email: {submission.user_email}
+Phone: {_display_text(getattr(submission, "phone", None))}
 Organization Type: {submission.org_type}
 
 Total Issues Identified: {total_issue_count}
