@@ -862,7 +862,7 @@ def _render_email_html(raw_email: str, height: int = 24) -> None:
                         font-family: 'Raleway', system-ui, -apple-system, sans-serif;
                     }}
                     .as-email {{
-                        color: #A78BFA;
+                        color: #1A2460;
                         font-weight: 600;
                         font-size: 0.95rem;
                         text-decoration: none;
@@ -926,7 +926,7 @@ def _render_admin_css() -> None:
             color: #0A1547 !important;
         }
         .stApp a {
-            color: #7F5AEF !important;
+            color: #02ABE0 !important;
         }
         .title-container h1 {
             color: #0A1547 !important;
@@ -1052,6 +1052,9 @@ def _render_admin_css() -> None:
             font-size: 0.85rem !important;
             font-weight: 600 !important;
         }
+        .client-submissions-scope [data-testid="column"] p {
+            color: #0A1547;
+        }
         .client-submissions-scope .stButton > button {
             padding: 0.15rem 0.3rem !important;
             font-size: 0.75rem !important;
@@ -1071,6 +1074,81 @@ def _render_admin_css() -> None:
         .client-submissions-scope .stInfo p {
             font-size: 1rem !important;
             white-space: normal !important;
+        }
+        .client-submissions-scope [class*="st-key-delete_btn_"] {
+            display: flex;
+            justify-content: center;
+        }
+        .client-submissions-scope [class*="st-key-delete_btn_"] button {
+            background: transparent !important;
+            border: 1px solid transparent !important;
+            border-radius: 999px !important;
+            box-shadow: none !important;
+            color: #5E6684 !important;
+            font-size: 0.9rem !important;
+            height: 2rem !important;
+            line-height: 1 !important;
+            min-height: 2rem !important;
+            min-width: 2rem !important;
+            padding: 0 !important;
+            width: 2rem !important;
+        }
+        .client-submissions-scope [class*="st-key-delete_btn_"] button:hover {
+            background: rgba(2, 171, 224, 0.08) !important;
+            border-color: rgba(2, 171, 224, 0.18) !important;
+            color: #02ABE0 !important;
+        }
+        .as-delete-header {
+            text-align: center;
+            white-space: nowrap;
+        }
+        .as-facts-strip {
+            display: grid;
+            gap: 0.55rem;
+            grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+            margin: 0.65rem 0 1rem 0;
+        }
+        .as-fact {
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 14px;
+            box-shadow: 0 10px 24px rgba(10, 21, 71, 0.05);
+            padding: 0.65rem 0.75rem;
+        }
+        .as-fact-label {
+            color: #5E6684;
+            font-size: 0.68rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            line-height: 1.15;
+            margin-bottom: 0.25rem;
+            text-transform: uppercase;
+        }
+        .as-fact-value {
+            color: #0A1547;
+            font-size: 1.15rem;
+            font-weight: 750;
+            line-height: 1.15;
+        }
+        .as-client-card {
+            padding: 1rem 1.1rem;
+        }
+        .as-client-card .as-email {
+            color: #1A2460 !important;
+            font-size: 1rem;
+        }
+        .as-detail-value {
+            color: #1A2460;
+            font-size: 0.92rem;
+            font-weight: 550;
+            line-height: 1.25;
+            word-break: break-word;
+        }
+        .client-submissions-scope .as-muted {
+            color: #5E6684 !important;
+        }
+        .client-submissions-scope .as-detail-value {
+            color: #1A2460 !important;
         }
         .as-upload-header {
             color: #5E6684;
@@ -1175,7 +1253,7 @@ def _render_admin_css() -> None:
             min-height: 32px !important;
             height: 32px !important;
             border-radius: 6px !important;
-            border: 1px solid rgba(163, 128, 246, 0.60) !important;
+            border: 1px solid rgba(2, 171, 224, 0.40) !important;
             display: inline-flex !important;
             align-items: center !important;
             justify-content: center !important;
@@ -1183,7 +1261,7 @@ def _render_admin_css() -> None:
             cursor: pointer !important;
         }
         .as-uploads-scope [class*="st-key-as_upload_actions_"] button:hover {
-            background: #F7F4FF !important;
+            background: rgba(2, 171, 224, 0.08) !important;
         }
         .as-upload-card {
             background: #FFFFFF;
@@ -1236,11 +1314,11 @@ def _render_admin_css() -> None:
         }
         .as-pdf-action-link {
             background: #FFFFFF;
-            border: 1px solid rgba(163, 128, 246, 0.55);
+            border: 1px solid rgba(2, 171, 224, 0.40);
             color: #0A1547 !important;
         }
         .as-pdf-action-link:hover {
-            background: #F7F4FF;
+            background: rgba(2, 171, 224, 0.08);
         }
         .as-pdf-action-disabled {
             background: #F1F3F8;
@@ -1315,7 +1393,7 @@ def _render_admin_css() -> None:
             font-weight: 600;
         }
         .as-email {
-            color: #7F5AEF;
+            color: #1A2460;
             font-weight: 600;
             font-size: 0.95rem;
             word-break: break-word;
@@ -1326,13 +1404,13 @@ def _render_admin_css() -> None:
         }
         .client-submissions-scope .as-email,
         .client-submissions-scope .as-email * {
-            color: #7F5AEF !important;
+            color: #1A2460 !important;
             text-decoration: none !important;
         }
         .client-submissions-scope a[href^="mailto:"] {
             pointer-events: none !important;
             cursor: default !important;
-            color: #7F5AEF !important;
+            color: #1A2460 !important;
             text-decoration: none !important;
         }
         .as-card details {
@@ -1930,7 +2008,15 @@ def display_client_submissions(perf: AdminPerfTracker):
     def _detail_markup(label: str, value: object) -> str:
         return (
             f"<div class=\"as-muted\">{html.escape(label)}</div>"
-            f"<div>{_display_html(value)}</div>"
+            f"<div class=\"as-detail-value\">{_display_html(value)}</div>"
+        )
+
+    def _fact_markup(label: str, value: object) -> str:
+        return (
+            "<div class=\"as-fact\">"
+            f"<div class=\"as-fact-label\">{html.escape(label)}</div>"
+            f"<div class=\"as-fact-value\">{_display_html(value)}</div>"
+            "</div>"
         )
 
     def _acknowledgement_value(value: object) -> str:
@@ -1968,7 +2054,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                 row[0] for row in [*matching_submission_rows, *matching_user_rows] if row[0]
             }
             if not matching_emails:
-                return db, [], 0, 0, {}, {}, {}
+                return db, [], 0, 0, {}, {}, {}, {}
 
         query = db.query(
             ClientSubmission.user_email.label("email"),
@@ -1986,6 +2072,7 @@ def display_client_submissions(perf: AdminPerfTracker):
         upload_counts = {}
         latest_submissions = {}
         users_by_email = {}
+        status_counts = {}
         if client_emails:
             upload_count_rows = db.query(
                 ClientSubmission.user_email,
@@ -2008,15 +2095,27 @@ def display_client_submissions(perf: AdminPerfTracker):
             for submission in latest_rows:
                 if submission.user_email not in latest_submissions:
                     latest_submissions[submission.user_email] = submission
+                status_key = (submission.status or "").strip().lower()
+                if status_key:
+                    status_counts[status_key] = status_counts.get(status_key, 0) + 1
 
             users = db.query(User).filter(User.email.in_(client_emails)).all()
             users_by_email = {user.email: user for user in users if user.email}
 
         total_uploads = sum(upload_counts.values())
-        return db, clients, total_submissions, total_uploads, upload_counts, latest_submissions, users_by_email
+        return db, clients, total_submissions, total_uploads, upload_counts, latest_submissions, users_by_email, status_counts
 
     try:
-        db, clients, total_submissions, total_uploads, upload_counts, latest_submissions, users_by_email = try_first_db_query(_load_client_rows)
+        (
+            db,
+            clients,
+            total_submissions,
+            total_uploads,
+            upload_counts,
+            latest_submissions,
+            users_by_email,
+            status_counts,
+        ) = try_first_db_query(_load_client_rows)
     except Exception:
         st.error(
             "We couldn't load the dashboard due to a database connection issue. Please try again."
@@ -2037,7 +2136,26 @@ def display_client_submissions(perf: AdminPerfTracker):
             st.write("No client submissions available")
             return
 
-        st.caption(f"{len(clients)} clients | {total_submissions} submissions | {total_uploads} uploads")
+        pending_count = sum(
+            status_counts.get(status_name, 0)
+            for status_name in ("pending", "queued", "processing", "in_progress")
+        )
+        error_count = sum(status_counts.get(status_name, 0) for status_name in ("error", "failed"))
+        fact_items = [
+            ("Clients", len(clients)),
+            ("Submissions", total_submissions),
+            ("Uploads", total_uploads),
+            ("Completed", status_counts.get("completed", 0)),
+            ("Submitted", status_counts.get("submitted", 0)),
+            ("Pending", pending_count),
+            ("Error", error_count),
+        ]
+        st.markdown(
+            "<div class=\"as-facts-strip\">"
+            + "".join(_fact_markup(label, value) for label, value in fact_items)
+            + "</div>",
+            unsafe_allow_html=True,
+        )
 
         for client in clients:
             client_email = client.email or ""
@@ -2048,10 +2166,10 @@ def display_client_submissions(perf: AdminPerfTracker):
             latest_status = getattr(latest_submission, "status", None) if latest_submission else None
             client_upload_count = upload_counts.get(client_email, 0)
 
-            st.markdown('<div class="as-card">', unsafe_allow_html=True)
-            cols = st.columns([3.3, 1.1, 1.1, 2.0, 0.6])
+            st.markdown('<div class="as-card as-client-card">', unsafe_allow_html=True)
+            cols = st.columns([3.2, 1.0, 1.0, 1.8, 0.8])
             with cols[0]:
-                st.markdown("<div class=\"as-muted\">Email</div>", unsafe_allow_html=True)
+                st.markdown("<div class=\"as-muted\">Client</div>", unsafe_allow_html=True)
                 _render_email_html(client_email)
             with cols[1]:
                 st.markdown("<div class=\"as-muted\">Submissions</div>", unsafe_allow_html=True)
@@ -2068,8 +2186,13 @@ def display_client_submissions(perf: AdminPerfTracker):
             with cols[3]:
                 st.markdown(_detail_markup("Latest Submitted", latest_submitted), unsafe_allow_html=True)
             with cols[4]:
-                st.markdown("<div class=\"as-muted\">Delete</div>", unsafe_allow_html=True)
-                if st.button("🗑️", key=f"delete_btn_{client_key}"):
+                st.markdown("<div class=\"as-muted as-delete-header\">Delete</div>", unsafe_allow_html=True)
+                if st.button(
+                    "",
+                    key=f"delete_btn_{client_key}",
+                    help="Delete client",
+                    icon=":material/delete:",
+                ):
                     st.session_state[f"confirm_delete_{client_key}"] = client_email
                     st.rerun()
 
