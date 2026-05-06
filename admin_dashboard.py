@@ -1185,12 +1185,141 @@ def _render_admin_css() -> None:
             white-space: nowrap;
             word-break: keep-all;
         }
+        .as-doc-workflow {
+            display: grid;
+            gap: 0.6rem;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            margin: 0.8rem 0 1rem 0;
+        }
+        .as-doc-workflow-step {
+            align-items: center;
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 14px;
+            box-shadow: 0 10px 24px rgba(10, 21, 71, 0.05);
+            display: flex;
+            gap: 0.6rem;
+            padding: 0.65rem 0.75rem;
+        }
+        .as-doc-workflow-number {
+            align-items: center;
+            background: rgba(163, 128, 246, 0.14);
+            border: 1px solid rgba(163, 128, 246, 0.28);
+            border-radius: 999px;
+            color: #1A2460;
+            display: inline-flex;
+            font-size: 0.75rem;
+            font-weight: 750;
+            height: 1.65rem;
+            justify-content: center;
+            min-width: 1.65rem;
+            width: 1.65rem;
+        }
+        .as-doc-workflow-title {
+            color: #1A2460;
+            font-size: 0.86rem;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+        .as-doc-step {
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 16px;
+            box-shadow: 0 12px 28px rgba(10, 21, 71, 0.05);
+            margin: 1rem 0 0.75rem 0;
+            padding: 0.85rem 1rem;
+        }
+        .as-doc-step-kicker {
+            color: #02ABE0;
+            font-size: 0.68rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            margin-bottom: 0.18rem;
+            text-transform: uppercase;
+        }
+        .as-doc-step-title {
+            color: #0A1547;
+            font-size: 1.05rem;
+            font-weight: 760;
+            line-height: 1.2;
+            margin-bottom: 0.2rem;
+        }
+        .as-doc-step-copy {
+            color: #5E6684;
+            font-size: 0.9rem;
+            line-height: 1.35;
+        }
+        .as-doc-section-title {
+            color: #1A2460;
+            font-size: 0.95rem;
+            font-weight: 750;
+            margin: 0.65rem 0 0.4rem 0;
+        }
+        .as-doc-client-card {
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 14px;
+            box-shadow: 0 10px 24px rgba(10, 21, 71, 0.05);
+            margin: 0.75rem 0;
+            padding: 0.8rem 0.9rem;
+        }
+        .as-doc-client-title {
+            color: #0A1547;
+            font-size: 0.95rem;
+            font-weight: 750;
+            margin-bottom: 0.55rem;
+        }
+        .as-doc-client-grid {
+            display: grid;
+            gap: 0.55rem;
+            grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+        }
+        .as-doc-detail-label {
+            color: #5E6684;
+            font-size: 0.66rem;
+            font-weight: 750;
+            letter-spacing: 0.07em;
+            margin-bottom: 0.15rem;
+            text-transform: uppercase;
+        }
+        .as-doc-detail-value {
+            color: #1A2460;
+            font-size: 0.9rem;
+            font-weight: 600;
+            line-height: 1.25;
+            word-break: break-word;
+        }
+        .as-doc-ready {
+            background: rgba(2, 217, 157, 0.10);
+            border: 1px solid rgba(2, 217, 157, 0.24);
+            border-radius: 12px;
+            color: #1A2460;
+            font-size: 0.9rem;
+            font-weight: 650;
+            margin: 0.55rem 0;
+            padding: 0.6rem 0.75rem;
+        }
+        .as-doc-guidance {
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-left: 3px solid #A380F6;
+            border-radius: 12px;
+            color: #1A2460;
+            font-size: 0.9rem;
+            margin: 0.55rem 0;
+            padding: 0.65rem 0.8rem;
+        }
         .as-admin-upload-label {
             align-items: center;
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-left: 3px solid #02ABE0;
+            border-radius: 12px;
             color: #1A2460;
             display: flex;
             gap: 0.55rem;
-            margin: 0.95rem 0 0.45rem 0;
+            margin: 0.75rem 0 0.45rem 0;
+            padding: 0.62rem 0.75rem;
         }
         .as-admin-upload-marker {
             background: #02ABE0;
@@ -2823,23 +2952,73 @@ def display_document_analysis(perf: AdminPerfTracker):
             label_parts.append(candidate["phone"])
         return " | ".join(part for part in label_parts if part)
 
+    def _render_document_workflow() -> None:
+        st.markdown(
+            """
+            <div class="as-doc-workflow">
+                <div class="as-doc-workflow-step">
+                    <span class="as-doc-workflow-number">1</span>
+                    <span class="as-doc-workflow-title">Select or create client</span>
+                </div>
+                <div class="as-doc-workflow-step">
+                    <span class="as-doc-workflow-number">2</span>
+                    <span class="as-doc-workflow-title">Upload files</span>
+                </div>
+                <div class="as-doc-workflow-step">
+                    <span class="as-doc-workflow-number">3</span>
+                    <span class="as-doc-workflow-title">Run analysis</span>
+                </div>
+                <div class="as-doc-workflow-step">
+                    <span class="as-doc-workflow-number">4</span>
+                    <span class="as-doc-workflow-title">Review outputs</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    def _render_doc_step(number: str, title: str, copy: str) -> None:
+        st.markdown(
+            f"""
+            <div class="as-doc-step">
+                <div class="as-doc-step-kicker">Step {html.escape(number)}</div>
+                <div class="as-doc-step-title">{html.escape(title)}</div>
+                <div class="as-doc-step-copy">{html.escape(copy)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    def _doc_detail_markup(label: str, value: object) -> str:
+        safe_value = html.escape(_clean_client_value(value) or "—")
+        return (
+            "<div>"
+            f"<div class=\"as-doc-detail-label\">{html.escape(label)}</div>"
+            f"<div class=\"as-doc-detail-value\">{safe_value}</div>"
+            "</div>"
+        )
+
     def _render_resolved_client_details(client: dict) -> None:
-        st.markdown("**Resolved Client Details**")
-        detail_cols = st.columns([1.5, 1.8, 2.1, 1.2, 1.4])
-        with detail_cols[0]:
-            st.markdown(f"**Name:** {html.escape((client.get('first_name', '') + ' ' + client.get('last_name', '')).strip() or '—')}")
-        with detail_cols[1]:
-            st.markdown(f"**Email:** {html.escape(client.get('email') or '—')}")
-        with detail_cols[2]:
-            st.markdown(f"**Office/Group:** {html.escape(client.get('office_name') or '—')}")
-        with detail_cols[3]:
-            st.markdown(f"**Type:** {html.escape(client.get('org_type') or '—')}")
-        with detail_cols[4]:
-            st.markdown(f"**Phone:** {html.escape(client.get('phone') or '—')}")
+        name = f"{client.get('first_name', '')} {client.get('last_name', '')}".strip()
+        st.markdown(
+            "<div class=\"as-doc-client-card\">"
+            "<div class=\"as-doc-client-title\">Resolved client details</div>"
+            "<div class=\"as-doc-client-grid\">"
+            f"{_doc_detail_markup('Name', name)}"
+            f"{_doc_detail_markup('Email', client.get('email'))}"
+            f"{_doc_detail_markup('Office/Group', client.get('office_name'))}"
+            f"{_doc_detail_markup('Type', client.get('org_type'))}"
+            f"{_doc_detail_markup('Phone', client.get('phone'))}"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
 
     def _render_admin_analysis_upload_controls():
-        st.markdown("---")
-        st.markdown("**Upload Documents for Analysis**")
+        _render_doc_step(
+            "2",
+            "Upload files",
+            "Upload one or more documents. Controls stay visible while client details are being completed.",
+        )
 
         st.markdown(
             """
@@ -2899,7 +3078,12 @@ def display_document_analysis(perf: AdminPerfTracker):
 
     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
 
-    st.markdown("**Client**")
+    _render_document_workflow()
+    _render_doc_step(
+        "1",
+        "Select or create client",
+        "Choose an existing client record or enter a new client before running the admin analysis.",
+    )
     client_mode = st.radio(
         "Client mode",
         ["Existing client", "New client"],
@@ -2946,7 +3130,7 @@ def display_document_analysis(perf: AdminPerfTracker):
         else:
             st.warning("No existing clients found. Search again or switch to New client.")
     else:
-        st.markdown("**New Client Details**")
+        st.markdown('<div class="as-doc-section-title">New client details</div>', unsafe_allow_html=True)
         first_name = st.text_input("Client First Name", key="admin_first_name")
         last_name = st.text_input("Client Last Name", key="admin_last_name")
         office_name = st.text_input("Office/Group Name", key="admin_office_name")
@@ -2968,18 +3152,39 @@ def display_document_analysis(perf: AdminPerfTracker):
             st.warning("Please complete the client information before running analysis.")
         uploaded_files, uploaded_count = _render_admin_analysis_upload_controls()
         if uploaded_count > 0:
-            st.markdown(f"**Documents ready for analysis:** {uploaded_count}")
+            st.markdown(
+                f"<div class=\"as-doc-ready\">Documents ready for analysis: {uploaded_count}</div>",
+                unsafe_allow_html=True,
+            )
+        _render_doc_step(
+            "3",
+            "Run analysis",
+            "Analyze Documents is available after client details are complete and at least one file is uploaded.",
+        )
         st.button(
             "Analyze Documents",
             type="primary",
             disabled=True,
             key="admin_analyze_btn",
         )
+        _render_doc_step(
+            "4",
+            "Review outputs",
+            "Completed runs are saved to Client Submissions and can be used for summary, analysis, and PDF workflows.",
+        )
     else:
         uploaded_files, uploaded_count = _render_admin_analysis_upload_controls()
 
+        _render_doc_step(
+            "3",
+            "Run analysis",
+            "Start processing when the correct client is selected and at least one file is ready.",
+        )
         if uploaded_count > 0:
-            st.markdown(f"**Documents ready for analysis:** {uploaded_count}")
+            st.markdown(
+                f"<div class=\"as-doc-ready\">Documents ready for analysis: {uploaded_count}</div>",
+                unsafe_allow_html=True,
+            )
 
             progress_bar = None
             progress_text = None
@@ -3463,13 +3668,22 @@ def display_document_analysis(perf: AdminPerfTracker):
                     logging.error("[analysis] error run_id=%s source=admin: %s", run_id, str(exc))
                     st.rerun()
         else:
-            st.info("Upload a Financial, AR, or Insurance Claims document to begin analysis.")
+            st.markdown(
+                "<div class=\"as-doc-guidance\">Upload at least one document to enable analysis for this client.</div>",
+                unsafe_allow_html=True,
+            )
             st.button(
                 "Analyze Documents",
                 type="primary",
                 disabled=True,
                 key="admin_analyze_btn",
             )
+
+        _render_doc_step(
+            "4",
+            "Review outputs",
+            "Completed runs are saved to Client Submissions and can be used for summary, analysis, and PDF workflows.",
+        )
 
 
 def display_pdf_generator(perf: AdminPerfTracker):
