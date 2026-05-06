@@ -1309,6 +1309,117 @@ def _render_admin_css() -> None:
             margin: 0.55rem 0;
             padding: 0.65rem 0.8rem;
         }
+        .as-secure-workflow {
+            display: grid;
+            gap: 0.6rem;
+            grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+            margin: 0.8rem 0 1rem 0;
+        }
+        .as-secure-workflow-step {
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 14px;
+            box-shadow: 0 10px 24px rgba(10, 21, 71, 0.05);
+            padding: 0.75rem 0.85rem;
+        }
+        .as-secure-workflow-kicker {
+            color: #02ABE0;
+            font-size: 0.65rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            margin-bottom: 0.25rem;
+            text-transform: uppercase;
+        }
+        .as-secure-workflow-title {
+            color: #1A2460;
+            font-size: 0.9rem;
+            font-weight: 750;
+            line-height: 1.22;
+        }
+        .as-secure-card,
+        .as-secure-filter-card,
+        .as-secure-upload-card {
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 16px;
+            box-shadow: 0 12px 28px rgba(10, 21, 71, 0.05);
+            margin: 0.85rem 0;
+            padding: 0.9rem 1rem;
+        }
+        .as-secure-title {
+            color: #0A1547;
+            font-size: 1.02rem;
+            font-weight: 760;
+            line-height: 1.2;
+            margin-bottom: 0.25rem;
+        }
+        .as-secure-copy {
+            color: #5E6684;
+            font-size: 0.9rem;
+            line-height: 1.35;
+        }
+        .as-secure-success {
+            background: rgba(2, 217, 157, 0.10);
+            border: 1px solid rgba(2, 217, 157, 0.24);
+            border-radius: 12px;
+            color: #1A2460;
+            margin: 0.8rem 0;
+            padding: 0.7rem 0.85rem;
+        }
+        .as-secure-success-title {
+            color: #0A1547;
+            font-size: 0.95rem;
+            font-weight: 750;
+            margin-bottom: 0.15rem;
+        }
+        .as-secure-summary {
+            display: grid;
+            gap: 0.5rem;
+            grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+            margin: 0.7rem 0 0.9rem 0;
+        }
+        .as-secure-summary-item {
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 12px;
+            padding: 0.55rem 0.65rem;
+        }
+        .as-secure-label {
+            color: #5E6684;
+            font-size: 0.64rem;
+            font-weight: 800;
+            letter-spacing: 0.07em;
+            margin-bottom: 0.15rem;
+            text-transform: uppercase;
+        }
+        .as-secure-value {
+            color: #1A2460;
+            font-size: 0.9rem;
+            font-weight: 650;
+            line-height: 1.25;
+            word-break: break-word;
+        }
+        .as-secure-upload-title {
+            color: #0A1547;
+            font-size: 0.98rem;
+            font-weight: 760;
+            line-height: 1.25;
+            margin-bottom: 0.55rem;
+            word-break: break-word;
+        }
+        .as-secure-upload-grid {
+            display: grid;
+            gap: 0.55rem;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        }
+        .as-secure-link {
+            color: #02ABE0 !important;
+            font-weight: 700;
+            text-decoration: none !important;
+        }
+        .as-secure-muted {
+            color: #5E6684;
+        }
         .as-admin-upload-label {
             align-items: center;
             background: #FFFFFF;
@@ -2016,7 +2127,37 @@ def display_upload_requests(perf: AdminPerfTracker):
         "<p>Send a single-use magic link for clients to upload PHI securely.</p>",
         unsafe_allow_html=True,
     )
+    st.markdown(
+        """
+        <div class="as-secure-workflow">
+            <div class="as-secure-workflow-step">
+                <div class="as-secure-workflow-kicker">Step 1</div>
+                <div class="as-secure-workflow-title">Send a secure upload request</div>
+            </div>
+            <div class="as-secure-workflow-step">
+                <div class="as-secure-workflow-kicker">Step 2</div>
+                <div class="as-secure-workflow-title">Client uploads files through the secure portal</div>
+            </div>
+            <div class="as-secure-workflow-step">
+                <div class="as-secure-workflow-kicker">Step 3</div>
+                <div class="as-secure-workflow-title">Admin reviews completed uploads</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
+    st.markdown(
+        """
+        <div class="as-secure-card">
+            <div class="as-secure-title">Create secure upload link</div>
+            <div class="as-secure-copy">
+                Send a single-use link for team-assisted AR, claims, or other HIPAA-sensitive document uploads.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     with st.form("upload_request_form"):
         client_email = st.text_input("Client email")
         submit_request = st.form_submit_button("Send Magic Link")
@@ -2025,16 +2166,24 @@ def display_upload_requests(perf: AdminPerfTracker):
         try:
             perf.mark_first_db_query()
             result = create_upload_request(client_email)
-            st.success("Magic link sent successfully.")
-            st.markdown("**Upload Request Details**")
-            st.write(f"Request ID: {result.get('request_id')}")
-            st.write(f"Expires in {_token_ttl_minutes()} minutes")
+            ttl_minutes = _token_ttl_minutes()
+            st.markdown(
+                f"""
+                <div class="as-secure-success">
+                    <div class="as-secure-success-title">Secure upload link sent</div>
+                    <div>Expires in {ttl_minutes} minutes.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            with st.expander("Technical details", expanded=False):
+                st.write(f"Request ID: {result.get('request_id')}")
+                st.write(f"Expires in {ttl_minutes} minutes")
         except PortalError as exc:
             st.error(f"Unable to create upload request: {exc.message}")
         except Exception as exc:
             st.error(f"Unexpected error: {exc}")
 
-    st.divider()
     display_uploads_inbox(perf)
 
 
@@ -2045,12 +2194,24 @@ def display_uploads_inbox(perf: AdminPerfTracker):
         unsafe_allow_html=True,
     )
 
-    completed_only = st.checkbox("Completed only", value=True, key="uploads_inbox_completed_only")
-    user_email_filter = st.text_input(
-        "Filter by user email (contains)",
-        placeholder="name@example.com",
-        key="uploads_inbox_email_filter",
-    ).strip()
+    st.markdown(
+        """
+        <div class="as-secure-filter-card">
+            <div class="as-secure-title">Inbox filters</div>
+            <div class="as-secure-copy">Narrow the secure upload list without exposing storage details in the main view.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    filter_cols = st.columns([1.1, 2.4])
+    with filter_cols[0]:
+        completed_only = st.checkbox("Completed only", value=True, key="uploads_inbox_completed_only")
+    with filter_cols[1]:
+        user_email_filter = st.text_input(
+            "Filter by user email (contains)",
+            placeholder="name@example.com",
+            key="uploads_inbox_email_filter",
+        ).strip()
 
     date_cols = st.columns(2)
     with date_cols[0]:
@@ -2078,6 +2239,32 @@ def display_uploads_inbox(perf: AdminPerfTracker):
         start_date = None
         end_date = None
 
+    def _secure_display(value: object) -> str:
+        text_value = str(value or "").strip()
+        return text_value if text_value else "—"
+
+    def _secure_html(value: object) -> str:
+        return html.escape(_secure_display(value))
+
+    def _format_file_size(byte_size: object) -> str:
+        try:
+            size = int(byte_size)
+        except (TypeError, ValueError):
+            return "—"
+        if size < 1024:
+            return f"{size} B"
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size / (1024 * 1024):.1f} MB"
+
+    def _summary_item(label: str, value: object) -> str:
+        return (
+            "<div class=\"as-secure-summary-item\">"
+            f"<div class=\"as-secure-label\">{html.escape(label)}</div>"
+            f"<div class=\"as-secure-value\">{_secure_html(value)}</div>"
+            "</div>"
+        )
+
     perf.mark_first_db_query()
     db = SessionLocal()
     try:
@@ -2098,9 +2285,6 @@ def display_uploads_inbox(perf: AdminPerfTracker):
             .limit(50)
             .all()
         )
-        if not rows:
-            st.info("No secure uploads recorded yet.")
-            return
 
         items = []
         for row in rows:
@@ -2132,13 +2316,70 @@ def display_uploads_inbox(perf: AdminPerfTracker):
                 }
             )
 
-        st.dataframe(
-            items,
-            width="stretch",
-            column_config={
-                "console_url": st.column_config.LinkColumn("Console link", display_text="View file"),
-            },
+        if start_date and end_date:
+            date_filter_label = f"{start_date.isoformat()} to {end_date.isoformat()}"
+        elif start_date:
+            date_filter_label = f"From {start_date.isoformat()}"
+        elif end_date:
+            date_filter_label = f"Through {end_date.isoformat()}"
+        else:
+            date_filter_label = "None"
+
+        st.markdown(
+            "<div class=\"as-secure-summary\">"
+            + _summary_item("Displayed uploads", len(items))
+            + _summary_item("Completed only", "Yes" if completed_only else "No")
+            + _summary_item("Email filter", user_email_filter or "None")
+            + _summary_item("Date filter", date_filter_label)
+            + "</div>",
+            unsafe_allow_html=True,
         )
+        if not rows:
+            st.info("No secure uploads recorded yet.")
+            return
+
+        for item in items:
+            console_url = item.get("console_url") or ""
+            console_markup = (
+                f"<a class=\"as-secure-link\" href=\"{html.escape(console_url, quote=True)}\" "
+                "target=\"_blank\" rel=\"noopener noreferrer\">Open in GCS</a>"
+                if console_url
+                else "<span class=\"as-secure-muted\">Unavailable</span>"
+            )
+            st.markdown(
+                "<div class=\"as-secure-upload-card\">"
+                f"<div class=\"as-secure-upload-title\">{_secure_html(item.get('original_filename'))}</div>"
+                "<div class=\"as-secure-upload-grid\">"
+                f"{_summary_item('Client email', item.get('user_email'))}"
+                f"{_summary_item('Completed', item.get('completed_at'))}"
+                f"{_summary_item('Content type', item.get('content_type'))}"
+                f"{_summary_item('File size', _format_file_size(item.get('byte_size')))}"
+                "<div class=\"as-secure-summary-item\">"
+                "<div class=\"as-secure-label\">GCS console</div>"
+                f"<div class=\"as-secure-value\">{console_markup}</div>"
+                "</div>"
+                "</div></div>",
+                unsafe_allow_html=True,
+            )
+            with st.expander(f"Technical details for {_secure_display(item.get('original_filename'))}", expanded=False):
+                tech_cols = st.columns(2)
+                with tech_cols[0]:
+                    st.write(f"Request ID: {_secure_display(item.get('request_id'))}")
+                    st.write(f"Session ID: {_secure_display(item.get('session_id'))}")
+                    st.write(f"User ID: {_secure_display(item.get('user_id'))}")
+                with tech_cols[1]:
+                    st.write(f"GCS bucket: {_secure_display(item.get('gcs_bucket'))}")
+                    st.write(f"Object name: {_secure_display(item.get('object_name'))}")
+                    st.write(f"GS path: {_secure_display(item.get('gs_path'))}")
+
+        with st.expander("Advanced table", expanded=False):
+            st.dataframe(
+                items,
+                width="stretch",
+                column_config={
+                    "console_url": st.column_config.LinkColumn("Console link", display_text="View file"),
+                },
+            )
     except Exception:
         st.info("Secure uploads table is not available yet. Complete database setup to view uploads.")
     finally:
