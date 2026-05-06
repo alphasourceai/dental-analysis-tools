@@ -44,6 +44,11 @@ rate_limit_hits: Dict[str, list[float]] = {}
 rate_limit_lock = Lock()
 
 
+@app.get("/")
+def root() -> Dict[str, Any]:
+    return {"ok": True, "service": "public-analyzer-api"}
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"ok": True, "service": "public-analyzer-api"}
@@ -81,6 +86,7 @@ async def create_public_analyzer_submission(
 ) -> JSONResponse:
     if (companyWebsite or "").strip():
         job_id = _create_job(status="completed")
+        logger.info("Public analyzer job completed job_id=%s", job_id)
         return JSONResponse({"ok": True, "job_id": job_id, "status": "completed"})
 
     client_ip = _client_ip(request)
@@ -104,6 +110,7 @@ async def create_public_analyzer_submission(
         await file.close()
 
     job_id = _create_job(status="queued")
+    logger.info("Public analyzer job queued job_id=%s", job_id)
     background_tasks.add_task(
         _process_submission_job,
         job_id=job_id,
@@ -149,6 +156,7 @@ def _process_submission_job(
     cid: Optional[str],
     source_path: Optional[str],
 ) -> None:
+    logger.info("Public analyzer job started job_id=%s", job_id)
     _update_job(job_id, status="processing")
     try:
         from public_analyzer_service import submit_public_analyzer_submission
@@ -175,8 +183,12 @@ def _process_submission_job(
             error_code=result.get("error_code"),
             error_message=result.get("error_message"),
         )
+        if completed_status == "completed":
+            logger.info("Public analyzer job completed job_id=%s", job_id)
+        else:
+            logger.warning("Public analyzer job failed job_id=%s", job_id)
     except Exception:
-        logger.exception("Public analyzer job failed job_id=%s", job_id)
+        logger.error("Public analyzer job failed job_id=%s", job_id)
         _update_job(
             job_id,
             status="error",
