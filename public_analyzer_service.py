@@ -5,6 +5,7 @@ import logging
 import mimetypes
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from io import BytesIO
@@ -36,6 +37,13 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = {".xlsx", ".csv", ".pdf"}
 EMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 PUBLIC_TOOL_NAME = "Financial Analyzer"
+MAX_PROVIDER_RETRIES = 2
+PROVIDER_RETRY_BACKOFF_SECONDS = 0.75
+TRANSIENT_PROVIDER_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+PROVIDER_UNAVAILABLE_MESSAGE = (
+    "Analysis unavailable from this model due to temporary provider capacity. "
+    "Other model results were processed."
+)
 
 
 class PublicAnalyzerError(Exception):
@@ -308,43 +316,128 @@ def _extract_data_input(file_bytes: bytes, filename: str) -> str:
 
 
 def _run_public_analysis(data_input: str) -> Dict[str, Any]:
-    openai_result = openai_analysis(data_input)
-    xai_result = xai_analysis(data_input)
-    anthropic_result = anthropic_analysis(data_input)
-
     model_labels = get_model_labels()
-    openai_issues = parse_issues_from_analysis(openai_result, model_labels["openai"])
-    xai_issues = parse_issues_from_analysis(xai_result, model_labels["xai"])
-    anthropic_issues = parse_issues_from_analysis(anthropic_result, model_labels["anthropic"])
+    provider_specs = [
+        ("openai", "OpenAI Analysis", "openai", openai_analysis),
+        ("xai", "xAI Analysis", "xai", xai_analysis),
+        ("anthropic", "AnthropicAI Analysis", "anthropic", anthropic_analysis),
+    ]
+    raw_analyses: Dict[str, str] = {}
+    parsed_issues: Dict[str, Any] = {}
+    parsed_trends: Dict[str, Any] = {}
+    successful_provider_count = 0
 
-    openai_trends = parse_trends_from_analysis(openai_result, model_labels["openai"])
-    xai_trends = parse_trends_from_analysis(xai_result, model_labels["xai"])
-    anthropic_trends = parse_trends_from_analysis(anthropic_result, model_labels["anthropic"])
+    for provider_name, result_key, label_key, analysis_func in provider_specs:
+        analysis_text, succeeded = _run_provider_analysis_with_retry(
+            provider_name=provider_name,
+            analysis_func=analysis_func,
+            data_input=data_input,
+        )
+        raw_analyses[result_key] = analysis_text
+        parsed_issues[label_key] = parse_issues_from_analysis(analysis_text, model_labels[label_key])
+        parsed_trends[label_key] = parse_trends_from_analysis(analysis_text, model_labels[label_key])
+        if succeeded:
+            successful_provider_count += 1
 
-    all_issues = openai_issues + xai_issues + anthropic_issues
-    all_trends = openai_trends + xai_trends + anthropic_trends
+    if successful_provider_count == 0:
+        raise PublicAnalyzerError(
+            "provider_unavailable",
+            "The analyzer providers are temporarily unavailable. Please try again later.",
+        )
+
+    all_issues = parsed_issues["openai"] + parsed_issues["xai"] + parsed_issues["anthropic"]
+    all_trends = parsed_trends["openai"] + parsed_trends["xai"] + parsed_trends["anthropic"]
     deduplicated_issues = deduplicate_issues(all_issues)
 
     return {
-        "raw_analyses": {
-            "OpenAI Analysis": openai_result,
-            "xAI Analysis": xai_result,
-            "AnthropicAI Analysis": anthropic_result,
-        },
-        "parsed_issues": {
-            "openai": openai_issues,
-            "xai": xai_issues,
-            "anthropic": anthropic_issues,
-        },
-        "parsed_trends": {
-            "openai": openai_trends,
-            "xai": xai_trends,
-            "anthropic": anthropic_trends,
-        },
+        "raw_analyses": raw_analyses,
+        "parsed_issues": parsed_issues,
+        "parsed_trends": parsed_trends,
         "all_trends": all_trends,
         "deduplicated_issues": deduplicated_issues,
         "total_issue_count": len(deduplicated_issues),
     }
+
+
+def _run_provider_analysis_with_retry(
+    *,
+    provider_name: str,
+    analysis_func: Any,
+    data_input: str,
+) -> tuple[str, bool]:
+    for attempt in range(1, MAX_PROVIDER_RETRIES + 2):
+        try:
+            analysis_text = analysis_func(data_input)
+            if not isinstance(analysis_text, str) or not analysis_text.strip():
+                raise ValueError("empty_provider_response")
+            if attempt > 1:
+                logger.info(
+                    "[analysis] provider recovered provider=%s attempt=%s",
+                    provider_name,
+                    attempt,
+                )
+            return analysis_text, True
+        except Exception as exc:
+            transient = _is_transient_provider_error(exc)
+            logger.warning(
+                "[analysis] provider failed provider=%s attempt=%s transient=%s error_type=%s",
+                provider_name,
+                attempt,
+                transient,
+                _safe_provider_error_type(exc),
+            )
+            if not transient or attempt > MAX_PROVIDER_RETRIES:
+                break
+            time.sleep(PROVIDER_RETRY_BACKOFF_SECONDS * attempt)
+
+    logger.warning("[analysis] provider unavailable provider=%s", provider_name)
+    return PROVIDER_UNAVAILABLE_MESSAGE, False
+
+
+def _is_transient_provider_error(exc: Exception) -> bool:
+    status_code = _provider_status_code(exc)
+    if status_code in TRANSIENT_PROVIDER_STATUS_CODES:
+        return True
+
+    safe_text = f"{type(exc).__name__} {str(exc)}".lower()
+    transient_markers = (
+        "rate limit",
+        "rate_limit",
+        "overload",
+        "overloaded",
+        "temporarily unavailable",
+        "temporary provider capacity",
+        "timeout",
+        "timed out",
+        "server error",
+        "internal server",
+        "internal_server_error",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "connection reset",
+    )
+    return any(marker in safe_text for marker in transient_markers)
+
+
+def _provider_status_code(exc: Exception) -> Optional[int]:
+    for attr in ("status_code", "status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _safe_provider_error_type(exc: Exception) -> str:
+    status_code = _provider_status_code(exc)
+    if status_code is not None:
+        return f"{type(exc).__name__}:{status_code}"
+    return type(exc).__name__
 
 
 def _upsert_user(user_info: Dict[str, Any]) -> None:
