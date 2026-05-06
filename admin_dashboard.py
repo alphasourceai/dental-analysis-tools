@@ -1684,10 +1684,23 @@ def display_uploads_inbox(perf: AdminPerfTracker):
 def display_client_submissions(perf: AdminPerfTracker):
     st.markdown("<h3 style='margin-top: 1.5rem;'>Client Submissions</h3>", unsafe_allow_html=True)
     st.markdown('<div class="client-submissions-scope">', unsafe_allow_html=True)
-    search_term = st.text_input(
-        "Search clients",
-        placeholder="Search by email, name, office/group, or phone",
-    )
+    if "client_submissions_search" not in st.session_state:
+        st.session_state.client_submissions_search = ""
+    search_cols = st.columns([4, 0.7])
+    with search_cols[1]:
+        if st.button(
+            "Clear",
+            key="client_submissions_search_clear",
+            disabled=not bool((st.session_state.get("client_submissions_search") or "").strip()),
+        ):
+            st.session_state.client_submissions_search = ""
+            st.rerun()
+    with search_cols[0]:
+        search_term = st.text_input(
+            "Search clients",
+            placeholder="Search by email, name, office/group, or phone",
+            key="client_submissions_search",
+        )
     normalized_search = search_term.strip().lower() if search_term else ""
 
     def _display_text(value: object) -> str:
@@ -2394,28 +2407,116 @@ def display_document_analysis(perf: AdminPerfTracker):
     )
     import pandas as pd
 
-    with st.form("admin_analysis_form"):
-        st.markdown("**Client Information**")
-        first_name = st.text_input("Client First Name", key="admin_first_name")
-        last_name = st.text_input("Client Last Name", key="admin_last_name")
-        office_name = st.text_input("Office/Group Name", key="admin_office_name")
-        email = st.text_input("Client Email Address", placeholder="client@example.com", key="admin_email")
-        org_type = st.selectbox("Type", ["Location", "Group"], key="admin_org_type")
-        ghl_cid = st.text_input("GHL CID (optional)", key="admin_ghl_cid")
-        submit_info = st.form_submit_button("Save Client Info")
+    def _clean_client_value(value: object) -> str:
+        return str(value or "").strip()
 
-    import re
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    valid_email = re.match(email_pattern, email) if email else False
+    def _load_admin_client_options(search_value: str) -> list[dict]:
+        search_value = _clean_client_value(search_value)
+        db = SessionLocal()
+        try:
+            candidates = {}
 
-    client_info_complete = all([first_name, last_name, office_name, email, org_type]) and valid_email
+            def _ensure_candidate(email_value: object) -> dict | None:
+                normalized = normalize_email(str(email_value or ""))
+                if not normalized:
+                    return None
+                if normalized not in candidates:
+                    candidates[normalized] = {
+                        "email": normalized,
+                        "first_name": "",
+                        "last_name": "",
+                        "office_name": "",
+                        "org_type": "",
+                        "phone": "",
+                        "ghl_cid": "",
+                        "latest_submitted_at": None,
+                    }
+                return candidates[normalized]
 
-    if email and not valid_email:
-        st.error("Please enter a valid email address")
+            submission_query = db.query(ClientSubmission)
+            user_query = db.query(User)
+            if search_value:
+                search_like = f"%{search_value}%"
+                submission_query = submission_query.filter(
+                    or_(
+                        ClientSubmission.user_email.ilike(search_like),
+                        ClientSubmission.first_name.ilike(search_like),
+                        ClientSubmission.last_name.ilike(search_like),
+                        ClientSubmission.office_name.ilike(search_like),
+                        ClientSubmission.phone.ilike(search_like),
+                    )
+                )
+                user_query = user_query.filter(
+                    or_(
+                        User.email.ilike(search_like),
+                        User.first_name.ilike(search_like),
+                        User.last_name.ilike(search_like),
+                        User.office_name.ilike(search_like),
+                        User.phone.ilike(search_like),
+                    )
+                )
 
-    if not client_info_complete:
-        st.warning("Please complete the client information above before uploading documents.")
-    else:
+            submissions = submission_query.order_by(ClientSubmission.submitted_at.desc()).limit(75).all()
+            for submission in submissions:
+                candidate = _ensure_candidate(submission.user_email)
+                if not candidate:
+                    continue
+                if not candidate["latest_submitted_at"]:
+                    candidate["latest_submitted_at"] = submission.submitted_at
+                for field in ("first_name", "last_name", "office_name", "org_type", "phone", "ghl_cid"):
+                    value = _clean_client_value(getattr(submission, field, ""))
+                    if value and not candidate[field]:
+                        candidate[field] = value
+
+            users = user_query.order_by(User.email.asc()).limit(75).all()
+            for user in users:
+                candidate = _ensure_candidate(user.email)
+                if not candidate:
+                    continue
+                for field in ("first_name", "last_name", "office_name", "org_type", "phone"):
+                    value = _clean_client_value(getattr(user, field, ""))
+                    if value and not candidate[field]:
+                        candidate[field] = value
+
+            def _sort_key(candidate: dict) -> float:
+                submitted_at = candidate.get("latest_submitted_at")
+                if submitted_at and hasattr(submitted_at, "timestamp"):
+                    return submitted_at.timestamp()
+                return 0.0
+
+            return sorted(candidates.values(), key=_sort_key, reverse=True)[:75]
+        except Exception as exc:
+            logging.error("Failed to load admin client options: %s", str(exc))
+            return []
+        finally:
+            db.close()
+
+    def _client_option_label(candidate: dict) -> str:
+        name = f"{candidate.get('first_name', '')} {candidate.get('last_name', '')}".strip()
+        label_parts = [candidate.get("email", "")]
+        if name:
+            label_parts.append(name)
+        if candidate.get("office_name"):
+            label_parts.append(candidate["office_name"])
+        if candidate.get("phone"):
+            label_parts.append(candidate["phone"])
+        return " | ".join(part for part in label_parts if part)
+
+    def _render_resolved_client_details(client: dict) -> None:
+        st.markdown("**Resolved Client Details**")
+        detail_cols = st.columns([1.5, 1.8, 2.1, 1.2, 1.4])
+        with detail_cols[0]:
+            st.markdown(f"**Name:** {html.escape((client.get('first_name', '') + ' ' + client.get('last_name', '')).strip() or '—')}")
+        with detail_cols[1]:
+            st.markdown(f"**Email:** {html.escape(client.get('email') or '—')}")
+        with detail_cols[2]:
+            st.markdown(f"**Office/Group:** {html.escape(client.get('office_name') or '—')}")
+        with detail_cols[3]:
+            st.markdown(f"**Type:** {html.escape(client.get('org_type') or '—')}")
+        with detail_cols[4]:
+            st.markdown(f"**Phone:** {html.escape(client.get('phone') or '—')}")
+
+    def _render_admin_analysis_upload_controls():
         st.markdown("---")
         st.markdown("**Upload Documents for Analysis**")
 
@@ -2467,13 +2568,94 @@ def display_document_analysis(perf: AdminPerfTracker):
             disabled=st.session_state.admin_analyzing,
         )
 
-        st.markdown("---")
         uploaded_files = {
             "Financial Analyzer": financial_file,
             "AR Analyzer": ar_file,
             "Insurance Claim Analyzer": claim_file,
         }
         uploaded_count = sum(1 for f in uploaded_files.values() if f is not None)
+        return uploaded_files, uploaded_count
+
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+    st.markdown("**Client**")
+    client_mode = st.radio(
+        "Client mode",
+        ["Existing client", "New client"],
+        horizontal=True,
+        key="admin_analysis_client_mode",
+    )
+
+    first_name = ""
+    last_name = ""
+    office_name = ""
+    email = ""
+    org_type = ""
+    phone = ""
+    ghl_cid = ""
+
+    if client_mode == "Existing client":
+        existing_search = st.text_input(
+            "Search existing clients",
+            placeholder="Search by email, name, office/group, or phone",
+            key="admin_existing_client_search",
+        )
+        client_options = _load_admin_client_options(existing_search)
+        client_options_by_email = {client["email"]: client for client in client_options}
+        option_emails = [client["email"] for client in client_options]
+        if option_emails:
+            current_existing_email = st.session_state.get("admin_existing_client_email")
+            if current_existing_email not in option_emails:
+                st.session_state.admin_existing_client_email = option_emails[0]
+            selected_email = st.selectbox(
+                "Select existing client",
+                option_emails,
+                key="admin_existing_client_email",
+                format_func=lambda option: _client_option_label(client_options_by_email.get(option, {"email": option})),
+            )
+            selected_client = client_options_by_email.get(selected_email, {})
+            first_name = _clean_client_value(selected_client.get("first_name"))
+            last_name = _clean_client_value(selected_client.get("last_name"))
+            office_name = _clean_client_value(selected_client.get("office_name"))
+            email = _clean_client_value(selected_client.get("email"))
+            org_type = _clean_client_value(selected_client.get("org_type"))
+            phone = _clean_client_value(selected_client.get("phone"))
+            ghl_cid = _clean_client_value(selected_client.get("ghl_cid"))
+            _render_resolved_client_details(selected_client)
+        else:
+            st.warning("No existing clients found. Search again or switch to New client.")
+    else:
+        st.markdown("**New Client Details**")
+        first_name = st.text_input("Client First Name", key="admin_first_name")
+        last_name = st.text_input("Client Last Name", key="admin_last_name")
+        office_name = st.text_input("Office/Group Name", key="admin_office_name")
+        email = st.text_input("Client Email Address", placeholder="client@example.com", key="admin_email")
+        org_type = st.selectbox("Type", ["Location", "Group"], key="admin_org_type")
+        phone = st.text_input("Phone (optional)", key="admin_phone")
+        ghl_cid = st.text_input("GHL CID (optional)", key="admin_ghl_cid")
+
+    valid_email = re.match(email_pattern, email) if email else False
+    client_info_complete = all([first_name, last_name, office_name, email, org_type]) and valid_email
+
+    if email and not valid_email:
+        st.error("Please enter a valid email address")
+
+    if not client_info_complete:
+        if client_mode == "Existing client":
+            st.warning("Select an existing client with complete client details before running analysis.")
+        else:
+            st.warning("Please complete the client information before running analysis.")
+        uploaded_files, uploaded_count = _render_admin_analysis_upload_controls()
+        if uploaded_count > 0:
+            st.markdown(f"**Documents ready for analysis:** {uploaded_count}")
+        st.button(
+            "Analyze Documents",
+            type="primary",
+            disabled=True,
+            key="admin_analyze_btn",
+        )
+    else:
+        uploaded_files, uploaded_count = _render_admin_analysis_upload_controls()
 
         if uploaded_count > 0:
             st.markdown(f"**Documents ready for analysis:** {uploaded_count}")
@@ -2523,6 +2705,7 @@ def display_document_analysis(perf: AdminPerfTracker):
                     logging.info("[analysis] start run_id=%s source=admin", run_id)
                     log_active_models(run_id)
                     normalized_email = normalize_email(email)
+                    normalized_phone = _clean_client_value(phone)
                     logging.info("Normalized email: %s", normalized_email)
                     user_info_dict = {
                         "first_name": first_name,
@@ -2530,6 +2713,7 @@ def display_document_analysis(perf: AdminPerfTracker):
                         "office_name": office_name,
                         "email": normalized_email,
                         "org_type": org_type,
+                        "phone": normalized_phone,
                     }
 
                     perf.mark_first_db_query()
@@ -2543,7 +2727,8 @@ def display_document_analysis(perf: AdminPerfTracker):
                                 last_name=last_name,
                                 email=normalized_email,
                                 office_name=office_name,
-                                org_type=org_type
+                                org_type=org_type,
+                                phone=normalized_phone or None,
                             )
                             db.add(new_user)
                             _check_admin_cancel("before_user_upsert_commit", run_id)
@@ -2562,6 +2747,9 @@ def display_document_analysis(perf: AdminPerfTracker):
                                 updated = True
                             if existing_user.org_type != org_type:
                                 existing_user.org_type = org_type
+                                updated = True
+                            if normalized_phone and existing_user.phone != normalized_phone:
+                                existing_user.phone = normalized_phone
                                 updated = True
                             if updated:
                                 _check_admin_cancel("before_user_upsert_commit", run_id)
@@ -2586,6 +2774,7 @@ def display_document_analysis(perf: AdminPerfTracker):
                                 last_name=last_name,
                                 office_name=office_name,
                                 org_type=org_type,
+                                phone=normalized_phone or None,
                                 source="admin",
                                 status="submitted",
                                 analysis_run_id=run_id,
@@ -2764,6 +2953,7 @@ def display_document_analysis(perf: AdminPerfTracker):
                                     last_name=last_name,
                                     office_name=office_name,
                                     org_type=org_type,
+                                    phone=normalized_phone or None,
                                     source="admin",
                                     status="completed",
                                     completed_at=datetime.utcnow(),
@@ -2953,6 +3143,12 @@ def display_document_analysis(perf: AdminPerfTracker):
                     st.rerun()
         else:
             st.info("Upload a Financial, AR, or Insurance Claims document to begin analysis.")
+            st.button(
+                "Analyze Documents",
+                type="primary",
+                disabled=True,
+                key="admin_analyze_btn",
+            )
 
 
 def display_pdf_generator(perf: AdminPerfTracker):
