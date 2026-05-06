@@ -1055,6 +1055,10 @@ def _render_admin_css() -> None:
         .client-submissions-scope [data-testid="column"] p {
             color: #0A1547;
         }
+        .client-submissions-scope .as-subcard,
+        .client-submissions-scope .as-subcard p {
+            color: #1A2460;
+        }
         .client-submissions-scope .stButton > button {
             padding: 0.15rem 0.3rem !important;
             font-size: 0.75rem !important;
@@ -1104,31 +1108,51 @@ def _render_admin_css() -> None:
         }
         .as-facts-strip {
             display: grid;
-            gap: 0.55rem;
-            grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
-            margin: 0.65rem 0 1rem 0;
+            gap: 0.45rem;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            margin: 0.55rem 0 0.85rem 0;
         }
         .as-fact {
             background: #FFFFFF;
             border: 1px solid rgba(10, 21, 71, 0.10);
-            border-radius: 14px;
-            box-shadow: 0 10px 24px rgba(10, 21, 71, 0.05);
-            padding: 0.65rem 0.75rem;
+            border-radius: 12px;
+            box-shadow: 0 8px 18px rgba(10, 21, 71, 0.04);
+            padding: 0.52rem 0.58rem;
         }
         .as-fact-label {
             color: #5E6684;
-            font-size: 0.68rem;
+            font-size: 0.62rem;
             font-weight: 700;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.06em;
             line-height: 1.15;
-            margin-bottom: 0.25rem;
+            margin-bottom: 0.18rem;
             text-transform: uppercase;
         }
         .as-fact-value {
             color: #0A1547;
-            font-size: 1.15rem;
+            font-size: 1rem;
             font-weight: 750;
             line-height: 1.15;
+        }
+        .as-fact-value--navy {
+            color: #0A1547;
+        }
+        .as-fact-value--deep {
+            color: #1A2460;
+        }
+        .as-fact-value--cyan {
+            color: #02ABE0;
+        }
+        .as-fact-value--green {
+            color: #02D99D;
+        }
+        .as-fact-value--lilac {
+            color: #A380F6;
+        }
+        @media (max-width: 1100px) {
+            .as-facts-strip {
+                grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+            }
         }
         .as-client-card {
             padding: 1rem 1.1rem;
@@ -1149,6 +1173,27 @@ def _render_admin_css() -> None:
         }
         .client-submissions-scope .as-detail-value {
             color: #1A2460 !important;
+        }
+        .as-admin-upload-label {
+            align-items: center;
+            color: #1A2460;
+            display: flex;
+            gap: 0.55rem;
+            margin: 0.95rem 0 0.45rem 0;
+        }
+        .as-admin-upload-marker {
+            background: #02ABE0;
+            border-radius: 999px;
+            box-shadow: 0 0 0 4px rgba(2, 171, 224, 0.10);
+            display: inline-block;
+            height: 0.52rem;
+            width: 0.52rem;
+        }
+        .as-admin-upload-title {
+            color: #1A2460;
+            font-size: 1rem;
+            font-weight: 700;
+            line-height: 1.2;
         }
         .as-upload-header {
             color: #5E6684;
@@ -1388,7 +1433,7 @@ def _render_admin_css() -> None:
             border-radius: 999px;
             background: rgba(2, 217, 157, 0.12);
             border: 1px solid rgba(2, 217, 157, 0.35);
-            color: #087A63;
+            color: #02D99D;
             font-size: 0.75rem;
             font-weight: 600;
         }
@@ -2011,11 +2056,11 @@ def display_client_submissions(perf: AdminPerfTracker):
             f"<div class=\"as-detail-value\">{_display_html(value)}</div>"
         )
 
-    def _fact_markup(label: str, value: object) -> str:
+    def _fact_markup(label: str, value: object, tone: str = "navy") -> str:
         return (
             "<div class=\"as-fact\">"
             f"<div class=\"as-fact-label\">{html.escape(label)}</div>"
-            f"<div class=\"as-fact-value\">{_display_html(value)}</div>"
+            f"<div class=\"as-fact-value as-fact-value--{html.escape(tone)}\">{_display_html(value)}</div>"
             "</div>"
         )
 
@@ -2142,17 +2187,17 @@ def display_client_submissions(perf: AdminPerfTracker):
         )
         error_count = sum(status_counts.get(status_name, 0) for status_name in ("error", "failed"))
         fact_items = [
-            ("Clients", len(clients)),
-            ("Submissions", total_submissions),
-            ("Uploads", total_uploads),
-            ("Completed", status_counts.get("completed", 0)),
-            ("Submitted", status_counts.get("submitted", 0)),
-            ("Pending", pending_count),
-            ("Error", error_count),
+            ("Clients", len(clients), "navy"),
+            ("Submissions", total_submissions, "deep"),
+            ("Uploads", total_uploads, "cyan"),
+            ("Completed", status_counts.get("completed", 0), "green"),
+            ("Submitted", status_counts.get("submitted", 0), "lilac"),
+            ("Pending", pending_count, "deep"),
+            ("Error", error_count, "navy"),
         ]
         st.markdown(
             "<div class=\"as-facts-strip\">"
-            + "".join(_fact_markup(label, value) for label, value in fact_items)
+            + "".join(_fact_markup(label, value, tone) for label, value, tone in fact_items)
             + "</div>",
             unsafe_allow_html=True,
         )
@@ -2276,10 +2321,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                         st.markdown('<div class="as-subcard">', unsafe_allow_html=True)
                         sub_cols = st.columns([1.7, 1.7, 2.2, 1.4])
                         with sub_cols[0]:
-                            st.markdown(
-                                f"<div class=\"as-muted\">Submitted At</div><div>{submission_label}</div>",
-                                unsafe_allow_html=True,
-                            )
+                            st.markdown(_detail_markup("Submitted At", submission_label), unsafe_allow_html=True)
                         with sub_cols[1]:
                             st.markdown(_detail_markup("Name", full_name), unsafe_allow_html=True)
                         with sub_cols[2]:
@@ -2790,9 +2832,9 @@ def display_document_analysis(perf: AdminPerfTracker):
 
         st.markdown(
             """
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 0.5rem; margin-top: 1rem;">
-                    <span style="font-size: 1.2rem;">📈</span>
-                    <span style="font-size: 1.1rem; font-weight: 500;">Financial Analysis</span>
+                <div class="as-admin-upload-label">
+                    <span class="as-admin-upload-marker"></span>
+                    <span class="as-admin-upload-title">Financial Analyzer</span>
                 </div>
             """,
             unsafe_allow_html=True,
@@ -2806,9 +2848,9 @@ def display_document_analysis(perf: AdminPerfTracker):
 
         st.markdown(
             """
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 0.5rem; margin-top: 1rem;">
-                    <span style="font-size: 1.2rem;">📊</span>
-                    <span style="font-size: 1.1rem; font-weight: 500;">Accounts Receivable Analysis</span>
+                <div class="as-admin-upload-label">
+                    <span class="as-admin-upload-marker"></span>
+                    <span class="as-admin-upload-title">Accounts Receivable Analyzer</span>
                 </div>
             """,
             unsafe_allow_html=True,
@@ -2822,9 +2864,9 @@ def display_document_analysis(perf: AdminPerfTracker):
 
         st.markdown(
             """
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 0.5rem; margin-top: 1rem;">
-                    <span style="font-size: 1.2rem;">📋</span>
-                    <span style="font-size: 1.1rem; font-weight: 500;">Insurance Claims Analysis</span>
+                <div class="as-admin-upload-label">
+                    <span class="as-admin-upload-marker"></span>
+                    <span class="as-admin-upload-title">Insurance Claims Analyzer</span>
                 </div>
             """,
             unsafe_allow_html=True,
