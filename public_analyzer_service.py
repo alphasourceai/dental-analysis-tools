@@ -57,6 +57,12 @@ def submit_public_analyzer_submission(
     content_type: Optional[str] = None,
     cid: Optional[str] = None,
     source_path: Optional[str] = None,
+    phone: Optional[str] = None,
+    financial_only_acknowledgement: Optional[bool] = None,
+    acknowledgement_timestamp: Optional[datetime] = None,
+    acknowledgement_ip: Optional[str] = None,
+    acknowledgement_version: Optional[str] = None,
+    require_public_api_metadata: bool = False,
 ) -> Dict[str, Any]:
     """Run the existing public analyzer workflow without Streamlit session state."""
     del source_path  # The current schema does not store the originating frontend path.
@@ -74,9 +80,13 @@ def submit_public_analyzer_submission(
             org_type=org_type,
             uploaded_file_bytes=uploaded_file_bytes,
             original_filename=original_filename,
+            phone=phone,
+            financial_only_acknowledgement=financial_only_acknowledgement,
+            require_public_api_metadata=require_public_api_metadata,
         )
         normalized_email = validated["email"]
         file_name = validated["original_filename"]
+        normalized_phone = validated["phone"]
         file_type = (content_type or _guess_content_type(file_name)).strip()
         file_bytes = bytes(uploaded_file_bytes)
 
@@ -86,6 +96,11 @@ def submit_public_analyzer_submission(
             "office_name": office_name,
             "email": normalized_email,
             "org_type": org_type,
+            "phone": normalized_phone,
+            "financial_only_acknowledgement": _coerce_optional_bool(financial_only_acknowledgement),
+            "acknowledgement_timestamp": acknowledgement_timestamp,
+            "acknowledgement_ip": _normalize_optional_text(acknowledgement_ip),
+            "acknowledgement_version": _normalize_optional_text(acknowledgement_version),
         }
 
         logger.info("[analysis] start run_id=%s source=public_service", run_id)
@@ -188,7 +203,10 @@ def _validate_submission_input(
     org_type: str,
     uploaded_file_bytes: bytes,
     original_filename: str,
-) -> Dict[str, str]:
+    phone: Optional[str] = None,
+    financial_only_acknowledgement: Optional[bool] = None,
+    require_public_api_metadata: bool = False,
+) -> Dict[str, Any]:
     if not first_name:
         raise PublicAnalyzerError("validation_error", "First name is required.")
     if not last_name:
@@ -218,9 +236,19 @@ def _validate_submission_input(
     if extension not in ALLOWED_EXTENSIONS:
         raise PublicAnalyzerError("unsupported_file_type", "Unsupported file type.")
 
+    normalized_phone = _normalize_optional_text(phone)
+    if require_public_api_metadata and not normalized_phone:
+        raise PublicAnalyzerError("validation_error", "Phone number is required.")
+    if require_public_api_metadata and _coerce_optional_bool(financial_only_acknowledgement) is not True:
+        raise PublicAnalyzerError(
+            "validation_error",
+            "Financial/practice operations acknowledgement is required.",
+        )
+
     return {
         "email": normalized_email,
         "original_filename": filename,
+        "phone": normalized_phone,
     }
 
 
@@ -228,6 +256,27 @@ def normalize_email(raw_email: str) -> str:
     if not raw_email:
         return ""
     return raw_email.strip().lower()
+
+
+def _normalize_optional_text(value: Optional[Any]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _coerce_optional_bool(value: Optional[Any]) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+    return bool(value)
 
 
 def _file_extension(filename: str) -> str:
@@ -298,7 +347,7 @@ def _run_public_analysis(data_input: str) -> Dict[str, Any]:
     }
 
 
-def _upsert_user(user_info: Dict[str, str]) -> None:
+def _upsert_user(user_info: Dict[str, Any]) -> None:
     db = SessionLocal()
     try:
         existing_user = db.query(User).filter(User.email == user_info["email"]).first()
@@ -310,6 +359,7 @@ def _upsert_user(user_info: Dict[str, str]) -> None:
                     email=user_info["email"],
                     office_name=user_info["office_name"],
                     org_type=user_info["org_type"],
+                    phone=user_info.get("phone"),
                 )
             )
             db.commit()
@@ -317,9 +367,11 @@ def _upsert_user(user_info: Dict[str, str]) -> None:
             return
 
         updated = False
-        for field in ("first_name", "last_name", "office_name", "org_type"):
-            if getattr(existing_user, field) != user_info[field]:
-                setattr(existing_user, field, user_info[field])
+        for field in ("first_name", "last_name", "office_name", "org_type", "phone"):
+            if field == "phone" and user_info.get(field) is None:
+                continue
+            if getattr(existing_user, field) != user_info.get(field):
+                setattr(existing_user, field, user_info.get(field))
                 updated = True
         if updated:
             db.commit()
@@ -333,7 +385,7 @@ def _upsert_user(user_info: Dict[str, str]) -> None:
         db.close()
 
 
-def _create_client_submission(user_info: Dict[str, str], run_id: str) -> str:
+def _create_client_submission(user_info: Dict[str, Any], run_id: str) -> str:
     db = SessionLocal()
     try:
         submission = ClientSubmission(
@@ -342,6 +394,11 @@ def _create_client_submission(user_info: Dict[str, str], run_id: str) -> str:
             last_name=user_info["last_name"],
             office_name=user_info["office_name"],
             org_type=user_info["org_type"],
+            phone=user_info.get("phone"),
+            financial_only_acknowledgement=user_info.get("financial_only_acknowledgement"),
+            acknowledgement_timestamp=user_info.get("acknowledgement_timestamp"),
+            acknowledgement_ip=user_info.get("acknowledgement_ip"),
+            acknowledgement_version=user_info.get("acknowledgement_version"),
             source="client",
             status="submitted",
             analysis_run_id=run_id,

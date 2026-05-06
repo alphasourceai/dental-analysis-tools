@@ -14,6 +14,7 @@ class User(Base):
     email = Column(String(255), unique=True, index=True)
     office_name = Column(String(255))
     org_type = Column(String(50))
+    phone = Column(String(50), nullable=True)
 
 # Client submission snapshot model
 class ClientSubmission(Base):
@@ -25,6 +26,11 @@ class ClientSubmission(Base):
     last_name = Column(String(255))
     office_name = Column(String(255))
     org_type = Column(String(50))
+    phone = Column(String(50), nullable=True)
+    financial_only_acknowledgement = Column(Boolean, nullable=True)
+    acknowledgement_timestamp = Column(DateTime(timezone=True), nullable=True)
+    acknowledgement_ip = Column(Text, nullable=True)
+    acknowledgement_version = Column(String(100), nullable=True)
     submitted_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
     source = Column(Text, nullable=True, index=True)
     status = Column(Text, nullable=True, index=True)

@@ -4,17 +4,19 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 ALLOWED_EXTENSIONS = {".pdf", ".csv", ".xlsx"}
+ACKNOWLEDGEMENT_VERSION = "financial-only-v1"
 DEFAULT_MAX_FILE_MB = 15
 DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 3600
 DEFAULT_RATE_LIMIT_MAX = 3
@@ -49,6 +51,11 @@ def root() -> Dict[str, Any]:
     return {"ok": True, "service": "public-analyzer-api"}
 
 
+@app.head("/")
+def root_head() -> Response:
+    return Response(status_code=200)
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"ok": True, "service": "public-analyzer-api"}
@@ -78,7 +85,9 @@ async def create_public_analyzer_submission(
     last_name: str = Form(...),
     office_name: str = Form(...),
     email: str = Form(...),
+    phone: str = Form(...),
     org_type: str = Form(...),
+    financial_only_acknowledgement: str = Form(...),
     cid: Optional[str] = Form(None),
     source_path: Optional[str] = Form(None),
     companyWebsite: Optional[str] = Form(None),
@@ -86,7 +95,7 @@ async def create_public_analyzer_submission(
 ) -> JSONResponse:
     if (companyWebsite or "").strip():
         job_id = _create_job(status="completed")
-        logger.info("Public analyzer job completed job_id=%s", job_id)
+        _log_job_status("completed", job_id)
         return JSONResponse({"ok": True, "job_id": job_id, "status": "completed"})
 
     client_ip = _client_ip(request)
@@ -95,6 +104,14 @@ async def create_public_analyzer_submission(
             429,
             "rate_limited",
             "Too many analyzer submissions. Please try again later.",
+        )
+    if not phone.strip():
+        return _error_response(400, "validation_error", "Phone number is required.")
+    if _parse_truthy_form_value(financial_only_acknowledgement) is not True:
+        return _error_response(
+            400,
+            "validation_error",
+            "Financial/practice operations acknowledgement is required.",
         )
 
     filename = (file.filename or "").strip()
@@ -110,7 +127,7 @@ async def create_public_analyzer_submission(
         await file.close()
 
     job_id = _create_job(status="queued")
-    logger.info("Public analyzer job queued job_id=%s", job_id)
+    _log_job_status("queued", job_id)
     background_tasks.add_task(
         _process_submission_job,
         job_id=job_id,
@@ -118,7 +135,12 @@ async def create_public_analyzer_submission(
         last_name=last_name,
         office_name=office_name,
         email=email,
+        phone=phone,
         org_type=org_type,
+        financial_only_acknowledgement=True,
+        acknowledgement_timestamp=datetime.now(timezone.utc),
+        acknowledgement_ip=client_ip,
+        acknowledgement_version=ACKNOWLEDGEMENT_VERSION,
         uploaded_file_bytes=file_bytes,
         original_filename=filename,
         content_type=file.content_type,
@@ -149,14 +171,19 @@ def _process_submission_job(
     last_name: str,
     office_name: str,
     email: str,
+    phone: str,
     org_type: str,
+    financial_only_acknowledgement: bool,
+    acknowledgement_timestamp: datetime,
+    acknowledgement_ip: str,
+    acknowledgement_version: str,
     uploaded_file_bytes: bytes,
     original_filename: str,
     content_type: Optional[str],
     cid: Optional[str],
     source_path: Optional[str],
 ) -> None:
-    logger.info("Public analyzer job started job_id=%s", job_id)
+    _log_job_status("started", job_id)
     _update_job(job_id, status="processing")
     try:
         from public_analyzer_service import submit_public_analyzer_submission
@@ -167,6 +194,12 @@ def _process_submission_job(
             office_name=office_name,
             email=email,
             org_type=org_type,
+            phone=phone,
+            financial_only_acknowledgement=financial_only_acknowledgement,
+            acknowledgement_timestamp=acknowledgement_timestamp,
+            acknowledgement_ip=acknowledgement_ip,
+            acknowledgement_version=acknowledgement_version,
+            require_public_api_metadata=True,
             uploaded_file_bytes=uploaded_file_bytes,
             original_filename=original_filename,
             content_type=content_type,
@@ -184,17 +217,35 @@ def _process_submission_job(
             error_message=result.get("error_message"),
         )
         if completed_status == "completed":
-            logger.info("Public analyzer job completed job_id=%s", job_id)
+            _log_job_status("completed", job_id)
         else:
-            logger.warning("Public analyzer job failed job_id=%s", job_id)
+            _log_job_status("failed", job_id)
     except Exception:
-        logger.error("Public analyzer job failed job_id=%s", job_id)
+        _log_job_status("failed", job_id)
         _update_job(
             job_id,
             status="error",
             error_code="analysis_failed",
             error_message="Analyzer job failed.",
         )
+
+
+def _log_job_status(status: str, job_id: str) -> None:
+    if status == "failed":
+        logger.warning("public_analyzer_job status=%s job_id=%s", status, job_id)
+        return
+    logger.info("public_analyzer_job status=%s job_id=%s", status, job_id)
+
+
+def _parse_truthy_form_value(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off", ""):
+        return False
+    return None
 
 
 def _create_job(*, status: str) -> str:
