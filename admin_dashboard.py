@@ -903,16 +903,142 @@ def _ensure_admin_state() -> None:
 def _render_admin_css() -> None:
     css = """
         <style>
+        .stApp,
+        [data-testid="stAppViewContainer"] {
+            background: #F8F9FD !important;
+            color: #0A1547 !important;
+        }
+        [data-testid="stHeader"] {
+            background: rgba(248, 249, 253, 0.92) !important;
+            border-bottom: 1px solid rgba(10, 21, 71, 0.08);
+        }
+        [data-testid="block-container"] {
+            color: #0A1547 !important;
+        }
+        .stApp h1,
+        .stApp h2,
+        .stApp h3,
+        .stApp h4,
+        .stApp h5,
+        .stApp h6,
+        .stApp p,
+        .stApp label {
+            color: #0A1547 !important;
+        }
+        .stApp a {
+            color: #7F5AEF !important;
+        }
+        .title-container h1 {
+            color: #0A1547 !important;
+            letter-spacing: 0;
+        }
+        .section-header {
+            align-items: center;
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 14px;
+            display: flex;
+            gap: 0.55rem;
+            margin-bottom: 1rem;
+            padding: 0.8rem 0.95rem;
+            box-shadow: 0 14px 34px rgba(10, 21, 71, 0.06);
+        }
+        .section-icon {
+            color: #A380F6;
+            height: 1.15rem;
+            width: 1.15rem;
+        }
+        .section-title {
+            color: #0A1547;
+            font-weight: 700;
+        }
+        [data-testid="stForm"],
+        [data-testid="stExpander"],
+        [data-testid="stFileUploader"],
+        [data-testid="stDataFrame"] {
+            background: #FFFFFF !important;
+            border: 1px solid rgba(10, 21, 71, 0.10) !important;
+            border-radius: 14px !important;
+            box-shadow: 0 14px 34px rgba(10, 21, 71, 0.06) !important;
+        }
+        [data-testid="stForm"] {
+            padding: 1rem 1.1rem !important;
+        }
+        [data-testid="stTextInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+        [data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
+            background: #FFFFFF !important;
+            border-color: rgba(10, 21, 71, 0.14) !important;
+            color: #0A1547 !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stTextInput"] input:focus,
+        [data-testid="stTextArea"] textarea:focus,
+        [data-testid="stNumberInput"] input:focus {
+            border-color: #A380F6 !important;
+            box-shadow: 0 0 0 2px rgba(163, 128, 246, 0.18) !important;
+        }
+        [data-testid="stTextInput"] input::placeholder,
+        [data-testid="stTextArea"] textarea::placeholder {
+            color: #7B829E !important;
+        }
+        .stButton > button,
+        .stDownloadButton > button,
+        [data-testid="stFormSubmitButton"] button {
+            background: #FFFFFF !important;
+            border: 1px solid rgba(10, 21, 71, 0.14) !important;
+            color: #0A1547 !important;
+            box-shadow: 0 8px 18px rgba(10, 21, 71, 0.06) !important;
+        }
+        .stButton > button:hover,
+        .stDownloadButton > button:hover,
+        [data-testid="stFormSubmitButton"] button:hover {
+            border-color: rgba(163, 128, 246, 0.55) !important;
+            color: #0A1547 !important;
+            background: #F7F4FF !important;
+        }
+        .stButton > button[kind="primary"],
+        [data-testid="stFormSubmitButton"] button[kind="primary"] {
+            background: #A380F6 !important;
+            border-color: #A380F6 !important;
+            color: #FFFFFF !important;
+        }
+        .stButton > button:disabled,
+        .stDownloadButton > button:disabled,
+        [data-testid="stFormSubmitButton"] button:disabled {
+            background: #F1F3F8 !important;
+            border-color: rgba(10, 21, 71, 0.08) !important;
+            color: #8B92A9 !important;
+            opacity: 1 !important;
+        }
+        [data-testid="stMetric"] {
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 14px;
+            padding: 0.8rem 0.95rem;
+            box-shadow: 0 14px 34px rgba(10, 21, 71, 0.06);
+        }
+        [data-testid="stAlert"] {
+            border-radius: 12px !important;
+            border-color: rgba(10, 21, 71, 0.10) !important;
+            color: #0A1547 !important;
+        }
         details > summary {
-            background-color: #061551 !important;
-            color: #EBFEFF !important;
+            background-color: #FFFFFF !important;
+            color: #0A1547 !important;
+            border: 1px solid rgba(10, 21, 71, 0.10) !important;
+            border-radius: 10px !important;
+            padding: 0.55rem 0.7rem !important;
         }
         details > summary:hover,
         details > summary:focus,
         details > summary:active,
         details > summary:focus-visible {
-            background-color: #061551 !important;
-            color: #EBFEFF !important;
+            background-color: #F7F4FF !important;
+            color: #0A1547 !important;
+            border-color: rgba(163, 128, 246, 0.35) !important;
         }
         .client-submissions-scope [data-testid="column"] p {
             font-size: 0.8rem !important;
@@ -947,7 +1073,7 @@ def _render_admin_css() -> None:
             white-space: normal !important;
         }
         .as-upload-header {
-            color: #A9B2C9;
+            color: #5E6684;
             font-size: 0.75rem;
             letter-spacing: 0.05em;
             text-transform: uppercase;
@@ -977,7 +1103,7 @@ def _render_admin_css() -> None:
             cursor: default !important;
         }
         .as-uploads-scope .as-upload-legend-label {
-            color: #A9B2C9;
+            color: #5E6684;
             font-size: 0.75rem;
             letter-spacing: 0.02em;
             white-space: nowrap;
@@ -987,8 +1113,8 @@ def _render_admin_css() -> None:
         .as-uploads-scope [class*="st-key-as_upload_legend_box_"] > div,
         .as-uploads-scope [class*="st-key-as_upload_legend_box_"] > div > div {
             padding: 0.6rem 0.7rem !important;
-            border: 1px solid rgba(0, 207, 200, 0.25) !important;
-            background: rgba(255, 255, 255, 0.035) !important;
+            border: 1px solid rgba(10, 21, 71, 0.10) !important;
+            background: #FFFFFF !important;
             border-radius: 10px !important;
             margin-bottom: 0.6rem !important;
             box-sizing: border-box !important;
@@ -996,7 +1122,7 @@ def _render_admin_css() -> None:
         .as-uploads-scope .as-upload-legend-title {
             font-size: 0.68rem;
             letter-spacing: 0.10em;
-            color: rgba(235, 254, 255, 0.75);
+            color: #5E6684;
             text-transform: uppercase;
             margin: 0 0 0.35rem 0;
         }
@@ -1049,7 +1175,7 @@ def _render_admin_css() -> None:
             min-height: 32px !important;
             height: 32px !important;
             border-radius: 6px !important;
-            border: 1px solid rgba(0, 207, 200, 0.85) !important;
+            border: 1px solid rgba(163, 128, 246, 0.60) !important;
             display: inline-flex !important;
             align-items: center !important;
             justify-content: center !important;
@@ -1057,17 +1183,18 @@ def _render_admin_css() -> None:
             cursor: pointer !important;
         }
         .as-uploads-scope [class*="st-key-as_upload_actions_"] button:hover {
-            background: rgba(0, 207, 200, 0.1) !important;
+            background: #F7F4FF !important;
         }
         .as-upload-card {
-            background: rgba(255, 255, 255, 0.045);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 10px;
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 12px;
             padding: 0.85rem 0.9rem;
             margin: 0.75rem 0;
+            box-shadow: 0 10px 24px rgba(10, 21, 71, 0.05);
         }
         .as-upload-title {
-            color: #EBFEFF;
+            color: #0A1547;
             font-size: 0.95rem;
             font-weight: 650;
             line-height: 1.25;
@@ -1075,13 +1202,13 @@ def _render_admin_css() -> None:
             word-break: break-word;
         }
         .as-upload-meta-value {
-            color: #EBFEFF;
+            color: #0A1547;
             font-size: 0.86rem;
             line-height: 1.25;
             word-break: break-word;
         }
         .as-upload-action-label {
-            color: #A9B2C9;
+            color: #5E6684;
             font-size: 0.72rem;
             letter-spacing: 0.08em;
             margin: 0.65rem 0 0.25rem 0;
@@ -1108,56 +1235,70 @@ def _render_admin_css() -> None:
             width: 100%;
         }
         .as-pdf-action-link {
-            border: 1px solid rgba(0, 207, 200, 0.85);
-            color: #EBFEFF !important;
+            background: #FFFFFF;
+            border: 1px solid rgba(163, 128, 246, 0.55);
+            color: #0A1547 !important;
         }
         .as-pdf-action-link:hover {
-            background: rgba(0, 207, 200, 0.1);
+            background: #F7F4FF;
         }
         .as-pdf-action-disabled {
-            border: 1px solid rgba(255, 255, 255, 0.14);
-            color: #A9B2C9;
+            background: #F1F3F8;
+            border: 1px solid rgba(10, 21, 71, 0.08);
+            color: #8B92A9;
             opacity: 0.72;
         }
         .stRadio div[role="radiogroup"] {
             gap: 0.4rem;
         }
         .stRadio label {
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
             border-radius: 999px;
             padding: 0.35rem 0.8rem;
             font-size: 0.85rem;
-            color: #EBFEFF;
+            color: #0A1547;
+            box-shadow: 0 8px 18px rgba(10, 21, 71, 0.05);
         }
         .stRadio label:hover {
-            border-color: rgba(255, 255, 255, 0.4);
+            background: #F7F4FF;
+            border-color: rgba(163, 128, 246, 0.45);
+        }
+        .stRadio label:has(input:checked) {
+            background: #A380F6;
+            border-color: #A380F6;
+            color: #FFFFFF !important;
+        }
+        .stRadio label:has(input:checked) * {
+            color: #FFFFFF !important;
         }
         .as-card {
-            background: rgba(10, 21, 70, 0.65);
-            border: 1px solid rgba(255, 255, 255, 0.14);
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
             border-radius: 16px;
             padding: 0.85rem 1rem;
             margin-bottom: 1rem;
-            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.25);
+            box-shadow: 0 14px 34px rgba(10, 21, 71, 0.06);
+            color: #0A1547;
         }
         .as-subcard {
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: #FBFCFF;
+            border: 1px solid rgba(10, 21, 71, 0.08);
             border-radius: 12px;
             padding: 0.65rem 0.8rem;
             margin: 0.65rem 0;
+            color: #0A1547;
         }
         .as-card-divider {
-            border-top: 1px solid rgba(255, 255, 255, 0.12);
+            border-top: 1px solid rgba(10, 21, 71, 0.10);
             margin: 0.6rem 0 0.75rem 0;
         }
         .as-row-divider {
-            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            border-top: 1px solid rgba(10, 21, 71, 0.08);
             margin: 0.4rem 0 0.9rem 0;
         }
         .as-muted {
-            color: #A9B2C9;
+            color: #5E6684;
             font-size: 0.75rem;
             letter-spacing: 0.05em;
             text-transform: uppercase;
@@ -1167,14 +1308,14 @@ def _render_admin_css() -> None:
             display: inline-block;
             padding: 0.1rem 0.55rem;
             border-radius: 999px;
-            background: rgba(0, 207, 200, 0.2);
-            border: 1px solid rgba(0, 207, 200, 0.4);
-            color: #E6FBFF;
+            background: rgba(2, 217, 157, 0.12);
+            border: 1px solid rgba(2, 217, 157, 0.35);
+            color: #087A63;
             font-size: 0.75rem;
             font-weight: 600;
         }
         .as-email {
-            color: #A78BFA;
+            color: #7F5AEF;
             font-weight: 600;
             font-size: 0.95rem;
             word-break: break-word;
@@ -1185,25 +1326,25 @@ def _render_admin_css() -> None:
         }
         .client-submissions-scope .as-email,
         .client-submissions-scope .as-email * {
-            color: #A78BFA !important;
+            color: #7F5AEF !important;
             text-decoration: none !important;
         }
         .client-submissions-scope a[href^="mailto:"] {
             pointer-events: none !important;
             cursor: default !important;
-            color: #A78BFA !important;
+            color: #7F5AEF !important;
             text-decoration: none !important;
         }
         .as-card details {
-            background: rgba(6, 21, 81, 0.35);
-            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
             border-radius: 10px;
             padding: 0.35rem 0.6rem;
             margin-top: 0.5rem;
         }
         .as-subcard details {
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.08);
             border-radius: 10px;
             padding: 0.35rem 0.6rem;
             margin-top: 0.55rem;
