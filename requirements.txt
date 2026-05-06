@@ -12,3 +12,6 @@ bcrypt
 anthropic
 supabase
 fpdf2
+fastapi
+uvicorn[standard]
+python-multipart
