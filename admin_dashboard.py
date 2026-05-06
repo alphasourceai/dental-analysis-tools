@@ -1174,6 +1174,13 @@ def _render_admin_css() -> None:
         .client-submissions-scope .as-detail-value {
             color: #1A2460 !important;
         }
+        .client-submissions-scope .as-compact-label {
+            display: block;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
         .as-admin-upload-label {
             align-items: center;
             color: #1A2460;
@@ -2052,7 +2059,7 @@ def display_client_submissions(perf: AdminPerfTracker):
 
     def _detail_markup(label: str, value: object) -> str:
         return (
-            f"<div class=\"as-muted\">{html.escape(label)}</div>"
+            f"<div class=\"as-muted as-compact-label\">{html.escape(label)}</div>"
             f"<div class=\"as-detail-value\">{_display_html(value)}</div>"
         )
 
@@ -2217,13 +2224,13 @@ def display_client_submissions(perf: AdminPerfTracker):
                 st.markdown("<div class=\"as-muted\">Client</div>", unsafe_allow_html=True)
                 _render_email_html(client_email)
             with cols[1]:
-                st.markdown("<div class=\"as-muted\">Submissions</div>", unsafe_allow_html=True)
+                st.markdown("<div class=\"as-muted as-compact-label\">Submissions</div>", unsafe_allow_html=True)
                 st.markdown(
                     f"<span class=\"as-pill\">{client.submission_count}</span>",
                     unsafe_allow_html=True,
                 )
             with cols[2]:
-                st.markdown("<div class=\"as-muted\">Uploads</div>", unsafe_allow_html=True)
+                st.markdown("<div class=\"as-muted as-compact-label\">Uploads</div>", unsafe_allow_html=True)
                 st.markdown(
                     f"<span class=\"as-pill\">{client_upload_count}</span>",
                     unsafe_allow_html=True,
@@ -2231,7 +2238,7 @@ def display_client_submissions(perf: AdminPerfTracker):
             with cols[3]:
                 st.markdown(_detail_markup("Latest Submitted", latest_submitted), unsafe_allow_html=True)
             with cols[4]:
-                st.markdown("<div class=\"as-muted as-delete-header\">Delete</div>", unsafe_allow_html=True)
+                st.markdown("<div class=\"as-muted as-compact-label as-delete-header\">Delete</div>", unsafe_allow_html=True)
                 if st.button(
                     "",
                     key=f"delete_btn_{client_key}",
@@ -2259,7 +2266,7 @@ def display_client_submissions(perf: AdminPerfTracker):
                 st.markdown(_detail_markup("Latest Phone", phone_value), unsafe_allow_html=True)
             with summary_cols[4]:
                 st.markdown(
-                    f"<div class=\"as-muted\">Latest Status</div><div>{_status_markup(latest_status)}</div>",
+                    f"<div class=\"as-muted as-compact-label\">Latest Status</div><div>{_status_markup(latest_status)}</div>",
                     unsafe_allow_html=True,
                 )
 
