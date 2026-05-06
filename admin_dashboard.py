@@ -1406,48 +1406,6 @@ def _render_admin_css() -> None:
         .stRadio label:has(input:checked) * {
             color: #FFFFFF !important;
         }
-        [data-testid="stSidebar"] {
-            background: #FFFFFF;
-            border-right: 1px solid rgba(10, 21, 71, 0.10);
-        }
-        [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
-            background: #FFFFFF;
-        }
-        [data-testid="stSidebar"] .as-sidebar-title {
-            color: #0A1547;
-            font-size: 0.78rem;
-            font-weight: 750;
-            letter-spacing: 0.08em;
-            margin: 0.5rem 0 0.75rem 0;
-            text-transform: uppercase;
-        }
-        [data-testid="stSidebar"] .stRadio div[role="radiogroup"] {
-            align-items: stretch;
-            display: flex;
-            flex-direction: column;
-            gap: 0.35rem;
-        }
-        [data-testid="stSidebar"] .stRadio label {
-            background: transparent;
-            border: 1px solid transparent;
-            border-radius: 10px;
-            box-shadow: none;
-            color: #1A2460;
-            padding: 0.55rem 0.7rem;
-            width: 100%;
-        }
-        [data-testid="stSidebar"] .stRadio label:hover {
-            background: rgba(2, 171, 224, 0.08);
-            border-color: rgba(2, 171, 224, 0.16);
-        }
-        [data-testid="stSidebar"] .stRadio label:has(input:checked) {
-            background: rgba(163, 128, 246, 0.14);
-            border-color: rgba(163, 128, 246, 0.30);
-            color: #0A1547 !important;
-        }
-        [data-testid="stSidebar"] .stRadio label:has(input:checked) * {
-            color: #0A1547 !important;
-        }
         .as-card {
             background: #FFFFFF;
             border: 1px solid rgba(10, 21, 71, 0.10);
@@ -1898,15 +1856,14 @@ def display_admin_dashboard():
         st.session_state.admin_active_tab = pending_tab
         st.session_state.admin_tab_selector = pending_tab
     active_index = tab_labels.index(st.session_state.admin_active_tab) if st.session_state.admin_active_tab in tab_labels else 0
-    with st.sidebar:
-        st.markdown('<div class="as-sidebar-title">Admin Navigation</div>', unsafe_allow_html=True)
-        selected_tab = st.radio(
-            "Admin Navigation",
-            tab_labels,
-            index=active_index,
-            label_visibility="collapsed",
-            key="admin_tab_selector",
-        )
+    selected_tab = st.radio(
+        "Admin Navigation",
+        tab_labels,
+        index=active_index,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="admin_tab_selector",
+    )
     if selected_tab != st.session_state.admin_active_tab:
         st.session_state.admin_active_tab = selected_tab
 
