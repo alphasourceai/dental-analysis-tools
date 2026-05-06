@@ -1059,6 +1059,66 @@ def _render_admin_css() -> None:
         .as-uploads-scope [class*="st-key-as_upload_actions_"] button:hover {
             background: rgba(0, 207, 200, 0.1) !important;
         }
+        .as-upload-card {
+            background: rgba(255, 255, 255, 0.045);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            padding: 0.85rem 0.9rem;
+            margin: 0.75rem 0;
+        }
+        .as-upload-title {
+            color: #EBFEFF;
+            font-size: 0.95rem;
+            font-weight: 650;
+            line-height: 1.25;
+            margin-bottom: 0.55rem;
+            word-break: break-word;
+        }
+        .as-upload-meta-value {
+            color: #EBFEFF;
+            font-size: 0.86rem;
+            line-height: 1.25;
+            word-break: break-word;
+        }
+        .as-upload-action-label {
+            color: #A9B2C9;
+            font-size: 0.72rem;
+            letter-spacing: 0.08em;
+            margin: 0.65rem 0 0.25rem 0;
+            text-transform: uppercase;
+        }
+        .as-uploads-scope .as-upload-card .stButton > button {
+            min-height: 2rem !important;
+            height: auto !important;
+            padding: 0.25rem 0.7rem !important;
+            font-size: 0.82rem !important;
+            line-height: 1.15 !important;
+            white-space: nowrap !important;
+        }
+        .as-pdf-action-link,
+        .as-pdf-action-disabled {
+            align-items: center;
+            border-radius: 4px;
+            display: inline-flex;
+            font-size: 0.82rem;
+            justify-content: center;
+            min-height: 2rem;
+            padding: 0.25rem 0.7rem;
+            text-decoration: none !important;
+            width: 100%;
+        }
+        .as-pdf-action-link {
+            border: 1px solid rgba(0, 207, 200, 0.85);
+            color: #EBFEFF !important;
+        }
+        .as-pdf-action-link:hover {
+            background: rgba(0, 207, 200, 0.1);
+        }
+        .as-pdf-action-disabled {
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            color: #A9B2C9;
+            opacity: 0.72;
+        }
         .stRadio div[role="radiogroup"] {
             gap: 0.4rem;
         }
@@ -1836,7 +1896,6 @@ def display_client_submissions(perf: AdminPerfTracker):
             st.write("No client submissions available")
             return
 
-        action_button_kwargs = {"width": 32} if _BUTTON_SUPPORTS_WIDTH else {}
         st.caption(f"{len(clients)} clients | {total_submissions} submissions | {total_uploads} uploads")
 
         for client in clients:
@@ -2052,91 +2111,87 @@ def display_client_submissions(perf: AdminPerfTracker):
                             if not uploads_for_submission:
                                 st.write("No uploads linked to this submission.")
                             else:
-                                legend_box = st.container(key=f"as_upload_legend_box_{submission.id}")
-                                with legend_box:
-                                    st.markdown(
-                                        '<div class="as-upload-legend-title">Actions</div>',
-                                        unsafe_allow_html=True,
-                                    )
-                                    legend_cols = st.columns([0.25, 0.9, 0.25, 0.9, 0.25, 1.2])
-                                    with legend_cols[0]:
-                                        st.button(
-                                            "",
-                                            icon=":material/receipt_long:",
-                                            disabled=True,
-                                            key=f"legend_summary_{submission.id}",
-                                            **action_button_kwargs,
-                                        )
-                                    with legend_cols[1]:
-                                        st.markdown(
-                                            '<div class="as-upload-legend-label">Summary</div>',
-                                            unsafe_allow_html=True,
-                                        )
-                                    with legend_cols[2]:
-                                        st.button(
-                                            "",
-                                            icon=":material/psychology:",
-                                            disabled=True,
-                                            key=f"legend_analysis_{submission.id}",
-                                            **action_button_kwargs,
-                                        )
-                                    with legend_cols[3]:
-                                        st.markdown(
-                                            '<div class="as-upload-legend-label">Analysis</div>',
-                                            unsafe_allow_html=True,
-                                        )
-                                    with legend_cols[4]:
-                                        st.button(
-                                            "",
-                                            icon=":material/picture_as_pdf:",
-                                            disabled=True,
-                                            key=f"legend_generate_{submission.id}",
-                                            **action_button_kwargs,
-                                        )
-                                    with legend_cols[5]:
-                                        st.markdown(
-                                            '<div class="as-upload-legend-label">Generate PDF</div>',
-                                            unsafe_allow_html=True,
-                                        )
-                                upload_header_cols = st.columns([2.6, 1.6, 1.6, 0.8, 0.9, 0.6, 0.6, 0.6])
-                                with upload_header_cols[0]:
-                                    st.markdown('<div class="as-upload-header">File Name</div>', unsafe_allow_html=True)
-                                with upload_header_cols[1]:
-                                    st.markdown('<div class="as-upload-header">Tool</div>', unsafe_allow_html=True)
-                                with upload_header_cols[2]:
-                                    st.markdown('<div class="as-upload-header">Upload Time</div>', unsafe_allow_html=True)
-                                with upload_header_cols[3]:
-                                    st.markdown('<div class="as-upload-header">Paid</div>', unsafe_allow_html=True)
-                                with upload_header_cols[4]:
-                                    st.markdown('<div class="as-upload-header">PDF</div>', unsafe_allow_html=True)
-                                with upload_header_cols[5]:
-                                    st.markdown("&nbsp;", unsafe_allow_html=True)
-                                with upload_header_cols[6]:
-                                    st.markdown("&nbsp;", unsafe_allow_html=True)
-                                with upload_header_cols[7]:
-                                    st.markdown("&nbsp;", unsafe_allow_html=True)
-
                                 for row_idx, upload in enumerate(uploads_for_submission):
                                     key_suffix = f"{submission.id}_{upload.id}_{submission_index}_{row_idx}"
                                     summary_state_key = f"show_summary_{key_suffix}"
                                     analysis_state_key = f"show_analysis_{key_suffix}"
                                     analysis_payload = _parse_analysis_json(upload.analysis_data)
                                     has_analysis = bool(analysis_payload)
-                                    upload_cols = st.columns([2.6, 1.6, 1.6, 0.8, 0.9, 0.6, 0.6, 0.6])
-                                    with upload_cols[0]:
-                                        st.write(upload.file_name or "-")
-                                    with upload_cols[1]:
-                                        st.write(upload.tool_name or "-")
-                                    with upload_cols[2]:
-                                        st.write(_format_admin_dt(upload.upload_time) or "-")
-                                    with upload_cols[3]:
-                                        paid_key = f"paid_toggle_{key_suffix}"
-                                        current_paid = bool(getattr(upload, "paid", False))
+                                    paid_key = f"paid_toggle_{key_suffix}"
+                                    current_paid = bool(getattr(upload, "paid", False))
+                                    pdf_url = getattr(upload, "pdf_url", "") or ""
+                                    report_path = (
+                                        getattr(upload, "report_path", "")
+                                        or getattr(upload, "pdf_path", "")
+                                        or ""
+                                    )
+                                    if not report_path and pdf_url:
+                                        report_path = _extract_supabase_report_path(pdf_url)
+                                    signed_url = None
+                                    err = None
+                                    if report_path:
+                                        try:
+                                            signed_url = _create_report_signed_url(report_path)
+                                            if not signed_url:
+                                                err = "signed_url_unavailable"
+                                        except Exception as exc:
+                                            err = exc
+                                        if err:
+                                            logging.warning(
+                                                "[pdf] signed url failed upload_id=%s bucket=%s path=%s err=%r",
+                                                str(upload.id),
+                                                "consulting-uploads",
+                                                report_path,
+                                                err,
+                                            )
+                                    if signed_url:
+                                        escaped_signed_url = html.escape(signed_url, quote=True)
+                                        pdf_status_markup = (
+                                            f"<a href=\"{escaped_signed_url}\" target=\"_blank\" "
+                                            "rel=\"noopener noreferrer\">PDF available</a>"
+                                        )
+                                        pdf_action_markup = (
+                                            f"<a class=\"as-pdf-action-link\" href=\"{escaped_signed_url}\" "
+                                            "target=\"_blank\" rel=\"noopener noreferrer\">PDF</a>"
+                                        )
+                                    elif report_path:
+                                        pdf_status_markup = (
+                                            "<span class=\"as-muted\" "
+                                            "title=\"Signed link unavailable\">Saved, link unavailable</span>"
+                                        )
+                                        pdf_action_markup = (
+                                            "<span class=\"as-pdf-action-disabled\" "
+                                            "title=\"Signed link unavailable\">PDF unavailable</span>"
+                                        )
+                                    else:
+                                        pdf_status_markup = "<span class=\"as-muted\">No PDF</span>"
+                                        pdf_action_markup = "<span class=\"as-pdf-action-disabled\">No PDF</span>"
+
+                                    st.markdown('<div class="as-upload-card">', unsafe_allow_html=True)
+                                    st.markdown(
+                                        f"<div class=\"as-upload-title\">{_display_html(upload.file_name)}</div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                    upload_meta_cols = st.columns([1.5, 1.4, 1.0, 1.4])
+                                    with upload_meta_cols[0]:
+                                        st.markdown(
+                                            f"<div class=\"as-upload-header\">Tool / Type</div>"
+                                            f"<div class=\"as-upload-meta-value\">{_display_html(upload.tool_name)}</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                    with upload_meta_cols[1]:
+                                        st.markdown(
+                                            f"<div class=\"as-upload-header\">Upload Time</div>"
+                                            f"<div class=\"as-upload-meta-value\">"
+                                            f"{_display_html(_format_admin_dt(upload.upload_time))}</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                    with upload_meta_cols[2]:
+                                        st.markdown('<div class="as-upload-header">Paid Status</div>', unsafe_allow_html=True)
                                         paid_value = st.checkbox(
                                             "Paid",
                                             value=current_paid,
                                             key=paid_key,
-                                            label_visibility="collapsed",
                                         )
                                         if paid_value != current_paid:
                                             paid_db = SessionLocal()
@@ -2151,100 +2206,49 @@ def display_client_submissions(perf: AdminPerfTracker):
                                                 paid_db.rollback()
                                             finally:
                                                 paid_db.close()
-                                    with upload_cols[4]:
-                                        pdf_url = getattr(upload, "pdf_url", "") or ""
-                                        report_path = (
-                                            getattr(upload, "report_path", "")
-                                            or getattr(upload, "pdf_path", "")
-                                            or ""
+                                    with upload_meta_cols[3]:
+                                        st.markdown(
+                                            f"<div class=\"as-upload-header\">PDF Status</div>"
+                                            f"<div class=\"as-upload-meta-value\">{pdf_status_markup}</div>",
+                                            unsafe_allow_html=True,
                                         )
-                                        if not report_path and pdf_url:
-                                            report_path = _extract_supabase_report_path(pdf_url)
-                                        signed_url = None
-                                        err = None
-                                        if report_path:
-                                            try:
-                                                signed_url = _create_report_signed_url(report_path)
-                                                if not signed_url:
-                                                    err = "signed_url_unavailable"
-                                            except Exception as exc:
-                                                err = exc
-                                            if err:
-                                                logging.warning(
-                                                    "[pdf] signed url failed upload_id=%s bucket=%s path=%s err=%r",
-                                                    str(upload.id),
-                                                    "consulting-uploads",
-                                                    report_path,
-                                                    err,
-                                                )
-                                        if signed_url:
-                                            pdf_markup = (
-                                                f"<a href=\"{signed_url}\" target=\"_blank\" "
-                                                f"rel=\"noopener noreferrer\">PDF</a>"
-                                            )
-                                        elif report_path:
-                                            pdf_markup = (
-                                                "<span class=\"as-muted\" "
-                                                "title=\"Signed link unavailable\">PDF</span>"
-                                            )
-                                        else:
-                                            pdf_markup = "<span class=\"as-muted\">—</span>"
-                                        st.markdown(pdf_markup, unsafe_allow_html=True)
-                                    with upload_cols[5]:
-                                        summary_container = st.container(
-                                            key=f"as_upload_actions_summary_{upload.id}"
-                                        )
-                                        with summary_container:
-                                            if has_analysis:
-                                                if st.button(
-                                                    "",
-                                                    key=f"open_summary_{key_suffix}",
-                                                    type="secondary",
-                                                    icon=":material/receipt_long:",
-                                                    **action_button_kwargs,
-                                                ):
-                                                    st.session_state[summary_state_key] = True
-                                                    st.rerun()
-                                                else:
-                                                    st.write("-")
-                                    with upload_cols[6]:
-                                        analysis_container = st.container(
-                                            key=f"as_upload_actions_analysis_{upload.id}"
-                                        )
-                                        with analysis_container:
-                                            if has_analysis:
-                                                if st.button(
-                                                    "",
-                                                    key=f"open_analysis_{key_suffix}",
-                                                    type="secondary",
-                                                    icon=":material/psychology:",
-                                                    **action_button_kwargs,
-                                                ):
-                                                    st.session_state[analysis_state_key] = True
-                                                    st.rerun()
-                                                else:
-                                                    st.write("-")
-                                    with upload_cols[7]:
-                                        generate_container = st.container(
-                                            key=f"as_upload_actions_generate_{upload.id}"
-                                        )
-                                        with generate_container:
-                                            if has_analysis:
-                                                if st.button(
-                                                    "",
-                                                    key=f"pdf_generate_{key_suffix}",
-                                                    type="secondary",
-                                                    icon=":material/picture_as_pdf:",
-                                                    **action_button_kwargs,
-                                                ):
-                                                    st.session_state.admin_pdf_upload_id = str(upload.id)
-                                                    st.session_state.admin_pdf_client_email = submission.user_email or client_email
-                                                    st.session_state.admin_pdf_notice = "PDF Generator opened with the selected upload."
-                                                    st.session_state.admin_pending_tab = "PDF Generator"
-                                                    st.session_state.admin_pdf_preselect_id = str(upload.id)
-                                                    st.rerun()
-                                            else:
-                                                st.write("-")
+
+                                    st.markdown('<div class="as-upload-action-label">Actions</div>', unsafe_allow_html=True)
+                                    upload_action_cols = st.columns([1, 1, 1, 1.35])
+                                    with upload_action_cols[0]:
+                                        if st.button(
+                                            "Summary",
+                                            key=f"open_summary_{key_suffix}",
+                                            type="secondary",
+                                            disabled=not has_analysis,
+                                        ):
+                                            st.session_state[summary_state_key] = True
+                                            st.rerun()
+                                    with upload_action_cols[1]:
+                                        if st.button(
+                                            "Analysis",
+                                            key=f"open_analysis_{key_suffix}",
+                                            type="secondary",
+                                            disabled=not has_analysis,
+                                        ):
+                                            st.session_state[analysis_state_key] = True
+                                            st.rerun()
+                                    with upload_action_cols[2]:
+                                        st.markdown(pdf_action_markup, unsafe_allow_html=True)
+                                    with upload_action_cols[3]:
+                                        if st.button(
+                                            "Generate PDF",
+                                            key=f"pdf_generate_{key_suffix}",
+                                            type="secondary",
+                                            disabled=not has_analysis,
+                                        ):
+                                            st.session_state.admin_pdf_upload_id = str(upload.id)
+                                            st.session_state.admin_pdf_client_email = submission.user_email or client_email
+                                            st.session_state.admin_pdf_notice = "PDF Generator opened with the selected upload."
+                                            st.session_state.admin_pending_tab = "PDF Generator"
+                                            st.session_state.admin_pdf_preselect_id = str(upload.id)
+                                            st.rerun()
+                                    st.markdown("</div>", unsafe_allow_html=True)
 
                                     if st.session_state.get(summary_state_key, False):
                                         st.markdown("---")
