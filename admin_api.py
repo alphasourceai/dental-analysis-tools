@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -231,7 +232,7 @@ async def stripe_webhook(request: Request) -> JSONResponse:
 
 
 def _record_stripe_event(event: Any, payload: bytes) -> JSONResponse:
-    event_data = _stripe_event_to_dict(event)
+    event_data = _stripe_event_payload_to_dict(payload) or _stripe_event_to_dict(event)
     event_id = _clean_text(event_data.get("id"))
     event_type = _clean_text(event_data.get("type")) or "unknown"
     if not event_id:
@@ -281,6 +282,16 @@ def _record_stripe_event(event: Any, payload: bytes) -> JSONResponse:
         return _error_response(500, "stripe_event_storage_failed", "Unable to store Stripe event.")
     finally:
         db.close()
+
+
+def _stripe_event_payload_to_dict(payload: bytes) -> dict[str, Any]:
+    try:
+        payload_data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if isinstance(payload_data, dict):
+        return payload_data
+    return {}
 
 
 def _stripe_event_to_dict(event: Any) -> dict[str, Any]:
