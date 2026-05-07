@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
+import stripe
 from fastapi import FastAPI, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, or_
 
 from database import SessionLocal
-from models import ClientSubmission, Upload, User
+from models import ClientSubmission, StripeEvent, Upload, User
 from supabase_utils import get_current_admin_user, is_admin_user
 
 logger = logging.getLogger("uvicorn.error")
@@ -29,7 +31,7 @@ if allowed_origins:
         CORSMiddleware,
         allow_origins=allowed_origins,
         allow_credentials=False,
-        allow_methods=["GET", "OPTIONS"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
 
@@ -199,6 +201,83 @@ def list_admin_clients(
     except Exception:
         logger.exception("[admin_api] client list query failed.")
         return _error_response(500, "internal_error", "Unable to load clients.")
+    finally:
+        db.close()
+
+
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request) -> JSONResponse:
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+    if not webhook_secret:
+        logger.error("[admin_api] Stripe webhook secret is not configured.")
+        return _error_response(503, "stripe_not_configured", "Stripe webhook is not configured.")
+
+    signature = request.headers.get("stripe-signature", "")
+    if not signature:
+        return _error_response(400, "missing_signature", "Stripe signature is required.")
+
+    payload = await request.body()
+    try:
+        event = stripe.Webhook.construct_event(payload, signature, webhook_secret)
+    except ValueError:
+        return _error_response(400, "invalid_payload", "Invalid Stripe webhook payload.")
+    except stripe.error.SignatureVerificationError:
+        return _error_response(400, "invalid_signature", "Invalid Stripe webhook signature.")
+    except Exception:
+        logger.exception("[admin_api] Stripe webhook verification failed.")
+        return _error_response(400, "invalid_webhook", "Invalid Stripe webhook.")
+
+    return _record_stripe_event(event, payload)
+
+
+def _record_stripe_event(event: Any, payload: bytes) -> JSONResponse:
+    event_id = _clean_text(event.get("id"))
+    event_type = _clean_text(event.get("type")) or "unknown"
+    if not event_id:
+        return _error_response(400, "missing_event_id", "Stripe event id is required.")
+
+    now = datetime.now(timezone.utc)
+    payload_text = payload.decode("utf-8", errors="replace")
+    db = SessionLocal()
+    try:
+        existing_event = (
+            db.query(StripeEvent)
+            .filter(StripeEvent.stripe_event_id == event_id)
+            .first()
+        )
+        if existing_event:
+            if existing_event.processing_status != "processed":
+                existing_event.processing_status = "duplicate"
+                existing_event.processed_at = existing_event.processed_at or now
+                db.commit()
+            return JSONResponse({"ok": True, "received": True})
+
+        stripe_event = StripeEvent(
+            stripe_event_id=event_id,
+            event_type=event_type,
+            livemode=bool(event.get("livemode")),
+            api_version=_clean_text(event.get("api_version")),
+            processing_status="received",
+            received_at=now,
+            payload=payload_text,
+        )
+        db.add(stripe_event)
+        db.flush()
+        stripe_event.processing_status = "processed"
+        stripe_event.processed_at = now
+        db.commit()
+        return JSONResponse({"ok": True, "received": True})
+    except IntegrityError:
+        db.rollback()
+        return JSONResponse({"ok": True, "received": True})
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "[admin_api] Stripe event storage failed event_id=%s event_type=%s",
+            event_id,
+            event_type,
+        )
+        return _error_response(500, "stripe_event_storage_failed", "Unable to store Stripe event.")
     finally:
         db.close()
 

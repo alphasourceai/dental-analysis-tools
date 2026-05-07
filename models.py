@@ -15,6 +15,7 @@ class User(Base):
     office_name = Column(String(255))
     org_type = Column(String(50))
     phone = Column(String(50), nullable=True)
+    stripe_customer_id = Column(Text, nullable=True, unique=True, index=True)
 
 # Client submission snapshot model
 class ClientSubmission(Base):
@@ -100,6 +101,89 @@ class Upload(Base):
     pdf_version = Column(Integer, nullable=False, server_default=text("0"))
     pdf_url = Column(Text, nullable=True)
     pdf_generated_at = Column(DateTime(timezone=True), nullable=True)
+
+# Stripe webhook/event audit model
+class StripeEvent(Base):
+    __tablename__ = "stripe_events"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    stripe_event_id = Column(Text, nullable=False, unique=True, index=True)
+    event_type = Column(Text, nullable=False, index=True)
+    livemode = Column(Boolean, nullable=False, server_default=text("false"))
+    api_version = Column(Text, nullable=True)
+    processing_status = Column(String(50), nullable=False, server_default=text("'received'"), index=True)
+    error_message = Column(Text, nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+    payload = Column(Text, nullable=True)
+
+# Stripe customer link model
+class StripeCustomer(Base):
+    __tablename__ = "stripe_customers"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    client_email = Column(Text, nullable=True, index=True)
+    stripe_customer_id = Column(Text, nullable=True, unique=True, index=True)
+    livemode = Column(Boolean, nullable=False, server_default=text("false"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+# Stripe Checkout Session audit/link model
+class StripeCheckoutSession(Base):
+    __tablename__ = "stripe_checkout_sessions"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    stripe_checkout_session_id = Column(Text, nullable=True, unique=True, index=True)
+    stripe_customer_id = Column(Text, nullable=True, index=True)
+    client_email = Column(Text, nullable=True, index=True)
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    client_submission_id = Column(PGUUID(as_uuid=True), ForeignKey("client_submissions.id"), nullable=True, index=True)
+    upload_id = Column(PGUUID(as_uuid=True), ForeignKey("uploads.id"), nullable=True, index=True)
+    purpose = Column(String(100), nullable=True, index=True)
+    mode = Column(String(50), nullable=True)
+    status = Column(String(50), nullable=True, index=True)
+    payment_status = Column(String(50), nullable=True, index=True)
+    amount_total = Column(Integer, nullable=True)
+    currency = Column(String(10), nullable=True)
+    success_url = Column(Text, nullable=True)
+    cancel_url = Column(Text, nullable=True)
+    livemode = Column(Boolean, nullable=False, server_default=text("false"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+# Stripe payment audit/link model
+class StripePayment(Base):
+    __tablename__ = "stripe_payments"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    stripe_payment_intent_id = Column(Text, nullable=True, unique=True, index=True)
+    stripe_checkout_session_id = Column(Text, nullable=True, index=True)
+    stripe_invoice_id = Column(Text, nullable=True, index=True)
+    client_email = Column(Text, nullable=True, index=True)
+    upload_id = Column(PGUUID(as_uuid=True), ForeignKey("uploads.id"), nullable=True, index=True)
+    status = Column(String(50), nullable=True, index=True)
+    amount = Column(Integer, nullable=True)
+    amount_received = Column(Integer, nullable=True)
+    amount_refunded = Column(Integer, nullable=True)
+    currency = Column(String(10), nullable=True)
+    paid_at = Column(DateTime(timezone=True), nullable=True)
+    failed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+# Manual/admin billing override audit model
+class BillingOverride(Base):
+    __tablename__ = "billing_overrides"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    target_type = Column(String(100), nullable=True, index=True)
+    target_id = Column(Text, nullable=True, index=True)
+    client_email = Column(Text, nullable=True, index=True)
+    override_paid = Column(Boolean, nullable=True)
+    reason = Column(Text, nullable=True)
+    admin_user_id = Column(Text, nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 # Upload file audit model
 class UploadFile(Base):
