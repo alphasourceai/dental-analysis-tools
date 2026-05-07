@@ -363,6 +363,88 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
         db.close()
 
 
+@app.get("/api/admin/billing/client")
+def get_admin_billing_client(
+    request: Request,
+    email: Optional[str] = None,
+) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    client_email, validation_error = _required_email(email)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        customers = (
+            db.query(StripeCustomer)
+            .filter(func.lower(StripeCustomer.client_email) == client_email)
+            .order_by(StripeCustomer.updated_at.desc())
+            .all()
+        )
+        checkout_sessions = (
+            db.query(StripeCheckoutSession)
+            .filter(func.lower(StripeCheckoutSession.client_email) == client_email)
+            .order_by(StripeCheckoutSession.created_at.desc())
+            .all()
+        )
+        uploads = (
+            db.query(Upload)
+            .filter(func.lower(Upload.user_email) == client_email)
+            .order_by(Upload.id.desc())
+            .limit(25)
+            .all()
+        )
+
+        paid_sessions = [
+            session
+            for session in checkout_sessions
+            if (_clean_text(session.payment_status) or "").lower() == "paid"
+        ]
+        open_sessions = [
+            session
+            for session in checkout_sessions
+            if (_clean_text(session.payment_status) or "").lower() != "paid"
+            or (_clean_text(session.status) or "").lower() == "open"
+        ]
+        latest_session = checkout_sessions[0] if checkout_sessions else None
+        latest_paid_session = paid_sessions[0] if paid_sessions else None
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "clientEmail": client_email,
+                "customer": _stripe_customer_payload(customers[0]) if customers else None,
+                "customers": [_stripe_customer_payload(customer) for customer in customers],
+                "summary": {
+                    "checkoutSessionCount": len(checkout_sessions),
+                    "paidCheckoutSessionCount": len(paid_sessions),
+                    "openCheckoutSessionCount": len(open_sessions),
+                    "latestPaymentStatus": _clean_text(
+                        getattr(latest_session, "payment_status", None)
+                    ),
+                },
+                "latestPaidSession": (
+                    _checkout_session_payload(latest_paid_session) if latest_paid_session else None
+                ),
+                "checkoutSessions": [
+                    _checkout_session_payload(session)
+                    for session in checkout_sessions[:25]
+                ],
+                "uploads": [_upload_payload(upload) for upload in uploads],
+                "invoices": [],
+                "subscriptions": [],
+            }
+        )
+    except Exception:
+        logger.exception("[admin_api] billing client lookup failed client_email=%s", client_email)
+        return _error_response(500, "billing_lookup_failed", "Unable to load billing details.")
+    finally:
+        db.close()
+
+
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request) -> JSONResponse:
     webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
@@ -502,6 +584,55 @@ def _stripe_id(value: object) -> Optional[str]:
     if isinstance(value, dict):
         return _clean_text(value.get("id"))
     return _clean_text(value)
+
+
+def _stripe_customer_payload(customer: StripeCustomer) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(customer, "id", None)),
+        "userId": _id_text(getattr(customer, "user_id", None)),
+        "clientEmail": _clean_text(getattr(customer, "client_email", None)),
+        "stripeCustomerId": _clean_text(getattr(customer, "stripe_customer_id", None)),
+        "livemode": bool(getattr(customer, "livemode", False)),
+        "createdAt": _iso_datetime(getattr(customer, "created_at", None)),
+        "updatedAt": _iso_datetime(getattr(customer, "updated_at", None)),
+    }
+
+
+def _checkout_session_payload(session: StripeCheckoutSession) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(session, "id", None)),
+        "stripeCheckoutSessionId": _clean_text(
+            getattr(session, "stripe_checkout_session_id", None)
+        ),
+        "stripeCustomerId": _clean_text(getattr(session, "stripe_customer_id", None)),
+        "purpose": _clean_text(getattr(session, "purpose", None)),
+        "mode": _clean_text(getattr(session, "mode", None)),
+        "status": _clean_text(getattr(session, "status", None)),
+        "paymentStatus": _clean_text(getattr(session, "payment_status", None)),
+        "amountTotal": _optional_int(getattr(session, "amount_total", None)),
+        "currency": _clean_text(getattr(session, "currency", None)),
+        "livemode": bool(getattr(session, "livemode", False)),
+        "uploadId": _id_text(getattr(session, "upload_id", None)),
+        "clientSubmissionId": _id_text(getattr(session, "client_submission_id", None)),
+        "createdAt": _iso_datetime(getattr(session, "created_at", None)),
+        "updatedAt": _iso_datetime(getattr(session, "updated_at", None)),
+    }
+
+
+def _upload_payload(upload: Upload) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(upload, "id", None)),
+        "fileName": _clean_text(getattr(upload, "file_name", None)),
+        "toolName": _clean_text(getattr(upload, "tool_name", None)),
+        "paid": bool(getattr(upload, "paid", False)),
+        "uploadTime": _clean_text(getattr(upload, "upload_time", None)),
+    }
+
+
+def _id_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    return str(value)
 
 
 def _stripe_event_payload_to_dict(payload: bytes) -> dict[str, Any]:
