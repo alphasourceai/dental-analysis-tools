@@ -422,7 +422,7 @@ def _record_stripe_event(event: Any, payload: bytes) -> JSONResponse:
         )
         db.add(stripe_event)
         db.flush()
-        stripe_event.processing_status = "processed"
+        stripe_event.processing_status = _process_stripe_event(db, event_data, now)
         stripe_event.processed_at = now
         db.commit()
         return JSONResponse({"ok": True, "received": True})
@@ -439,6 +439,69 @@ def _record_stripe_event(event: Any, payload: bytes) -> JSONResponse:
         return _error_response(500, "stripe_event_storage_failed", "Unable to store Stripe event.")
     finally:
         db.close()
+
+
+def _process_stripe_event(db: Any, event_data: dict[str, Any], now: datetime) -> str:
+    event_type = _clean_text(event_data.get("type")) or "unknown"
+    if event_type != "checkout.session.completed":
+        return "processed"
+
+    session_data = _stripe_checkout_session_from_event(event_data)
+    checkout_session_id = _clean_text(session_data.get("id"))
+    if not checkout_session_id:
+        logger.warning("[admin_api] Stripe checkout.session.completed missing session id.")
+        return "needs_review"
+
+    local_session = (
+        db.query(StripeCheckoutSession)
+        .filter(StripeCheckoutSession.stripe_checkout_session_id == checkout_session_id)
+        .first()
+    )
+    if not local_session:
+        logger.warning(
+            "[admin_api] Stripe checkout session not found for completed event session_id=%s",
+            checkout_session_id,
+        )
+        return "needs_review"
+
+    local_session.status = _clean_text(session_data.get("status")) or local_session.status
+    local_session.payment_status = (
+        _clean_text(session_data.get("payment_status")) or local_session.payment_status
+    )
+    amount_total = _optional_int(session_data.get("amount_total"))
+    if amount_total is not None:
+        local_session.amount_total = amount_total
+    local_session.currency = _clean_text(session_data.get("currency")) or local_session.currency
+    local_session.stripe_customer_id = (
+        _stripe_id(session_data.get("customer")) or local_session.stripe_customer_id
+    )
+    session_livemode = session_data.get("livemode", event_data.get("livemode"))
+    if session_livemode is not None:
+        local_session.livemode = bool(session_livemode)
+    local_session.updated_at = now
+    logger.info(
+        "[admin_api] Stripe checkout session completed session_id=%s status=%s payment_status=%s",
+        checkout_session_id,
+        local_session.status,
+        local_session.payment_status,
+    )
+    return "processed"
+
+
+def _stripe_checkout_session_from_event(event_data: dict[str, Any]) -> dict[str, Any]:
+    data = event_data.get("data")
+    if not isinstance(data, dict):
+        return {}
+    session_data = data.get("object")
+    if isinstance(session_data, dict):
+        return session_data
+    return _stripe_object_to_dict(session_data)
+
+
+def _stripe_id(value: object) -> Optional[str]:
+    if isinstance(value, dict):
+        return _clean_text(value.get("id"))
+    return _clean_text(value)
 
 
 def _stripe_event_payload_to_dict(payload: bytes) -> dict[str, Any]:
