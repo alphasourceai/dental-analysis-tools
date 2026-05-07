@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Dict, Optional
 
+import requests
 from fastapi import BackgroundTasks, FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,7 +22,9 @@ ACKNOWLEDGEMENT_VERSION = "financial-only-v1"
 DEFAULT_MAX_FILE_MB = 15
 DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 3600
 DEFAULT_RATE_LIMIT_MAX = 3
+DEFAULT_PREFILL_RATE_LIMIT_MAX = 30
 READ_CHUNK_SIZE = 1024 * 1024
+CID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{4,128}$")
 
 app = FastAPI(title="Public Analyzer API")
 
@@ -45,6 +49,9 @@ jobs_lock = Lock()
 rate_limit_hits: Dict[str, list[float]] = {}
 rate_limit_lock = Lock()
 
+prefill_rate_limit_hits: Dict[str, list[float]] = {}
+prefill_rate_limit_lock = Lock()
+
 
 @app.get("/")
 def root() -> Dict[str, Any]:
@@ -59,6 +66,35 @@ def root_head() -> Response:
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"ok": True, "service": "public-analyzer-api"}
+
+
+@app.get("/api/public-analyzer/ghl-prefill")
+def get_ghl_prefill(request: Request, cid: str) -> JSONResponse:
+    cleaned_cid = cid.strip()
+    if not _is_valid_cid(cleaned_cid):
+        return _error_response(400, "validation_error", "Invalid contact identifier.")
+
+    client_ip = _client_ip(request)
+    if not _prefill_rate_limit_allows(client_ip):
+        return _error_response(
+            429,
+            "rate_limited",
+            "Too many prefill requests. Please try again later.",
+        )
+
+    contact, error_code = _fetch_ghl_contact(cleaned_cid)
+    if error_code:
+        if error_code == "not_configured":
+            return _error_response(503, "not_configured", "GHL prefill is not configured.")
+        return _error_response(404, "not_found", "Contact information could not be loaded.")
+
+    if not _contact_matches_location(contact):
+        return _error_response(404, "not_found", "Contact information could not be loaded.")
+
+    response = _safe_prefill_response(cleaned_cid, contact)
+    if not response["lockedFields"]:
+        return _error_response(404, "not_found", "Contact information could not be loaded.")
+    return JSONResponse(response)
 
 
 @app.exception_handler(RequestValidationError)
@@ -312,6 +348,25 @@ def _rate_limit_allows(client_ip: str) -> bool:
         return True
 
 
+def _prefill_rate_limit_allows(client_ip: str) -> bool:
+    now = time.time()
+    window_seconds = _env_int(
+        "ANALYZER_API_PREFILL_RATE_LIMIT_WINDOW_SECONDS",
+        DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+    )
+    max_hits = _env_int("ANALYZER_API_PREFILL_RATE_LIMIT_MAX", DEFAULT_PREFILL_RATE_LIMIT_MAX)
+    cutoff = now - window_seconds
+
+    with prefill_rate_limit_lock:
+        hits = [hit for hit in prefill_rate_limit_hits.get(client_ip, []) if hit >= cutoff]
+        if len(hits) >= max_hits:
+            prefill_rate_limit_hits[client_ip] = hits
+            return False
+        hits.append(now)
+        prefill_rate_limit_hits[client_ip] = hits
+        return True
+
+
 def _client_ip(request: Request) -> str:
     forwarded_for = request.headers.get("x-forwarded-for", "")
     if forwarded_for:
@@ -342,6 +397,107 @@ def _file_extension(filename: str) -> str:
     if dot_index == -1:
         return ""
     return filename[dot_index:].lower()
+
+
+def _is_valid_cid(cid: str) -> bool:
+    return bool(cid and CID_PATTERN.match(cid))
+
+
+def _fetch_ghl_contact(cid: str) -> tuple[Dict[str, Any], Optional[str]]:
+    base_url = os.getenv("GHL_BASE_URL", "https://services.leadconnectorhq.com").rstrip("/")
+    token = os.getenv("GHL_BEARER_TOKEN", "")
+    version = os.getenv("GHL_API_VERSION", "2021-07-28")
+    if not base_url or not token:
+        logger.warning("[ghl_prefill] missing GHL config.")
+        return {}, "not_configured"
+
+    url = f"{base_url}/contacts/{cid}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+        "Version": version,
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+    except requests.RequestException:
+        logger.warning("[ghl_prefill] request failed cid=%s", cid)
+        return {}, "not_found"
+    if response.status_code != 200:
+        logger.warning("[ghl_prefill] lookup failed cid=%s status=%s", cid, response.status_code)
+        return {}, "not_found"
+    try:
+        payload = response.json()
+    except ValueError:
+        logger.warning("[ghl_prefill] invalid json cid=%s", cid)
+        return {}, "not_found"
+    if isinstance(payload, dict) and isinstance(payload.get("contact"), dict):
+        return payload["contact"], None
+    if isinstance(payload, dict):
+        return payload, None
+    return {}, "not_found"
+
+
+def _contact_matches_location(contact: Dict[str, Any]) -> bool:
+    location_id = os.getenv("LOCATION_ID", "").strip()
+    contact_location = contact.get("locationId") or contact.get("location_id")
+    if location_id and contact_location and str(contact_location) != location_id:
+        return False
+    return True
+
+
+def _extract_office_name(contact: Dict[str, Any]) -> str:
+    field_id = os.getenv("GHL_OFFICE_FIELD_ID", "").strip()
+    if not field_id:
+        return ""
+    custom_fields = contact.get("customFields") or contact.get("custom_fields") or []
+    if not isinstance(custom_fields, list):
+        return ""
+    for field in custom_fields:
+        if not isinstance(field, dict):
+            continue
+        if str(field.get("id")) == field_id:
+            return _clean_contact_text(field.get("value"))
+    return ""
+
+
+def _extract_phone(contact: Dict[str, Any]) -> str:
+    for key in ("phone", "phoneNumber", "phone_number"):
+        phone = _clean_contact_text(contact.get(key))
+        if phone:
+            return phone
+    return ""
+
+
+def _safe_prefill_response(cid: str, contact: Dict[str, Any]) -> Dict[str, Any]:
+    fields = {
+        "firstName": _clean_contact_text(contact.get("firstName") or contact.get("first_name")),
+        "lastName": _clean_contact_text(contact.get("lastName") or contact.get("last_name")),
+        "email": _clean_contact_text(contact.get("email")),
+        "officeName": _extract_office_name(contact),
+        "phone": _extract_phone(contact),
+    }
+    locked_fields = [field_name for field_name, value in fields.items() if value]
+    return {
+        "ok": True,
+        "cid": cid,
+        "firstName": fields["firstName"],
+        "lastName": fields["lastName"],
+        "email": fields["email"],
+        "officeName": fields["officeName"],
+        "phone": fields["phone"],
+        "lockedFields": locked_fields,
+    }
+
+
+def _clean_contact_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else ""
+    if isinstance(value, dict):
+        return ""
+    text = str(value).strip()
+    return text[:255]
 
 
 def _error_message_for_code(code: str) -> str:
