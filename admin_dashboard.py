@@ -1420,6 +1420,91 @@ def _render_admin_css() -> None:
         .as-secure-muted {
             color: #5E6684;
         }
+        .as-pdf-step-card {
+            background: #FFFFFF;
+            border: 1px solid rgba(10, 21, 71, 0.10);
+            border-radius: 16px;
+            box-shadow: 0 12px 28px rgba(10, 21, 71, 0.05);
+            margin: 0.9rem 0;
+            padding: 0.95rem 1rem;
+        }
+        .as-pdf-step-kicker {
+            color: #A380F6;
+            font-size: 0.66rem;
+            font-weight: 800;
+            letter-spacing: 0.09em;
+            margin-bottom: 0.22rem;
+            text-transform: uppercase;
+        }
+        .as-pdf-step-title {
+            color: #0A1547;
+            font-size: 1.05rem;
+            font-weight: 760;
+            line-height: 1.2;
+            margin-bottom: 0.2rem;
+        }
+        .as-pdf-step-copy {
+            color: #5E6684;
+            font-size: 0.9rem;
+            line-height: 1.35;
+            margin-bottom: 0.65rem;
+        }
+        .as-pdf-notice {
+            background: rgba(2, 217, 157, 0.10);
+            border: 1px solid rgba(2, 217, 157, 0.24);
+            border-radius: 12px;
+            color: #1A2460;
+            font-size: 0.9rem;
+            font-weight: 650;
+            margin: 0.8rem 0;
+            padding: 0.7rem 0.85rem;
+        }
+        .as-pdf-summary-grid,
+        .as-pdf-metadata-grid {
+            display: grid;
+            gap: 0.55rem;
+            grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+            margin: 0.55rem 0 0.35rem 0;
+        }
+        .as-pdf-meta-item {
+            background: #F8F9FD;
+            border: 1px solid rgba(10, 21, 71, 0.08);
+            border-radius: 12px;
+            padding: 0.62rem 0.7rem;
+        }
+        .as-pdf-label {
+            color: #5E6684;
+            font-size: 0.64rem;
+            font-weight: 800;
+            letter-spacing: 0.07em;
+            margin-bottom: 0.16rem;
+            text-transform: uppercase;
+        }
+        .as-pdf-value {
+            color: #1A2460;
+            font-size: 0.9rem;
+            font-weight: 650;
+            line-height: 1.25;
+            word-break: break-word;
+        }
+        .as-pdf-content-section {
+            border-top: 1px solid rgba(10, 21, 71, 0.08);
+            margin-top: 0.85rem;
+            padding-top: 0.8rem;
+        }
+        .as-pdf-content-title {
+            color: #0A1547;
+            font-size: 0.96rem;
+            font-weight: 740;
+            margin-bottom: 0.45rem;
+        }
+        .as-pdf-generated-card {
+            background: rgba(2, 171, 224, 0.08);
+            border: 1px solid rgba(2, 171, 224, 0.18);
+            border-radius: 12px;
+            margin-top: 0.85rem;
+            padding: 0.75rem 0.85rem;
+        }
         .as-admin-upload-label {
             align-items: center;
             background: #FFFFFF;
@@ -3929,12 +4014,29 @@ def display_document_analysis(perf: AdminPerfTracker):
 
 def display_pdf_generator(perf: AdminPerfTracker):
     st.markdown("<h3 style='margin-top: 1.5rem;'>PDF Generator</h3>", unsafe_allow_html=True)
-    st.session_state.pop("admin_pdf_notice", None)
+    pdf_notice = st.session_state.pop("admin_pdf_notice", None)
+    if pdf_notice:
+        st.markdown(
+            f"<div class=\"as-pdf-notice\">{html.escape(str(pdf_notice))}</div>",
+            unsafe_allow_html=True,
+        )
 
     if "admin_pdf_upload_id" not in st.session_state:
         st.session_state.admin_pdf_upload_id = ""
     if "admin_pdf_client_email" not in st.session_state:
         st.session_state.admin_pdf_client_email = ""
+
+    def _pdf_display(value: object) -> str:
+        text_value = str(value or "").strip()
+        return html.escape(text_value if text_value else "—")
+
+    def _pdf_meta_item(label: str, value: object) -> str:
+        return (
+            "<div class=\"as-pdf-meta-item\">"
+            f"<div class=\"as-pdf-label\">{html.escape(label)}</div>"
+            f"<div class=\"as-pdf-value\">{_pdf_display(value)}</div>"
+            "</div>"
+        )
 
     perf.mark_first_db_query()
     logging.info("[db] url_present=%s", bool(os.getenv("DATABASE_URL")))
@@ -3979,6 +4081,16 @@ def display_pdf_generator(perf: AdminPerfTracker):
             st.info("No client submissions available for PDF generation.")
             return
 
+        st.markdown(
+            """
+            <div class="as-pdf-step-card">
+                <div class="as-pdf-step-kicker">Step 1</div>
+                <div class="as-pdf-step-title">Select client/upload</div>
+                <div class="as-pdf-step-copy">Choose the client and analyzed upload that should be turned into a PDF report.</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         client_index = 0
         if preselected_email and preselected_email in client_emails:
             client_index = client_emails.index(preselected_email)
@@ -3995,6 +4107,7 @@ def display_pdf_generator(perf: AdminPerfTracker):
         upload_rows = [row for row in upload_rows if row.analysis_data]
         if not upload_rows:
             st.info("No analyzed uploads available for this client.")
+            st.markdown("</div>", unsafe_allow_html=True)
             return
 
         def _upload_label(row: Upload) -> str:
@@ -4021,7 +4134,16 @@ def display_pdf_generator(perf: AdminPerfTracker):
             st.session_state.admin_pdf_preselect_id = ""
         if not selected_upload:
             st.warning("Selected upload is no longer available.")
+            st.markdown("</div>", unsafe_allow_html=True)
             return
+        st.markdown(
+            "<div class=\"as-pdf-summary-grid\">"
+            + _pdf_meta_item("Selected file", selected_upload.file_name)
+            + _pdf_meta_item("Tool", selected_upload.tool_name)
+            + _pdf_meta_item("Upload time", _format_admin_dt(selected_upload.upload_time))
+            + "</div></div>",
+            unsafe_allow_html=True,
+        )
 
         submission = None
         if selected_upload.submission_id:
@@ -4033,21 +4155,31 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 ClientSubmission.user_email == selected_email
             ).order_by(ClientSubmission.submitted_at.desc()).first()
 
-        st.markdown("**PDF Builder**")
-        metadata_cols = st.columns(2)
+        st.markdown(
+            """
+            <div class="as-pdf-step-card">
+                <div class="as-pdf-step-kicker">Step 2</div>
+                <div class="as-pdf-step-title">Review metadata</div>
+                <div class="as-pdf-step-copy">Confirm the client and upload details that will appear in the generated report.</div>
+            """,
+            unsafe_allow_html=True,
+        )
         client_name = ""
         office_name = ""
         if submission:
             client_name = f"{submission.first_name or ''} {submission.last_name or ''}".strip()
             office_name = submission.office_name or ""
-        with metadata_cols[0]:
-            st.markdown(f"**Client First Name:** {submission.first_name if submission else '-'}")
-            st.markdown(f"**Client Last Name:** {submission.last_name if submission else '-'}")
-            st.markdown(f"**Office/Group Name:** {office_name or '-'}")
-        with metadata_cols[1]:
-            st.markdown(f"**Client Email:** {selected_email}")
-            st.markdown(f"**Tool Name:** {selected_upload.tool_name or '-'}")
-            st.markdown(f"**Upload Date/Time:** {_format_admin_dt(selected_upload.upload_time) or '-'}")
+        st.markdown(
+            "<div class=\"as-pdf-metadata-grid\">"
+            + _pdf_meta_item("Client first name", submission.first_name if submission else None)
+            + _pdf_meta_item("Client last name", submission.last_name if submission else None)
+            + _pdf_meta_item("Office/group name", office_name)
+            + _pdf_meta_item("Client email", selected_email)
+            + _pdf_meta_item("Tool name", selected_upload.tool_name)
+            + _pdf_meta_item("Upload date/time", _format_admin_dt(selected_upload.upload_time))
+            + "</div>",
+            unsafe_allow_html=True,
+        )
 
         current_paid = bool(getattr(selected_upload, "paid", False))
         paid_value = st.checkbox("Paid", value=current_paid, key=f"pdf_paid_toggle_{selected_upload.id}")
@@ -4058,14 +4190,25 @@ def display_pdf_generator(perf: AdminPerfTracker):
                     {"paid": paid_value}
                 )
                 paid_db.commit()
+                st.markdown("</div>", unsafe_allow_html=True)
                 st.rerun()
             except Exception as exc:
                 logging.error("Failed to update paid flag for upload %s: %s", selected_upload.id, str(exc))
                 paid_db.rollback()
             finally:
                 paid_db.close()
+        st.markdown("</div>", unsafe_allow_html=True)
 
         analysis_payload = _parse_analysis_json(selected_upload.analysis_data)
+        st.markdown(
+            """
+            <div class="as-pdf-step-card">
+                <div class="as-pdf-step-kicker">Step 3</div>
+                <div class="as-pdf-step-title">Choose report content</div>
+                <div class="as-pdf-step-copy">Review, edit, and include the analysis points that should appear in the client PDF.</div>
+            """,
+            unsafe_allow_html=True,
+        )
         if not analysis_payload:
             st.warning("Analysis data is missing or unreadable. You can paste content manually below.")
 
@@ -4101,7 +4244,10 @@ def display_pdf_generator(perf: AdminPerfTracker):
                         st.session_state[key] = False
                     st.rerun()
 
-        st.markdown("#### Improvement Opportunities")
+        st.markdown(
+            "<div class=\"as-pdf-content-section\"><div class=\"as-pdf-content-title\">Improvement Opportunities</div>",
+            unsafe_allow_html=True,
+        )
         if opportunities:
             for idx, item in enumerate(opportunities):
                 include_key = f"{builder_prefix}_opp_include_{idx}"
@@ -4138,7 +4284,10 @@ def display_pdf_generator(perf: AdminPerfTracker):
                     if line.strip():
                         selected_opportunities.append({"title": line.strip(), "impact": "", "recommendation": ""})
 
-        st.markdown("#### Trends")
+        st.markdown(
+            "</div><div class=\"as-pdf-content-section\"><div class=\"as-pdf-content-title\">Trends</div>",
+            unsafe_allow_html=True,
+        )
         if trends:
             for idx, trend in enumerate(trends):
                 include_key = f"{builder_prefix}_trend_include_{idx}"
@@ -4162,7 +4311,10 @@ def display_pdf_generator(perf: AdminPerfTracker):
                     if line.strip():
                         selected_trends.append(line.strip())
 
-        st.markdown("#### Key Trends Identified")
+        st.markdown(
+            "</div><div class=\"as-pdf-content-section\"><div class=\"as-pdf-content-title\">Key Trends Identified</div>",
+            unsafe_allow_html=True,
+        )
         if key_trends:
             for idx, trend in enumerate(key_trends):
                 include_key = f"{builder_prefix}_key_include_{idx}"
@@ -4186,16 +4338,32 @@ def display_pdf_generator(perf: AdminPerfTracker):
                     if line.strip():
                         selected_key_trends.append(line.strip())
 
+        st.markdown(
+            "</div><div class=\"as-pdf-content-section\"><div class=\"as-pdf-content-title\">Additional Notes</div>",
+            unsafe_allow_html=True,
+        )
         notes = st.text_area(
             "Additional Notes",
             max_chars=2000,
             key=f"{builder_prefix}_notes",
             height=120,
         )
+        st.markdown("</div></div>", unsafe_allow_html=True)
+
+        st.markdown(
+            """
+            <div class="as-pdf-step-card">
+                <div class="as-pdf-step-kicker">Step 4</div>
+                <div class="as-pdf-step-title">Generate PDF</div>
+                <div class="as-pdf-step-copy">Create the client-ready PDF, save it to storage, and use the latest report links below.</div>
+            """,
+            unsafe_allow_html=True,
+        )
         if st.button("Generate PDF", type="primary", key=f"{builder_prefix}_generate"):
             if not any([selected_opportunities, selected_trends, selected_key_trends, notes.strip()]):
                 st.session_state[f"{builder_prefix}_no_selection_warning"] = True
                 st.warning("Please make at least one selection to create a report.")
+                st.markdown("</div>", unsafe_allow_html=True)
                 st.stop()
             current_version = getattr(selected_upload, "pdf_version", 0) or 0
             next_version = current_version + 1
@@ -4227,12 +4395,14 @@ def display_pdf_generator(perf: AdminPerfTracker):
                     exc,
                 )
                 st.error("Unable to generate PDF. Please try again.")
+                st.markdown("</div>", unsafe_allow_html=True)
                 return
 
             pdf_url, err = _upload_pdf_report(pdf_bytes, object_path)
             if err:
                 logging.error("PDF upload failed for upload %s: %s", selected_upload.id, err)
                 st.error("Unable to save PDF to storage.")
+                st.markdown("</div>", unsafe_allow_html=True)
                 return
             signed_url = _create_report_signed_url(object_path)
 
@@ -4254,6 +4424,7 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 st.session_state["admin_last_report_file_name"] = file_name
                 st.session_state["admin_last_report_upload_id"] = str(selected_upload.id)
                 st.success("PDF generated and saved successfully.")
+                st.markdown("</div>", unsafe_allow_html=True)
                 st.rerun()
             except Exception as exc:
                 logging.error("Failed to update upload PDF metadata %s: %s", selected_upload.id, str(exc))
@@ -4271,7 +4442,10 @@ def display_pdf_generator(perf: AdminPerfTracker):
         last_report_signed_url = st.session_state.get("admin_last_report_signed_url")
         last_report_upload_id = st.session_state.get("admin_last_report_upload_id")
         if last_report_bytes and last_report_file_name:
-            st.markdown("**Latest Generated Report**")
+            st.markdown(
+                "<div class=\"as-pdf-generated-card\"><div class=\"as-pdf-content-title\">Latest Generated Report</div>",
+                unsafe_allow_html=True,
+            )
             st.download_button(
                 label="Download PDF",
                 data=last_report_bytes,
@@ -4289,6 +4463,8 @@ def display_pdf_generator(perf: AdminPerfTracker):
                 st.warning(
                     "PDF generated and stored, but an open-link could not be created. Use Download PDF."
                 )
+            st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
     finally:
         db.close()
 
