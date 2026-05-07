@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -28,6 +28,21 @@ if allowed_origins:
         allow_methods=["GET", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
+
+
+@app.get("/")
+def root() -> dict[str, object]:
+    return {"ok": True, "service": "admin-api"}
+
+
+@app.head("/")
+def root_head() -> Response:
+    return Response(status_code=200)
+
+
+@app.get("/health")
+def health() -> dict[str, object]:
+    return {"ok": True, "service": "admin-api"}
 
 
 @app.get("/api/admin/me")
