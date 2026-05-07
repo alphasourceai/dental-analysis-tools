@@ -231,8 +231,9 @@ async def stripe_webhook(request: Request) -> JSONResponse:
 
 
 def _record_stripe_event(event: Any, payload: bytes) -> JSONResponse:
-    event_id = _clean_text(event.get("id"))
-    event_type = _clean_text(event.get("type")) or "unknown"
+    event_data = _stripe_event_to_dict(event)
+    event_id = _clean_text(event_data.get("id"))
+    event_type = _clean_text(event_data.get("type")) or "unknown"
     if not event_id:
         return _error_response(400, "missing_event_id", "Stripe event id is required.")
 
@@ -255,8 +256,8 @@ def _record_stripe_event(event: Any, payload: bytes) -> JSONResponse:
         stripe_event = StripeEvent(
             stripe_event_id=event_id,
             event_type=event_type,
-            livemode=bool(event.get("livemode")),
-            api_version=_clean_text(event.get("api_version")),
+            livemode=bool(event_data.get("livemode")),
+            api_version=_clean_text(event_data.get("api_version")),
             processing_status="received",
             received_at=now,
             payload=payload_text,
@@ -280,6 +281,14 @@ def _record_stripe_event(event: Any, payload: bytes) -> JSONResponse:
         return _error_response(500, "stripe_event_storage_failed", "Unable to store Stripe event.")
     finally:
         db.close()
+
+
+def _stripe_event_to_dict(event: Any) -> dict[str, Any]:
+    if hasattr(event, "to_dict_recursive"):
+        return event.to_dict_recursive()
+    if isinstance(event, dict):
+        return event
+    return {}
 
 
 def _require_admin_user(request: Request) -> tuple[dict[str, Any], Optional[JSONResponse]]:
