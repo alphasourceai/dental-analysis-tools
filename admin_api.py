@@ -146,7 +146,13 @@ def list_admin_clients(
         upload_counts: dict[str, int] = {}
         latest_submissions: dict[str, ClientSubmission] = {}
         users_by_email: dict[str, User] = {}
+        billing_summaries: dict[str, dict[str, Any]] = {}
         if client_emails:
+            normalized_client_emails = [
+                email.strip().lower()
+                for email in client_emails
+                if email and email.strip()
+            ]
             upload_count_rows = (
                 db.query(
                     ClientSubmission.user_email,
@@ -158,6 +164,46 @@ def list_admin_clients(
                 .all()
             )
             upload_counts = {row[0]: int(row[1] or 0) for row in upload_count_rows if row[0]}
+
+            billing_summaries = {
+                email: _empty_billing_summary()
+                for email in normalized_client_emails
+            }
+            checkout_session_rows = (
+                db.query(StripeCheckoutSession)
+                .filter(func.lower(StripeCheckoutSession.client_email).in_(normalized_client_emails))
+                .order_by(
+                    func.lower(StripeCheckoutSession.client_email).asc(),
+                    StripeCheckoutSession.created_at.desc(),
+                )
+                .all()
+            )
+            for session in checkout_session_rows:
+                billing_email = (_clean_text(session.client_email) or "").lower()
+                summary = billing_summaries.setdefault(billing_email, _empty_billing_summary())
+                payment_status = (_clean_text(session.payment_status) or "").lower()
+                status = (_clean_text(session.status) or "").lower()
+                summary["checkoutSessionCount"] += 1
+                if payment_status == "paid":
+                    summary["paidCheckoutSessionCount"] += 1
+                if payment_status != "paid" or status == "open":
+                    summary["openCheckoutSessionCount"] += 1
+                if summary["latestPaymentStatus"] is None:
+                    summary["latestPaymentStatus"] = _clean_text(session.payment_status)
+
+            override_count_rows = (
+                db.query(
+                    func.lower(BillingOverride.client_email).label("client_email"),
+                    func.count(BillingOverride.id).label("override_count"),
+                )
+                .filter(func.lower(BillingOverride.client_email).in_(normalized_client_emails))
+                .group_by(func.lower(BillingOverride.client_email))
+                .all()
+            )
+            for row in override_count_rows:
+                billing_email = row.client_email
+                summary = billing_summaries.setdefault(billing_email, _empty_billing_summary())
+                summary["manualOverrideCount"] = int(row.override_count or 0)
 
             latest_rows = (
                 db.query(ClientSubmission)
@@ -196,6 +242,7 @@ def list_admin_clients(
                     "uploadCount": upload_counts.get(email, 0),
                     "latestSubmittedAt": _iso_datetime(row.last_submitted_at),
                     "latestStatus": _clean_text(getattr(latest_submission, "status", None)),
+                    "billing": billing_summaries.get(email.lower(), _empty_billing_summary()),
                 }
             )
 
@@ -937,6 +984,16 @@ def _clients_response(
             "hasMore": has_more,
         }
     )
+
+
+def _empty_billing_summary() -> dict[str, Any]:
+    return {
+        "checkoutSessionCount": 0,
+        "paidCheckoutSessionCount": 0,
+        "openCheckoutSessionCount": 0,
+        "manualOverrideCount": 0,
+        "latestPaymentStatus": None,
+    }
 
 
 def _clean_text(value: object) -> Optional[str]:
