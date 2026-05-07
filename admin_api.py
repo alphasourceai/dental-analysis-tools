@@ -5,6 +5,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
+from uuid import UUID
 
 import stripe
 from fastapi import FastAPI, Query, Request, Response
@@ -14,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, or_
 
 from database import SessionLocal
-from models import ClientSubmission, StripeEvent, Upload, User
+from models import ClientSubmission, StripeCheckoutSession, StripeCustomer, StripeEvent, Upload, User
 from supabase_utils import get_current_admin_user, is_admin_user
 
 logger = logging.getLogger("uvicorn.error")
@@ -206,6 +207,162 @@ def list_admin_clients(
         db.close()
 
 
+@app.post("/api/admin/billing/checkout-sessions")
+async def create_admin_checkout_session(request: Request) -> JSONResponse:
+    admin_user, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    stripe_secret_key = os.getenv("STRIPE_SECRET_KEY", "").strip()
+    if not stripe_secret_key:
+        logger.error("[admin_api] Stripe secret key is not configured.")
+        return _error_response(503, "stripe_not_configured", "Stripe is not configured.")
+
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    client_email, validation_error = _required_email(body.get("clientEmail"))
+    if validation_error:
+        return validation_error
+    purpose, validation_error = _required_text(body.get("purpose"), "purpose")
+    if validation_error:
+        return validation_error
+    description, validation_error = _required_text(body.get("description"), "description")
+    if validation_error:
+        return validation_error
+    amount, validation_error = _required_amount(body.get("amount"))
+    if validation_error:
+        return validation_error
+    currency = _clean_text(body.get("currency")) or "usd"
+    currency = currency.lower()
+    if len(currency) != 3 or not currency.isalpha():
+        return _error_response(400, "invalid_currency", "Currency must be a three-letter code.")
+    success_url, validation_error = _required_text(body.get("successUrl"), "successUrl")
+    if validation_error:
+        return validation_error
+    cancel_url, validation_error = _required_text(body.get("cancelUrl"), "cancelUrl")
+    if validation_error:
+        return validation_error
+    if not _is_safe_checkout_url(success_url) or not _is_safe_checkout_url(cancel_url):
+        return _error_response(400, "invalid_url", "Checkout URLs must use http or https.")
+    upload_id, validation_error = _optional_uuid(body.get("uploadId"), "uploadId")
+    if validation_error:
+        return validation_error
+    client_submission_id, validation_error = _optional_uuid(
+        body.get("clientSubmissionId"),
+        "clientSubmissionId",
+    )
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        user_record = db.query(User).filter(func.lower(User.email) == client_email).first()
+        stripe_customer_id, livemode = _get_or_create_stripe_customer(
+            db=db,
+            client_email=client_email,
+            user_record=user_record,
+            stripe_secret_key=stripe_secret_key,
+        )
+        metadata = {
+            "client_email": client_email,
+            "purpose": purpose,
+            "created_by_admin_user_id": str(admin_user.get("id") or ""),
+            "source": "consulting_admin_api",
+        }
+        if upload_id:
+            metadata["upload_id"] = str(upload_id)
+        if client_submission_id:
+            metadata["client_submission_id"] = str(client_submission_id)
+
+        checkout_session = stripe.checkout.Session.create(
+            mode="payment",
+            customer=stripe_customer_id,
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": currency,
+                        "unit_amount": amount,
+                        "product_data": {
+                            "name": description,
+                        },
+                    },
+                    "quantity": 1,
+                }
+            ],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata=metadata,
+            api_key=stripe_secret_key,
+        )
+        session_data = _stripe_object_to_dict(checkout_session)
+        checkout_session_id = _clean_text(session_data.get("id"))
+        checkout_url = _clean_text(session_data.get("url"))
+        if not checkout_session_id or not checkout_url:
+            logger.error("[admin_api] Stripe checkout session missing id or url.")
+            db.rollback()
+            return _error_response(502, "stripe_checkout_failed", "Unable to create checkout session.")
+
+        local_session = StripeCheckoutSession(
+            stripe_checkout_session_id=checkout_session_id,
+            stripe_customer_id=stripe_customer_id,
+            client_email=client_email,
+            user_id=getattr(user_record, "id", None),
+            client_submission_id=client_submission_id,
+            upload_id=upload_id,
+            purpose=purpose,
+            mode=_clean_text(session_data.get("mode")) or "payment",
+            status=_clean_text(session_data.get("status")),
+            payment_status=_clean_text(session_data.get("payment_status")),
+            amount_total=_optional_int(session_data.get("amount_total")) or amount,
+            currency=_clean_text(session_data.get("currency")) or currency,
+            success_url=success_url,
+            cancel_url=cancel_url,
+            livemode=bool(session_data.get("livemode", livemode)),
+        )
+        db.add(local_session)
+        db.commit()
+        logger.info(
+            "[admin_api] Stripe checkout session created id=%s client_email=%s purpose=%s amount=%s currency=%s admin_user_id=%s",
+            checkout_session_id,
+            client_email,
+            purpose,
+            amount,
+            currency,
+            str(admin_user.get("id") or ""),
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "checkoutSessionId": checkout_session_id,
+                "url": checkout_url,
+                "status": _clean_text(session_data.get("status")) or "open",
+                "paymentStatus": _clean_text(session_data.get("payment_status")) or "unpaid",
+            }
+        )
+    except stripe.error.StripeError:
+        db.rollback()
+        logger.exception(
+            "[admin_api] Stripe checkout creation failed client_email=%s purpose=%s amount=%s currency=%s",
+            client_email,
+            purpose,
+            amount,
+            currency,
+        )
+        return _error_response(502, "stripe_checkout_failed", "Unable to create checkout session.")
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "[admin_api] admin checkout session failed client_email=%s purpose=%s",
+            client_email,
+            purpose,
+        )
+        return _error_response(500, "checkout_session_failed", "Unable to create checkout session.")
+    finally:
+        db.close()
+
+
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request) -> JSONResponse:
     webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
@@ -295,11 +452,136 @@ def _stripe_event_payload_to_dict(payload: bytes) -> dict[str, Any]:
 
 
 def _stripe_event_to_dict(event: Any) -> dict[str, Any]:
-    if hasattr(event, "to_dict_recursive"):
-        return event.to_dict_recursive()
-    if isinstance(event, dict):
-        return event
+    return _stripe_object_to_dict(event)
+
+
+def _stripe_object_to_dict(value: Any) -> dict[str, Any]:
+    if hasattr(value, "to_dict_recursive"):
+        return value.to_dict_recursive()
+    if isinstance(value, dict):
+        return value
     return {}
+
+
+async def _request_json_body(request: Request) -> tuple[dict[str, Any], Optional[JSONResponse]]:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}, _error_response(400, "invalid_json", "Request body must be valid JSON.")
+    if not isinstance(body, dict):
+        return {}, _error_response(400, "invalid_json", "Request body must be a JSON object.")
+    return body, None
+
+
+def _required_email(value: object) -> tuple[str, Optional[JSONResponse]]:
+    email = _clean_text(value)
+    if not email:
+        return "", _error_response(400, "missing_client_email", "clientEmail is required.")
+    email = email.lower()
+    if len(email) > 254 or "@" not in email:
+        return "", _error_response(400, "invalid_client_email", "clientEmail must be a valid email.")
+    return email, None
+
+
+def _required_text(value: object, field_name: str) -> tuple[str, Optional[JSONResponse]]:
+    text = _clean_text(value)
+    if not text:
+        return "", _error_response(400, f"missing_{field_name}", f"{field_name} is required.")
+    return text, None
+
+
+def _required_amount(value: object) -> tuple[int, Optional[JSONResponse]]:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0, _error_response(400, "invalid_amount", "amount must be an integer number of cents.")
+    if value <= 0:
+        return 0, _error_response(400, "invalid_amount", "amount must be greater than zero.")
+    if value > 10000000:
+        return 0, _error_response(400, "invalid_amount", "amount is too large.")
+    return value, None
+
+
+def _optional_uuid(value: object, field_name: str) -> tuple[Optional[UUID], Optional[JSONResponse]]:
+    text = _clean_text(value)
+    if not text or text.lower() == "null":
+        return None, None
+    try:
+        return UUID(text), None
+    except ValueError:
+        return None, _error_response(400, f"invalid_{field_name}", f"{field_name} must be a valid UUID.")
+
+
+def _is_safe_checkout_url(value: str) -> bool:
+    return value.startswith("https://") or value.startswith("http://")
+
+
+def _get_or_create_stripe_customer(
+    *,
+    db: Any,
+    client_email: str,
+    user_record: Optional[User],
+    stripe_secret_key: str,
+) -> tuple[str, bool]:
+    local_customer = (
+        db.query(StripeCustomer)
+        .filter(StripeCustomer.client_email == client_email)
+        .filter(StripeCustomer.stripe_customer_id.isnot(None))
+        .order_by(StripeCustomer.updated_at.desc())
+        .first()
+    )
+    stripe_customer_id = _clean_text(getattr(local_customer, "stripe_customer_id", None))
+    if not stripe_customer_id:
+        stripe_customer_id = _clean_text(getattr(user_record, "stripe_customer_id", None))
+        if stripe_customer_id:
+            local_customer = (
+                db.query(StripeCustomer)
+                .filter(StripeCustomer.stripe_customer_id == stripe_customer_id)
+                .first()
+            )
+
+    livemode = bool(getattr(local_customer, "livemode", False))
+    now = datetime.now(timezone.utc)
+    if not stripe_customer_id:
+        stripe_customer = stripe.Customer.create(
+            email=client_email,
+            metadata={"source": "consulting_admin_api"},
+            api_key=stripe_secret_key,
+        )
+        customer_data = _stripe_object_to_dict(stripe_customer)
+        stripe_customer_id = _clean_text(customer_data.get("id"))
+        if not stripe_customer_id:
+            raise RuntimeError("Stripe customer response missing id.")
+        livemode = bool(customer_data.get("livemode"))
+
+    if local_customer:
+        local_customer.client_email = client_email
+        if user_record:
+            local_customer.user_id = getattr(user_record, "id", None)
+        local_customer.livemode = livemode
+        local_customer.updated_at = now
+    else:
+        db.add(
+            StripeCustomer(
+                user_id=getattr(user_record, "id", None),
+                client_email=client_email,
+                stripe_customer_id=stripe_customer_id,
+                livemode=livemode,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    if user_record and not _clean_text(getattr(user_record, "stripe_customer_id", None)):
+        user_record.stripe_customer_id = stripe_customer_id
+
+    return stripe_customer_id, livemode
+
+
+def _optional_int(value: object) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
 
 
 def _require_admin_user(request: Request) -> tuple[dict[str, Any], Optional[JSONResponse]]:
