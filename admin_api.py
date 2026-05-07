@@ -457,10 +457,25 @@ def _stripe_event_to_dict(event: Any) -> dict[str, Any]:
 
 def _stripe_object_to_dict(value: Any) -> dict[str, Any]:
     if hasattr(value, "to_dict_recursive"):
-        return value.to_dict_recursive()
+        converted = value.to_dict_recursive()
+        if isinstance(converted, dict):
+            return converted
     if isinstance(value, dict):
         return value
-    return {}
+    return {
+        key: getattr(value, key)
+        for key in (
+            "id",
+            "url",
+            "livemode",
+            "mode",
+            "status",
+            "payment_status",
+            "amount_total",
+            "currency",
+        )
+        if hasattr(value, key)
+    }
 
 
 async def _request_json_body(request: Request) -> tuple[dict[str, Any], Optional[JSONResponse]]:
