@@ -505,6 +505,111 @@ def get_admin_billing_client(
         db.close()
 
 
+@app.get("/api/admin/billing/overview")
+def get_admin_billing_overview(
+    request: Request,
+    status: str = Query("open"),
+    search: Optional[str] = None,
+    limit: int = Query(50, ge=1),
+    offset: int = Query(0, ge=0),
+) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    normalized_status = (status or "open").strip().lower()
+    if normalized_status not in {"open", "paid", "all"}:
+        return _error_response(400, "invalid_status", "status must be open, paid, or all.")
+
+    safe_limit = min(limit, 100)
+    normalized_search = (search or "").strip()
+    search_like = f"%{normalized_search}%" if normalized_search else None
+
+    db = SessionLocal()
+    try:
+        checkout_query = db.query(StripeCheckoutSession)
+        override_query = db.query(BillingOverride)
+        if search_like:
+            checkout_query = checkout_query.filter(
+                or_(
+                    StripeCheckoutSession.client_email.ilike(search_like),
+                    StripeCheckoutSession.purpose.ilike(search_like),
+                )
+            )
+            override_query = override_query.filter(BillingOverride.client_email.ilike(search_like))
+
+        checkout_session_count = checkout_query.count()
+        paid_checkout_session_count = checkout_query.filter(
+            func.lower(StripeCheckoutSession.payment_status) == "paid"
+        ).count()
+        open_checkout_filter = or_(
+            StripeCheckoutSession.payment_status.is_(None),
+            func.lower(StripeCheckoutSession.payment_status) != "paid",
+            func.lower(StripeCheckoutSession.status) == "open",
+        )
+        open_checkout_session_count = checkout_query.filter(open_checkout_filter).count()
+        manual_override_count = override_query.count()
+        needs_review_event_count = (
+            db.query(StripeEvent)
+            .filter(StripeEvent.processing_status == "needs_review")
+            .count()
+        )
+
+        filtered_checkout_query = checkout_query
+        if normalized_status == "paid":
+            filtered_checkout_query = filtered_checkout_query.filter(
+                func.lower(StripeCheckoutSession.payment_status) == "paid"
+            )
+        elif normalized_status == "open":
+            filtered_checkout_query = filtered_checkout_query.filter(open_checkout_filter)
+
+        checkout_rows = (
+            filtered_checkout_query.order_by(StripeCheckoutSession.created_at.desc())
+            .offset(offset)
+            .limit(safe_limit + 1)
+            .all()
+        )
+        has_more = len(checkout_rows) > safe_limit
+        checkout_rows = checkout_rows[:safe_limit]
+
+        override_rows = (
+            override_query.order_by(BillingOverride.created_at.desc())
+            .offset(offset)
+            .limit(safe_limit)
+            .all()
+        )
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "summary": {
+                    "checkoutSessionCount": checkout_session_count,
+                    "paidCheckoutSessionCount": paid_checkout_session_count,
+                    "openCheckoutSessionCount": open_checkout_session_count,
+                    "manualOverrideCount": manual_override_count,
+                    "needsReviewEventCount": needs_review_event_count,
+                },
+                "checkoutSessions": [
+                    _checkout_session_payload(session)
+                    for session in checkout_rows
+                ],
+                "billingOverrides": [
+                    _billing_override_payload(override)
+                    for override in override_rows
+                ],
+                "limit": safe_limit,
+                "offset": offset,
+                "count": len(checkout_rows),
+                "hasMore": has_more,
+            }
+        )
+    except Exception:
+        logger.exception("[admin_api] billing overview lookup failed.")
+        return _error_response(500, "billing_overview_failed", "Unable to load billing overview.")
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/billing/overrides")
 async def create_admin_billing_override(request: Request) -> JSONResponse:
     admin_user, error_response = _require_admin_user(request)
@@ -733,6 +838,7 @@ def _checkout_session_payload(session: StripeCheckoutSession) -> dict[str, Any]:
             getattr(session, "stripe_checkout_session_id", None)
         ),
         "stripeCustomerId": _clean_text(getattr(session, "stripe_customer_id", None)),
+        "clientEmail": _clean_text(getattr(session, "client_email", None)),
         "purpose": _clean_text(getattr(session, "purpose", None)),
         "mode": _clean_text(getattr(session, "mode", None)),
         "status": _clean_text(getattr(session, "status", None)),
