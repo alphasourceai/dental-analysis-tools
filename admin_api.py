@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, or_
 
 from database import SessionLocal
-from models import ClientSubmission, StripeCheckoutSession, StripeCustomer, StripeEvent, Upload, User
+from models import BillingOverride, ClientSubmission, StripeCheckoutSession, StripeCustomer, StripeEvent, Upload, User
 from supabase_utils import get_current_admin_user, is_admin_user
 
 logger = logging.getLogger("uvicorn.error")
@@ -397,6 +397,13 @@ def get_admin_billing_client(
             .limit(25)
             .all()
         )
+        billing_overrides = (
+            db.query(BillingOverride)
+            .filter(func.lower(BillingOverride.client_email) == client_email)
+            .order_by(BillingOverride.created_at.desc())
+            .limit(25)
+            .all()
+        )
 
         paid_sessions = [
             session
@@ -422,6 +429,7 @@ def get_admin_billing_client(
                     "checkoutSessionCount": len(checkout_sessions),
                     "paidCheckoutSessionCount": len(paid_sessions),
                     "openCheckoutSessionCount": len(open_sessions),
+                    "manualOverrideCount": len(billing_overrides),
                     "latestPaymentStatus": _clean_text(
                         getattr(latest_session, "payment_status", None)
                     ),
@@ -434,6 +442,10 @@ def get_admin_billing_client(
                     for session in checkout_sessions[:25]
                 ],
                 "uploads": [_upload_payload(upload) for upload in uploads],
+                "billingOverrides": [
+                    _billing_override_payload(override)
+                    for override in billing_overrides
+                ],
                 "invoices": [],
                 "subscriptions": [],
             }
@@ -441,6 +453,74 @@ def get_admin_billing_client(
     except Exception:
         logger.exception("[admin_api] billing client lookup failed client_email=%s", client_email)
         return _error_response(500, "billing_lookup_failed", "Unable to load billing details.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/billing/overrides")
+async def create_admin_billing_override(request: Request) -> JSONResponse:
+    admin_user, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    target_type, validation_error = _required_text(body.get("targetType"), "targetType")
+    if validation_error:
+        return validation_error
+    target_id, validation_error = _required_text(body.get("targetId"), "targetId")
+    if validation_error:
+        return validation_error
+    client_email, validation_error = _required_email(body.get("clientEmail"))
+    if validation_error:
+        return validation_error
+    override_paid, validation_error = _required_bool(body.get("overridePaid"), "overridePaid")
+    if validation_error:
+        return validation_error
+    reason, validation_error = _required_reason(body.get("reason"))
+    if validation_error:
+        return validation_error
+
+    admin_user_id = str(admin_user.get("id") or "")
+    db = SessionLocal()
+    try:
+        override = BillingOverride(
+            target_type=target_type,
+            target_id=target_id,
+            client_email=client_email,
+            override_paid=override_paid,
+            reason=reason,
+            admin_user_id=admin_user_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(override)
+        db.commit()
+        db.refresh(override)
+        logger.info(
+            "[admin_api] billing override recorded target_type=%s target_id=%s client_email=%s override_paid=%s admin_user_id=%s",
+            target_type,
+            target_id,
+            client_email,
+            override_paid,
+            admin_user_id,
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "override": _billing_override_payload(override),
+            }
+        )
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "[admin_api] billing override failed target_type=%s target_id=%s client_email=%s",
+            target_type,
+            target_id,
+            client_email,
+        )
+        return _error_response(500, "billing_override_failed", "Unable to record billing override.")
     finally:
         db.close()
 
@@ -629,6 +709,19 @@ def _upload_payload(upload: Upload) -> dict[str, Any]:
     }
 
 
+def _billing_override_payload(override: BillingOverride) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(override, "id", None)),
+        "targetType": _clean_text(getattr(override, "target_type", None)),
+        "targetId": _clean_text(getattr(override, "target_id", None)),
+        "clientEmail": _clean_text(getattr(override, "client_email", None)),
+        "overridePaid": bool(getattr(override, "override_paid", False)),
+        "reason": _clean_text(getattr(override, "reason", None)),
+        "adminUserId": _clean_text(getattr(override, "admin_user_id", None)),
+        "createdAt": _iso_datetime(getattr(override, "created_at", None)),
+    }
+
+
 def _id_text(value: object) -> Optional[str]:
     if value is None:
         return None
@@ -707,6 +800,23 @@ def _required_amount(value: object) -> tuple[int, Optional[JSONResponse]]:
     if value > 10000000:
         return 0, _error_response(400, "invalid_amount", "amount is too large.")
     return value, None
+
+
+def _required_bool(value: object, field_name: str) -> tuple[bool, Optional[JSONResponse]]:
+    if not isinstance(value, bool):
+        return False, _error_response(400, f"invalid_{field_name}", f"{field_name} must be a boolean.")
+    return value, None
+
+
+def _required_reason(value: object) -> tuple[str, Optional[JSONResponse]]:
+    reason = _clean_text(value)
+    if not reason:
+        return "", _error_response(400, "missing_reason", "reason is required.")
+    if len(reason) < 5:
+        return "", _error_response(400, "invalid_reason", "reason must be at least 5 characters.")
+    if len(reason) > 2000:
+        return "", _error_response(400, "invalid_reason", "reason must be 2000 characters or fewer.")
+    return reason, None
 
 
 def _optional_uuid(value: object, field_name: str) -> tuple[Optional[UUID], Optional[JSONResponse]]:
