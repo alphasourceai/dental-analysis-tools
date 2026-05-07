@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from datetime import datetime
+from typing import Any, Optional
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import func, or_
 
+from database import SessionLocal
+from models import ClientSubmission, Upload, User
 from supabase_utils import get_current_admin_user, is_admin_user
 
 logger = logging.getLogger("uvicorn.error")
@@ -47,29 +51,214 @@ def health() -> dict[str, object]:
 
 @app.get("/api/admin/me")
 def get_admin_me(request: Request) -> JSONResponse:
-    access_token = _bearer_token(request)
-    if not access_token:
-        return _error_response(401, "unauthorized", "Authentication is required.")
-
-    user = get_current_admin_user(access_token)
-    if not user or not user.get("id"):
-        return _error_response(401, "unauthorized", "Authentication is invalid.")
-
-    user_id = str(user.get("id") or "")
-    if not is_admin_user(user_id):
-        logger.warning("[admin_api] non-admin access denied user_id=%s", user_id)
-        return _error_response(403, "forbidden", "Admin access is required.")
+    user, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
 
     return JSONResponse(
         {
             "ok": True,
             "user": {
-                "id": user_id,
+                "id": str(user.get("id") or ""),
                 "email": str(user.get("email") or ""),
             },
             "role": "admin",
         }
     )
+
+
+@app.get("/api/admin/clients")
+def list_admin_clients(
+    request: Request,
+    search: Optional[str] = None,
+    limit: int = Query(25, ge=1),
+    offset: int = Query(0, ge=0),
+) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    safe_limit = min(limit, 100)
+    normalized_search = (search or "").strip().lower()
+    db = SessionLocal()
+    try:
+        matching_emails: Optional[set[str]] = None
+        if normalized_search:
+            search_like = f"%{normalized_search}%"
+            matching_submission_rows = (
+                db.query(ClientSubmission.user_email)
+                .filter(
+                    or_(
+                        ClientSubmission.user_email.ilike(search_like),
+                        ClientSubmission.first_name.ilike(search_like),
+                        ClientSubmission.last_name.ilike(search_like),
+                        ClientSubmission.office_name.ilike(search_like),
+                        ClientSubmission.phone.ilike(search_like),
+                    )
+                )
+                .distinct()
+                .all()
+            )
+            matching_user_rows = (
+                db.query(User.email)
+                .filter(
+                    or_(
+                        User.email.ilike(search_like),
+                        User.first_name.ilike(search_like),
+                        User.last_name.ilike(search_like),
+                        User.office_name.ilike(search_like),
+                        User.phone.ilike(search_like),
+                    )
+                )
+                .distinct()
+                .all()
+            )
+            matching_emails = {
+                str(row[0]).strip()
+                for row in [*matching_submission_rows, *matching_user_rows]
+                if row[0]
+            }
+            if not matching_emails:
+                return _clients_response([], safe_limit, offset, has_more=False)
+
+        clients_query = db.query(
+            ClientSubmission.user_email.label("email"),
+            func.count(ClientSubmission.id).label("submission_count"),
+            func.max(ClientSubmission.submitted_at).label("last_submitted_at"),
+        )
+        if matching_emails is not None:
+            clients_query = clients_query.filter(ClientSubmission.user_email.in_(matching_emails))
+        client_rows = (
+            clients_query.group_by(ClientSubmission.user_email)
+            .order_by(func.max(ClientSubmission.submitted_at).desc())
+            .offset(offset)
+            .limit(safe_limit + 1)
+            .all()
+        )
+        has_more = len(client_rows) > safe_limit
+        client_rows = client_rows[:safe_limit]
+        client_emails = [row.email for row in client_rows if row.email]
+
+        upload_counts: dict[str, int] = {}
+        latest_submissions: dict[str, ClientSubmission] = {}
+        users_by_email: dict[str, User] = {}
+        if client_emails:
+            upload_count_rows = (
+                db.query(
+                    ClientSubmission.user_email,
+                    func.count(Upload.id).label("upload_count"),
+                )
+                .outerjoin(Upload, Upload.submission_id == ClientSubmission.id)
+                .filter(ClientSubmission.user_email.in_(client_emails))
+                .group_by(ClientSubmission.user_email)
+                .all()
+            )
+            upload_counts = {row[0]: int(row[1] or 0) for row in upload_count_rows if row[0]}
+
+            latest_rows = (
+                db.query(ClientSubmission)
+                .filter(ClientSubmission.user_email.in_(client_emails))
+                .order_by(
+                    ClientSubmission.user_email.asc(),
+                    ClientSubmission.submitted_at.desc(),
+                )
+                .all()
+            )
+            for submission in latest_rows:
+                if submission.user_email not in latest_submissions:
+                    latest_submissions[submission.user_email] = submission
+
+            users = db.query(User).filter(User.email.in_(client_emails)).all()
+            users_by_email = {user.email: user for user in users if user.email}
+
+        items = []
+        for row in client_rows:
+            email = row.email or ""
+            latest_submission = latest_submissions.get(email)
+            user_record = users_by_email.get(email)
+            latest_phone = (
+                _clean_text(getattr(latest_submission, "phone", None))
+                or _clean_text(getattr(user_record, "phone", None))
+                or None
+            )
+            items.append(
+                {
+                    "email": email,
+                    "latestName": _full_name(latest_submission),
+                    "latestOfficeName": _clean_text(getattr(latest_submission, "office_name", None)),
+                    "latestOrgType": _clean_text(getattr(latest_submission, "org_type", None)),
+                    "latestPhone": latest_phone,
+                    "submissionCount": int(row.submission_count or 0),
+                    "uploadCount": upload_counts.get(email, 0),
+                    "latestSubmittedAt": _iso_datetime(row.last_submitted_at),
+                    "latestStatus": _clean_text(getattr(latest_submission, "status", None)),
+                }
+            )
+
+        return _clients_response(items, safe_limit, offset, has_more=has_more)
+    except Exception:
+        logger.exception("[admin_api] client list query failed.")
+        return _error_response(500, "internal_error", "Unable to load clients.")
+    finally:
+        db.close()
+
+
+def _require_admin_user(request: Request) -> tuple[dict[str, Any], Optional[JSONResponse]]:
+    access_token = _bearer_token(request)
+    if not access_token:
+        return {}, _error_response(401, "unauthorized", "Authentication is required.")
+
+    user = get_current_admin_user(access_token)
+    if not user or not user.get("id"):
+        return {}, _error_response(401, "unauthorized", "Authentication is invalid.")
+
+    user_id = str(user.get("id") or "")
+    if not is_admin_user(user_id):
+        logger.warning("[admin_api] non-admin access denied user_id=%s", user_id)
+        return {}, _error_response(403, "forbidden", "Admin access is required.")
+
+    return user, None
+
+
+def _clients_response(
+    items: list[dict[str, Any]],
+    limit: int,
+    offset: int,
+    *,
+    has_more: bool,
+) -> JSONResponse:
+    return JSONResponse(
+        {
+            "ok": True,
+            "items": items,
+            "limit": limit,
+            "offset": offset,
+            "count": len(items),
+            "hasMore": has_more,
+        }
+    )
+
+
+def _clean_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _full_name(submission: Optional[ClientSubmission]) -> Optional[str]:
+    if not submission:
+        return None
+    first_name = _clean_text(getattr(submission, "first_name", None)) or ""
+    last_name = _clean_text(getattr(submission, "last_name", None)) or ""
+    full_name = f"{first_name} {last_name}".strip()
+    return full_name or None
+
+
+def _iso_datetime(value: object) -> Optional[str]:
+    if not isinstance(value, datetime):
+        return None
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def _bearer_token(request: Request) -> Optional[str]:
