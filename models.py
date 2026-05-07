@@ -146,6 +146,7 @@ class StripeCheckoutSession(Base):
     payment_status = Column(String(50), nullable=True, index=True)
     amount_total = Column(Integer, nullable=True)
     currency = Column(String(10), nullable=True)
+    checkout_url = Column(Text, nullable=True)
     success_url = Column(Text, nullable=True)
     cancel_url = Column(Text, nullable=True)
     livemode = Column(Boolean, nullable=False, server_default=text("false"))
