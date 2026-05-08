@@ -201,6 +201,54 @@ class UploadFile(Base):
     object_path = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
+# Durable admin Document Analysis job model
+class AdminAnalysisJob(Base):
+    __tablename__ = "admin_analysis_jobs"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    status = Column(String(50), nullable=False, server_default=text("'queued'"), index=True)
+    created_by_admin_user_id = Column(Text, nullable=True)
+    client_email = Column(Text, nullable=True, index=True)
+    first_name = Column(Text, nullable=True)
+    last_name = Column(Text, nullable=True)
+    office_name = Column(Text, nullable=True)
+    org_type = Column(String(50), nullable=True)
+    phone = Column(Text, nullable=True)
+    ghl_cid = Column(Text, nullable=True)
+    client_mode = Column(String(50), nullable=True)
+    analysis_run_id = Column(Text, nullable=True, unique=True, index=True)
+    submission_id = Column(PGUUID(as_uuid=True), ForeignKey("client_submissions.id"), nullable=True)
+    progress_percent = Column(Integer, nullable=False, server_default=text("0"))
+    current_step = Column(Text, nullable=True)
+    error_code = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    canceled_at = Column(DateTime(timezone=True), nullable=True)
+    errored_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+# Durable admin Document Analysis job file model
+class AdminAnalysisJobFile(Base):
+    __tablename__ = "admin_analysis_job_files"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    job_id = Column(PGUUID(as_uuid=True), ForeignKey("admin_analysis_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    tool_name = Column(Text, nullable=False)
+    original_filename = Column(Text, nullable=True)
+    content_type = Column(Text, nullable=True)
+    byte_size = Column(BigInteger, nullable=True)
+    upload_file_id = Column(PGUUID(as_uuid=True), ForeignKey("upload_files.id"), nullable=True)
+    upload_id = Column(PGUUID(as_uuid=True), ForeignKey("uploads.id"), nullable=True)
+    status = Column(String(50), nullable=False, server_default=text("'queued'"), index=True)
+    error_code = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    errored_at = Column(DateTime(timezone=True), nullable=True)
+
 # Admin access mapping (Supabase Auth)
 class AdminUser(Base):
     __tablename__ = "admin_users"
