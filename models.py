@@ -244,10 +244,12 @@ class AdminAnalysisJobFile(Base):
     status = Column(String(50), nullable=False, server_default=text("'queued'"), index=True)
     error_code = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
+    analysis_data = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     errored_at = Column(DateTime(timezone=True), nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
 
 # Admin access mapping (Supabase Auth)
 class AdminUser(Base):

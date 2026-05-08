@@ -7,3 +7,5 @@ bcrypt
 requests
 supabase
 stripe
+openai
+anthropic
