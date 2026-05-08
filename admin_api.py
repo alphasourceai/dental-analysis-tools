@@ -14,6 +14,13 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, or_
 
+from admin_financial_processing_service import (
+    AdminFinancialProcessingCanceled,
+    AdminFinancialProcessingError,
+    download_upload_file_bytes,
+    extract_csv_text,
+    run_financial_csv_analysis,
+)
 from database import SessionLocal
 from models import (
     AdminAnalysisJob,
@@ -695,6 +702,259 @@ def cancel_admin_analysis_job(request: Request, job_id: str) -> JSONResponse:
         db.rollback()
         logger.exception("[admin_api] admin analysis job cancel failed job_id=%s", job_id)
         return _error_response(500, "analysis_job_cancel_failed", "Unable to cancel analysis job.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/analysis-jobs/{job_id}/process-financial")
+def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    job_uuid, validation_error = _job_uuid_or_not_found(job_id)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    job_file_id: Optional[object] = None
+    bucket: Optional[str] = None
+    object_path: Optional[str] = None
+    try:
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_uuid).first()
+        if not job:
+            return _error_response(404, "not_found", "Analysis job was not found.")
+
+        files = _admin_analysis_job_files(db, job.id)
+        status = (_clean_text(getattr(job, "status", None)) or "").lower()
+        if status == "completed":
+            return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+        if status == "cancel_requested":
+            _set_admin_analysis_job_canceled(db, job, files)
+            db.commit()
+            db.refresh(job)
+            files = _admin_analysis_job_files(db, job.id)
+            return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+        if status not in {"queued", "processing"}:
+            return _error_response(
+                409,
+                "invalid_job_status",
+                "Analysis job must be queued or processing.",
+            )
+
+        financial_files = [
+            file_record
+            for file_record in files
+            if _clean_text(getattr(file_record, "tool_name", None)) == ADMIN_ANALYSIS_FINANCIAL_TOOL_NAME
+        ]
+        if len(financial_files) != 1:
+            return _error_response(
+                409,
+                "invalid_financial_job_files",
+                "Analysis job must have exactly one Financial Analyzer file.",
+            )
+
+        job_file = financial_files[0]
+        job_file_id = job_file.id
+        upload_file_id = getattr(job_file, "upload_file_id", None)
+        if not upload_file_id:
+            return _error_response(
+                409,
+                "missing_upload_file",
+                "Financial Analyzer file has not been persisted.",
+            )
+
+        upload_file = (
+            db.query(UploadFileRecord)
+            .filter(UploadFileRecord.id == upload_file_id)
+            .first()
+        )
+        if not upload_file:
+            return _error_response(
+                409,
+                "missing_upload_file",
+                "Persisted financial file was not found.",
+            )
+
+        original_filename = (
+            _clean_text(getattr(upload_file, "original_filename", None))
+            or _clean_text(getattr(job_file, "original_filename", None))
+            or ""
+        )
+        if _file_extension(original_filename) != ".csv":
+            return _error_response(
+                400,
+                "unsupported_file_type",
+                "DA-3B supports CSV Financial Analyzer processing only.",
+            )
+
+        bucket = _clean_text(getattr(upload_file, "bucket", None))
+        object_path = _clean_text(getattr(upload_file, "object_path", None))
+        now = datetime.now(timezone.utc)
+        job.status = "processing"
+        job.progress_percent = max(_optional_int(getattr(job, "progress_percent", None)) or 0, 20)
+        job.current_step = "Downloading financial file"
+        if not getattr(job, "started_at", None):
+            job.started_at = now
+        job.updated_at = now
+        job.error_code = None
+        job.error_message = None
+
+        job_file.status = "processing"
+        if not getattr(job_file, "started_at", None):
+            job_file.started_at = now
+        job_file.error_code = None
+        job_file.error_message = None
+        db.commit()
+
+        logger.info("[admin_analysis] financial processing started job_id=%s", job_uuid)
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_analysis] financial processing setup failed job_id=%s", job_id)
+        return _error_response(500, "analysis_processing_failed", "Unable to process analysis job.")
+    finally:
+        db.close()
+
+    if _admin_analysis_job_cancel_requested(job_uuid):
+        return _cancel_admin_analysis_job_response(job_uuid)
+
+    try:
+        file_bytes = download_upload_file_bytes(bucket or "", object_path or "")
+    except AdminFinancialProcessingError as exc:
+        _mark_admin_financial_processing_error(job_uuid, job_file_id, exc.code, exc.message)
+        return _error_response(500, exc.code, exc.message)
+    except Exception:
+        logger.exception("[admin_analysis] financial file download failed job_id=%s", job_uuid)
+        _mark_admin_financial_processing_error(
+            job_uuid,
+            job_file_id,
+            "storage_download_failed",
+            "Unable to download stored financial file.",
+        )
+        return _error_response(500, "storage_download_failed", "Unable to download stored financial file.")
+
+    _update_admin_financial_processing_progress(
+        job_uuid,
+        job_file_id,
+        35,
+        "Financial file downloaded",
+    )
+    if _admin_analysis_job_cancel_requested(job_uuid):
+        return _cancel_admin_analysis_job_response(job_uuid)
+
+    try:
+        _update_admin_financial_processing_progress(
+            job_uuid,
+            job_file_id,
+            45,
+            "Extracting CSV data",
+        )
+        data_input = extract_csv_text(file_bytes)
+    except AdminFinancialProcessingError as exc:
+        _mark_admin_financial_processing_error(job_uuid, job_file_id, exc.code, exc.message)
+        return _error_response(400, exc.code, exc.message)
+    except Exception:
+        logger.exception("[admin_analysis] financial CSV extraction failed job_id=%s", job_uuid)
+        _mark_admin_financial_processing_error(
+            job_uuid,
+            job_file_id,
+            "csv_extract_failed",
+            "Unable to extract CSV data.",
+        )
+        return _error_response(400, "csv_extract_failed", "Unable to extract CSV data.")
+
+    _update_admin_financial_processing_progress(
+        job_uuid,
+        job_file_id,
+        60,
+        "Running model analysis",
+    )
+    if _admin_analysis_job_cancel_requested(job_uuid):
+        return _cancel_admin_analysis_job_response(job_uuid)
+
+    try:
+        analysis_data = run_financial_csv_analysis(
+            data_input,
+            cancel_checker=lambda: _admin_analysis_job_cancel_requested(job_uuid),
+        )
+    except AdminFinancialProcessingCanceled:
+        return _cancel_admin_analysis_job_response(job_uuid)
+    except AdminFinancialProcessingError as exc:
+        _mark_admin_financial_processing_error(job_uuid, job_file_id, exc.code, exc.message)
+        return _error_response(502, exc.code, exc.message)
+    except Exception:
+        logger.exception("[admin_analysis] financial model analysis failed job_id=%s", job_uuid)
+        _mark_admin_financial_processing_error(
+            job_uuid,
+            job_file_id,
+            "provider_unavailable",
+            "The analyzer providers are temporarily unavailable. Please try again later.",
+        )
+        return _error_response(
+            502,
+            "provider_unavailable",
+            "The analyzer providers are temporarily unavailable. Please try again later.",
+        )
+
+    if _admin_analysis_job_cancel_requested(job_uuid):
+        return _cancel_admin_analysis_job_response(job_uuid)
+
+    db = SessionLocal()
+    try:
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_uuid).first()
+        if not job:
+            return _error_response(404, "not_found", "Analysis job was not found.")
+        files = _admin_analysis_job_files(db, job.id)
+        status = (_clean_text(getattr(job, "status", None)) or "").lower()
+        if status == "cancel_requested":
+            _set_admin_analysis_job_canceled(db, job, files)
+            db.commit()
+            db.refresh(job)
+            files = _admin_analysis_job_files(db, job.id)
+            return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+
+        job_file = (
+            db.query(AdminAnalysisJobFile)
+            .filter(AdminAnalysisJobFile.id == job_file_id)
+            .first()
+        )
+        if not job_file:
+            return _error_response(404, "not_found", "Analysis job file was not found.")
+
+        now = datetime.now(timezone.utc)
+        job.status = "completed"
+        job.progress_percent = 100
+        job.current_step = "Financial analysis processed"
+        job.completed_at = now
+        job.updated_at = now
+        job.error_code = None
+        job.error_message = None
+
+        job_file.status = "completed"
+        job_file.analysis_data = json.dumps(analysis_data)
+        job_file.completed_at = now
+        job_file.processed_at = now
+        job_file.error_code = None
+        job_file.error_message = None
+        db.commit()
+        db.refresh(job)
+        files = _admin_analysis_job_files(db, job.id)
+        logger.info("[admin_analysis] financial processing completed job_id=%s", job_uuid)
+        return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_analysis] financial processing final write failed job_id=%s", job_uuid)
+        _mark_admin_financial_processing_error(
+            job_uuid,
+            job_file_id,
+            "analysis_result_store_failed",
+            "Unable to store financial analysis results.",
+        )
+        return _error_response(
+            500,
+            "analysis_result_store_failed",
+            "Unable to store financial analysis results.",
+        )
     finally:
         db.close()
 
@@ -1553,6 +1813,142 @@ def _cleanup_admin_intake_upload_file(upload_file_id: object) -> None:
         db.close()
 
 
+def _admin_analysis_job_cancel_requested(job_id: object) -> bool:
+    if not job_id:
+        return False
+
+    db = SessionLocal()
+    try:
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_id).first()
+        return (_clean_text(getattr(job, "status", None)) or "").lower() == "cancel_requested"
+    except Exception:
+        logger.exception("[admin_analysis] cancellation check failed job_id=%s", job_id)
+        return False
+    finally:
+        db.close()
+
+
+def _cancel_admin_analysis_job_response(job_id: object) -> JSONResponse:
+    db = SessionLocal()
+    try:
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_id).first()
+        if not job:
+            return _error_response(404, "not_found", "Analysis job was not found.")
+        files = _admin_analysis_job_files(db, job.id)
+        _set_admin_analysis_job_canceled(db, job, files)
+        db.commit()
+        db.refresh(job)
+        files = _admin_analysis_job_files(db, job.id)
+        logger.info("[admin_analysis] financial processing canceled job_id=%s", job_id)
+        return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_analysis] failed to mark job canceled job_id=%s", job_id)
+        return _error_response(500, "analysis_cancel_failed", "Unable to cancel analysis job.")
+    finally:
+        db.close()
+
+
+def _set_admin_analysis_job_canceled(
+    db: Any,
+    job: AdminAnalysisJob,
+    files: list[AdminAnalysisJobFile],
+) -> None:
+    now = datetime.now(timezone.utc)
+    job.status = "canceled"
+    job.current_step = "Canceled"
+    job.canceled_at = now
+    job.updated_at = now
+    for file_record in files:
+        file_status = (_clean_text(getattr(file_record, "status", None)) or "").lower()
+        if file_status in {"queued", "processing", "intake_pending", "cancel_requested"}:
+            file_record.status = "canceled"
+
+
+def _update_admin_financial_processing_progress(
+    job_id: object,
+    job_file_id: object,
+    progress_percent: int,
+    current_step: str,
+) -> None:
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_id).first()
+        job_cancel_requested = False
+        if job:
+            job_cancel_requested = (
+                (_clean_text(getattr(job, "status", None)) or "").lower() == "cancel_requested"
+            )
+            if not job_cancel_requested:
+                job.status = "processing"
+                job.progress_percent = progress_percent
+                job.current_step = current_step
+                if not getattr(job, "started_at", None):
+                    job.started_at = now
+                job.updated_at = now
+
+        if job_file_id:
+            job_file = (
+                db.query(AdminAnalysisJobFile)
+                .filter(AdminAnalysisJobFile.id == job_file_id)
+                .first()
+            )
+            if job_file and not job_cancel_requested:
+                if (_clean_text(getattr(job_file, "status", None)) or "").lower() != "canceled":
+                    job_file.status = "processing"
+                if not getattr(job_file, "started_at", None):
+                    job_file.started_at = now
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_analysis] progress update failed job_id=%s", job_id)
+    finally:
+        db.close()
+
+
+def _mark_admin_financial_processing_error(
+    job_id: object,
+    job_file_id: object,
+    error_code: str,
+    error_message: str,
+) -> None:
+    if not job_id:
+        return
+
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_id).first()
+        if job:
+            job.status = "error"
+            job.current_step = "Financial analysis failed"
+            job.error_code = error_code
+            job.error_message = error_message
+            job.errored_at = now
+            job.updated_at = now
+
+        if job_file_id:
+            job_file = (
+                db.query(AdminAnalysisJobFile)
+                .filter(AdminAnalysisJobFile.id == job_file_id)
+                .first()
+            )
+            if job_file:
+                job_file.status = "error"
+                job_file.error_code = error_code
+                job_file.error_message = error_message
+                job_file.errored_at = now
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_analysis] failed to mark financial processing error job_id=%s", job_id)
+    finally:
+        db.close()
+
+
 def _job_uuid_or_not_found(job_id: str) -> tuple[Optional[UUID], Optional[JSONResponse]]:
     try:
         return UUID(str(job_id)), None
@@ -1612,7 +2008,7 @@ def _admin_analysis_job_payload(
 
 
 def _admin_analysis_job_file_payload(file_record: AdminAnalysisJobFile) -> dict[str, Any]:
-    return {
+    payload = {
         "id": _id_text(getattr(file_record, "id", None)),
         "jobId": _id_text(getattr(file_record, "job_id", None)),
         "toolName": _clean_text(getattr(file_record, "tool_name", None)),
@@ -1626,8 +2022,13 @@ def _admin_analysis_job_file_payload(file_record: AdminAnalysisJobFile) -> dict[
         "startedAt": _iso_datetime(getattr(file_record, "started_at", None)),
         "completedAt": _iso_datetime(getattr(file_record, "completed_at", None)),
         "erroredAt": _iso_datetime(getattr(file_record, "errored_at", None)),
+        "processedAt": _iso_datetime(getattr(file_record, "processed_at", None)),
         "error": _admin_analysis_error_payload(file_record),
     }
+    analysis_data = _json_text_payload(getattr(file_record, "analysis_data", None))
+    if analysis_data is not None:
+        payload["analysisData"] = analysis_data
+    return payload
 
 
 def _checkout_session_payload(session: StripeCheckoutSession) -> dict[str, Any]:
@@ -1680,6 +2081,16 @@ def _id_text(value: object) -> Optional[str]:
     if value is None:
         return None
     return str(value)
+
+
+def _json_text_payload(value: object) -> Optional[Any]:
+    text = _clean_text(value)
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 def _stripe_event_payload_to_dict(payload: bytes) -> dict[str, Any]:
