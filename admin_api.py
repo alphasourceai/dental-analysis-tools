@@ -5,7 +5,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import stripe
 from fastapi import FastAPI, Query, Request, Response
@@ -15,12 +15,28 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, or_
 
 from database import SessionLocal
-from models import BillingOverride, ClientSubmission, StripeCheckoutSession, StripeCustomer, StripeEvent, Upload, User
+from models import (
+    AdminAnalysisJob,
+    AdminAnalysisJobFile,
+    BillingOverride,
+    ClientSubmission,
+    StripeCheckoutSession,
+    StripeCustomer,
+    StripeEvent,
+    Upload,
+    User,
+)
 from supabase_utils import get_current_admin_user, is_admin_user
 
 logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="Admin API")
+
+ADMIN_ANALYSIS_ALLOWED_TOOL_NAMES = {
+    "Financial Analyzer",
+    "AR Analyzer",
+    "Insurance Claim Analyzer",
+}
 
 allowed_origins = [
     origin.strip()
@@ -344,6 +360,158 @@ def list_admin_client_options(
     except Exception:
         logger.exception("[admin_api] client options query failed.")
         return _error_response(500, "client_options_failed", "Unable to load client options.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/analysis-jobs")
+async def create_admin_analysis_job(request: Request) -> JSONResponse:
+    admin_user, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    client_email, validation_error = _required_email(body.get("clientEmail"))
+    if validation_error:
+        return validation_error
+    first_name, validation_error = _required_text(body.get("firstName"), "firstName")
+    if validation_error:
+        return validation_error
+    last_name, validation_error = _required_text(body.get("lastName"), "lastName")
+    if validation_error:
+        return validation_error
+    office_name, validation_error = _required_text(body.get("officeName"), "officeName")
+    if validation_error:
+        return validation_error
+    org_type, validation_error = _required_text(body.get("orgType"), "orgType")
+    if validation_error:
+        return validation_error
+
+    file_inputs, validation_error = _validate_admin_analysis_file_inputs(body.get("files"))
+    if validation_error:
+        return validation_error
+
+    now = datetime.now(timezone.utc)
+    analysis_run_id = str(uuid4())
+    db = SessionLocal()
+    try:
+        job = AdminAnalysisJob(
+            status="queued",
+            created_by_admin_user_id=str(admin_user.get("id") or ""),
+            client_email=client_email,
+            first_name=first_name,
+            last_name=last_name,
+            office_name=office_name,
+            org_type=org_type,
+            phone=_clean_text(body.get("phone")),
+            ghl_cid=_clean_text(body.get("ghlCid")),
+            client_mode=_clean_text(body.get("clientMode")),
+            analysis_run_id=analysis_run_id,
+            progress_percent=0,
+            current_step="Queued",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(job)
+        db.flush()
+
+        job_files = [
+            AdminAnalysisJobFile(
+                job_id=job.id,
+                tool_name=file_input["tool_name"],
+                original_filename=file_input["original_filename"],
+                content_type=file_input["content_type"],
+                byte_size=file_input["byte_size"],
+                status="queued",
+                created_at=now,
+            )
+            for file_input in file_inputs
+        ]
+        db.add_all(job_files)
+        db.commit()
+        db.refresh(job)
+        for job_file in job_files:
+            db.refresh(job_file)
+
+        logger.info(
+            "[admin_api] admin analysis job queued job_id=%s client_email=%s file_count=%s admin_user_id=%s",
+            job.id,
+            client_email,
+            len(job_files),
+            str(admin_user.get("id") or ""),
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "job": _admin_analysis_job_payload(job, job_files),
+            },
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] admin analysis job create failed client_email=%s", client_email)
+        return _error_response(500, "analysis_job_create_failed", "Unable to create analysis job.")
+    finally:
+        db.close()
+
+
+@app.get("/api/admin/analysis-jobs/{job_id}")
+def get_admin_analysis_job(request: Request, job_id: str) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    job_uuid, validation_error = _job_uuid_or_not_found(job_id)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_uuid).first()
+        if not job:
+            return _error_response(404, "not_found", "Analysis job was not found.")
+        files = _admin_analysis_job_files(db, job.id)
+        return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+    except Exception:
+        logger.exception("[admin_api] admin analysis job lookup failed job_id=%s", job_id)
+        return _error_response(500, "analysis_job_lookup_failed", "Unable to load analysis job.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/analysis-jobs/{job_id}/cancel")
+def cancel_admin_analysis_job(request: Request, job_id: str) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    job_uuid, validation_error = _job_uuid_or_not_found(job_id)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_uuid).first()
+        if not job:
+            return _error_response(404, "not_found", "Analysis job was not found.")
+
+        status = (_clean_text(getattr(job, "status", None)) or "").lower()
+        if status in {"queued", "processing"}:
+            job.status = "cancel_requested"
+            job.current_step = "Cancel requested"
+            job.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(job)
+
+        files = _admin_analysis_job_files(db, job.id)
+        return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] admin analysis job cancel failed job_id=%s", job_id)
+        return _error_response(500, "analysis_job_cancel_failed", "Unable to cancel analysis job.")
     finally:
         db.close()
 
@@ -1021,6 +1189,125 @@ def _client_option_payload(candidate: dict[str, Any]) -> dict[str, Any]:
         "phone": _clean_text(candidate.get("phone")),
         "ghlCid": _clean_text(candidate.get("ghlCid")),
         "latestSubmittedAt": _iso_datetime(candidate.get("_latestSubmittedAt")),
+    }
+
+
+def _validate_admin_analysis_file_inputs(
+    value: object,
+) -> tuple[list[dict[str, Any]], Optional[JSONResponse]]:
+    if not isinstance(value, list) or not value:
+        return [], _error_response(400, "missing_files", "At least one file metadata item is required.")
+
+    validated_files: list[dict[str, Any]] = []
+    for index, file_item in enumerate(value):
+        if not isinstance(file_item, dict):
+            return [], _error_response(400, "invalid_files", "Each file item must be an object.")
+        for disallowed_key in ("file", "fileBytes", "content", "data", "base64"):
+            if file_item.get(disallowed_key) is not None:
+                return [], _error_response(
+                    400,
+                    "file_contents_not_accepted",
+                    "This endpoint accepts file metadata only.",
+                )
+
+        tool_name = _clean_text(file_item.get("toolName"))
+        if not tool_name:
+            return [], _error_response(400, "missing_toolName", "toolName is required.")
+        if tool_name not in ADMIN_ANALYSIS_ALLOWED_TOOL_NAMES:
+            return [], _error_response(400, "invalid_toolName", "Unsupported analysis tool.")
+
+        byte_size = file_item.get("byteSize")
+        if byte_size is not None:
+            if isinstance(byte_size, bool) or not isinstance(byte_size, int) or byte_size < 0:
+                return [], _error_response(400, "invalid_byteSize", "byteSize must be a non-negative integer.")
+
+        validated_files.append(
+            {
+                "tool_name": tool_name,
+                "original_filename": _clean_text(file_item.get("originalFilename")),
+                "content_type": _clean_text(file_item.get("contentType")),
+                "byte_size": byte_size,
+                "index": index,
+            }
+        )
+
+    return validated_files, None
+
+
+def _job_uuid_or_not_found(job_id: str) -> tuple[Optional[UUID], Optional[JSONResponse]]:
+    try:
+        return UUID(str(job_id)), None
+    except (TypeError, ValueError):
+        return None, _error_response(404, "not_found", "Analysis job was not found.")
+
+
+def _admin_analysis_job_files(db: Any, job_id: object) -> list[AdminAnalysisJobFile]:
+    return (
+        db.query(AdminAnalysisJobFile)
+        .filter(AdminAnalysisJobFile.job_id == job_id)
+        .order_by(AdminAnalysisJobFile.created_at.asc())
+        .all()
+    )
+
+
+def _admin_analysis_error_payload(record: object) -> Optional[dict[str, Optional[str]]]:
+    error_code = _clean_text(getattr(record, "error_code", None))
+    error_message = _clean_text(getattr(record, "error_message", None))
+    if not error_code and not error_message:
+        return None
+    return {
+        "code": error_code,
+        "message": error_message,
+    }
+
+
+def _admin_analysis_job_payload(
+    job: AdminAnalysisJob,
+    files: list[AdminAnalysisJobFile],
+) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(job, "id", None)),
+        "status": _clean_text(getattr(job, "status", None)),
+        "progressPercent": _optional_int(getattr(job, "progress_percent", None)) or 0,
+        "currentStep": _clean_text(getattr(job, "current_step", None)),
+        "clientEmail": _clean_text(getattr(job, "client_email", None)),
+        "firstName": _clean_text(getattr(job, "first_name", None)),
+        "lastName": _clean_text(getattr(job, "last_name", None)),
+        "officeName": _clean_text(getattr(job, "office_name", None)),
+        "orgType": _clean_text(getattr(job, "org_type", None)),
+        "phone": _clean_text(getattr(job, "phone", None)),
+        "ghlCid": _clean_text(getattr(job, "ghl_cid", None)),
+        "clientMode": _clean_text(getattr(job, "client_mode", None)),
+        "analysisRunId": _clean_text(getattr(job, "analysis_run_id", None)),
+        "submissionId": _id_text(getattr(job, "submission_id", None)),
+        "createdByAdminUserId": _clean_text(getattr(job, "created_by_admin_user_id", None)),
+        "createdAt": _iso_datetime(getattr(job, "created_at", None)),
+        "startedAt": _iso_datetime(getattr(job, "started_at", None)),
+        "completedAt": _iso_datetime(getattr(job, "completed_at", None)),
+        "canceledAt": _iso_datetime(getattr(job, "canceled_at", None)),
+        "erroredAt": _iso_datetime(getattr(job, "errored_at", None)),
+        "updatedAt": _iso_datetime(getattr(job, "updated_at", None)),
+        "error": _admin_analysis_error_payload(job),
+        "files": [_admin_analysis_job_file_payload(file_record) for file_record in files],
+    }
+
+
+def _admin_analysis_job_file_payload(file_record: AdminAnalysisJobFile) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(file_record, "id", None)),
+        "jobId": _id_text(getattr(file_record, "job_id", None)),
+        "toolName": _clean_text(getattr(file_record, "tool_name", None)),
+        "originalFilename": _clean_text(getattr(file_record, "original_filename", None)),
+        "contentType": _clean_text(getattr(file_record, "content_type", None)),
+        "byteSize": _optional_int(getattr(file_record, "byte_size", None)),
+        "uploadFileId": _id_text(getattr(file_record, "upload_file_id", None)),
+        "uploadId": _id_text(getattr(file_record, "upload_id", None)),
+        "status": _clean_text(getattr(file_record, "status", None)),
+        "createdAt": _iso_datetime(getattr(file_record, "created_at", None)),
+        "startedAt": _iso_datetime(getattr(file_record, "started_at", None)),
+        "completedAt": _iso_datetime(getattr(file_record, "completed_at", None)),
+        "erroredAt": _iso_datetime(getattr(file_record, "errored_at", None)),
+        "error": _admin_analysis_error_payload(file_record),
     }
 
 
