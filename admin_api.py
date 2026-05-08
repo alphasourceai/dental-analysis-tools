@@ -53,6 +53,8 @@ ADMIN_ANALYSIS_ALLOWED_TOOL_NAMES = {
 }
 ADMIN_ANALYSIS_FINANCIAL_TOOL_NAME = "Financial Analyzer"
 ADMIN_ANALYSIS_FINANCIAL_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".pdf"}
+ADMIN_ANALYSIS_AR_TOOL_NAME = "AR Analyzer"
+ADMIN_ANALYSIS_AR_ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 ADMIN_ANALYSIS_READ_CHUNK_SIZE = 1024 * 1024
 DEFAULT_ADMIN_ANALYSIS_MAX_FILE_MB = 15
 
@@ -644,6 +646,177 @@ async def create_admin_financial_intake_job(
             error_message="Unable to link persisted file to analysis job.",
         )
         logger.exception("[admin_api] admin financial intake file link failed job_id=%s", job_id)
+        return _error_response(500, "analysis_job_link_failed", "Unable to create analysis job.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/analysis-jobs/ar-intake")
+async def create_admin_ar_intake_job(
+    request: Request,
+    client_mode: Optional[str] = Form(None, alias="clientMode"),
+    client_email_value: Optional[str] = Form(None, alias="clientEmail"),
+    first_name_value: Optional[str] = Form(None, alias="firstName"),
+    last_name_value: Optional[str] = Form(None, alias="lastName"),
+    office_name_value: Optional[str] = Form(None, alias="officeName"),
+    org_type_value: Optional[str] = Form(None, alias="orgType"),
+    phone_value: Optional[str] = Form(None, alias="phone"),
+    ghl_cid_value: Optional[str] = Form(None, alias="ghlCid"),
+    ar_file: Optional[FastAPIUploadFile] = File(None, alias="arFile"),
+) -> JSONResponse:
+    admin_user, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    client_email, validation_error = _required_email(client_email_value)
+    if validation_error:
+        return validation_error
+    first_name, validation_error = _required_text(first_name_value, "firstName")
+    if validation_error:
+        return validation_error
+    last_name, validation_error = _required_text(last_name_value, "lastName")
+    if validation_error:
+        return validation_error
+    office_name, validation_error = _required_text(office_name_value, "officeName")
+    if validation_error:
+        return validation_error
+    org_type, validation_error = _required_text(org_type_value, "orgType")
+    if validation_error:
+        return validation_error
+    if ar_file is None:
+        return _error_response(400, "missing_ar_file", "arFile is required.")
+
+    single_file_error = await _validate_single_file_field(request, "arFile")
+    if single_file_error:
+        await ar_file.close()
+        return single_file_error
+
+    original_filename = _clean_text(ar_file.filename)
+    if not original_filename:
+        await ar_file.close()
+        return _error_response(400, "missing_filename", "Uploaded file name is required.")
+
+    extension = _file_extension(original_filename)
+    if extension not in ADMIN_ANALYSIS_AR_ALLOWED_EXTENSIONS:
+        await ar_file.close()
+        return _error_response(400, "unsupported_file_type", "Unsupported AR file type.")
+
+    try:
+        file_bytes, file_error = await _read_admin_upload_file(ar_file)
+    finally:
+        await ar_file.close()
+    if file_error:
+        return file_error
+
+    content_type = _clean_text(ar_file.content_type)
+    now = datetime.now(timezone.utc)
+    analysis_run_id = str(uuid4())
+    db = SessionLocal()
+    job_id: Optional[object] = None
+    job_file_id: Optional[object] = None
+    try:
+        job = AdminAnalysisJob(
+            status="intake_pending",
+            created_by_admin_user_id=str(admin_user.get("id") or ""),
+            client_email=client_email,
+            first_name=first_name,
+            last_name=last_name,
+            office_name=office_name,
+            org_type=org_type,
+            phone=_clean_text(phone_value),
+            ghl_cid=_clean_text(ghl_cid_value),
+            client_mode=_clean_text(client_mode),
+            analysis_run_id=analysis_run_id,
+            progress_percent=0,
+            current_step="AR file intake pending",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+
+        job_file = AdminAnalysisJobFile(
+            job_id=job.id,
+            tool_name=ADMIN_ANALYSIS_AR_TOOL_NAME,
+            original_filename=original_filename,
+            content_type=content_type,
+            byte_size=len(file_bytes),
+            status="intake_pending",
+            created_at=now,
+        )
+        db.add(job_file)
+        db.commit()
+        db.refresh(job)
+        db.refresh(job_file)
+        job_file_id = job_file.id
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] admin AR intake job create failed client_email=%s", client_email)
+        db.close()
+        return _error_response(500, "analysis_job_create_failed", "Unable to create analysis job.")
+
+    try:
+        upload_file_id = persist_upload_file(
+            file_bytes=file_bytes,
+            user_email=client_email,
+            tool_name=ADMIN_ANALYSIS_AR_TOOL_NAME,
+            original_filename=original_filename,
+            content_type=content_type,
+        )
+    except Exception:
+        logger.exception("[admin_api] admin AR intake storage raised job_id=%s", job_id)
+        upload_file_id = None
+    if not upload_file_id:
+        _mark_admin_ar_intake_failed(
+            job_id=job_id,
+            job_file_id=job_file_id,
+            error_code="storage_failed",
+            error_message="Unable to persist uploaded file.",
+        )
+        logger.error(
+            "[admin_api] admin AR intake storage failed job_id=%s client_email=%s filename=%s",
+            job_id,
+            client_email,
+            original_filename,
+        )
+        db.close()
+        return _error_response(500, "storage_failed", "Unable to persist uploaded file.")
+
+    try:
+        job.status = "queued"
+        job.progress_percent = 10
+        job.current_step = "AR file received"
+        job.updated_at = datetime.now(timezone.utc)
+        job_file.status = "queued"
+        job_file.upload_file_id = upload_file_id
+        db.commit()
+        db.refresh(job)
+        db.refresh(job_file)
+        logger.info(
+            "[admin_api] admin AR intake queued job_id=%s client_email=%s upload_file_id=%s admin_user_id=%s",
+            job.id,
+            client_email,
+            upload_file_id,
+            str(admin_user.get("id") or ""),
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "job": _admin_analysis_job_payload(job, [job_file]),
+            },
+        )
+    except Exception:
+        db.rollback()
+        _cleanup_admin_intake_upload_file(upload_file_id)
+        _mark_admin_ar_intake_failed(
+            job_id=job_id,
+            job_file_id=job_file_id,
+            error_code="analysis_job_link_failed",
+            error_message="Unable to link persisted file to analysis job.",
+        )
+        logger.exception("[admin_api] admin AR intake file link failed job_id=%s", job_id)
         return _error_response(500, "analysis_job_link_failed", "Unable to create analysis job.")
     finally:
         db.close()
@@ -1932,6 +2105,47 @@ def _mark_admin_financial_intake_failed(
     except Exception:
         db.rollback()
         logger.exception("[admin_api] failed to mark financial intake failed job_id=%s", job_id)
+    finally:
+        db.close()
+
+
+def _mark_admin_ar_intake_failed(
+    job_id: object,
+    job_file_id: object,
+    error_code: str,
+    error_message: str,
+) -> None:
+    if not job_id:
+        return
+
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_id).first()
+        if job:
+            job.status = "error"
+            job.current_step = "AR file intake failed"
+            job.error_code = error_code
+            job.error_message = error_message
+            job.errored_at = now
+            job.updated_at = now
+
+        if job_file_id:
+            job_file = (
+                db.query(AdminAnalysisJobFile)
+                .filter(AdminAnalysisJobFile.id == job_file_id)
+                .first()
+            )
+            if job_file:
+                job_file.status = "error"
+                job_file.error_code = error_code
+                job_file.error_message = error_message
+                job_file.errored_at = now
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] failed to mark AR intake failed job_id=%s", job_id)
     finally:
         db.close()
 
