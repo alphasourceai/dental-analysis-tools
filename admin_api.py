@@ -736,12 +736,6 @@ def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
             db.refresh(job)
             files = _admin_analysis_job_files(db, job.id)
             return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
-        if status not in {"queued", "processing"}:
-            return _error_response(
-                409,
-                "invalid_job_status",
-                "Analysis job must be queued or processing.",
-            )
 
         financial_files = [
             file_record
@@ -756,6 +750,34 @@ def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
             )
 
         job_file = financial_files[0]
+        retrying_storage_download = False
+        if status == "error":
+            job_error_code = _clean_text(getattr(job, "error_code", None))
+            job_file_error_code = _clean_text(getattr(job_file, "error_code", None))
+            job_file_has_output = bool(
+                _clean_text(getattr(job_file, "analysis_data", None))
+                or getattr(job_file, "upload_id", None)
+            )
+            retrying_storage_download = (
+                job_error_code == "storage_download_failed"
+                and (
+                    job_file_error_code == "storage_download_failed"
+                    or not job_file_has_output
+                )
+            )
+            if not retrying_storage_download:
+                return _error_response(
+                    409,
+                    "invalid_job_status",
+                    "Only storage download failures can be retried from error status.",
+                )
+        elif status not in {"queued", "processing"}:
+            return _error_response(
+                409,
+                "invalid_job_status",
+                "Analysis job must be queued or processing.",
+            )
+
         job_file_id = job_file.id
         upload_file_id = getattr(job_file, "upload_file_id", None)
         if not upload_file_id:
@@ -801,18 +823,24 @@ def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
         now = datetime.now(timezone.utc)
         job.status = "processing"
         job.progress_percent = max(_optional_int(getattr(job, "progress_percent", None)) or 0, 20)
-        job.current_step = "Downloading financial file"
+        job.current_step = (
+            "Retrying financial file download"
+            if retrying_storage_download
+            else "Downloading financial file"
+        )
         if not getattr(job, "started_at", None):
             job.started_at = now
         job.updated_at = now
         job.error_code = None
         job.error_message = None
+        job.errored_at = None
 
         job_file.status = "processing"
         if not getattr(job_file, "started_at", None):
             job_file.started_at = now
         job_file.error_code = None
         job_file.error_message = None
+        job_file.errored_at = None
         db.commit()
 
         logger.info("[admin_analysis] financial processing started job_id=%s", job_uuid)

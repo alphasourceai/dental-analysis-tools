@@ -15,6 +15,8 @@ logger = logging.getLogger("uvicorn.error")
 
 MAX_PROVIDER_RETRIES = 2
 PROVIDER_RETRY_BACKOFF_SECONDS = 0.75
+STORAGE_DOWNLOAD_MAX_RETRIES = 2
+STORAGE_DOWNLOAD_RETRY_BACKOFF_SECONDS = 0.75
 TRANSIENT_PROVIDER_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 529}
 PROVIDER_UNAVAILABLE_MESSAGE = (
     "Analysis unavailable from this model due to temporary provider capacity. "
@@ -53,19 +55,39 @@ def download_upload_file_bytes(bucket: str, object_path: str) -> bytes:
             "File storage is not configured.",
         )
 
-    try:
-        response = client.storage.from_(bucket).download(object_path)
-    except Exception as exc:
+    max_attempts = STORAGE_DOWNLOAD_MAX_RETRIES + 1
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = client.storage.from_(bucket).download(object_path)
+            break
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "[admin_analysis] storage download failed bucket=%s object_path=%s attempt=%s error_type=%s",
+                bucket,
+                object_path,
+                attempt,
+                type(exc).__name__,
+            )
+            if attempt >= max_attempts or not _is_retryable_storage_download_error(exc):
+                raise AdminFinancialProcessingError(
+                    "storage_download_failed",
+                    "Unable to download stored financial file.",
+                ) from exc
+            time.sleep(STORAGE_DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt)
+    else:
         logger.warning(
-            "[admin_analysis] storage download failed bucket=%s object_path=%s error_type=%s",
+            "[admin_analysis] storage download failed bucket=%s object_path=%s attempt=%s error_type=%s",
             bucket,
             object_path,
-            type(exc).__name__,
+            max_attempts,
+            type(last_error).__name__ if last_error else "unknown",
         )
         raise AdminFinancialProcessingError(
             "storage_download_failed",
             "Unable to download stored financial file.",
-        ) from exc
+        ) from last_error
 
     file_bytes = _response_to_bytes(response)
     if not file_bytes:
@@ -375,6 +397,51 @@ def _decode_csv_bytes(file_bytes: bytes) -> str:
         "csv_decode_failed",
         "CSV file could not be decoded.",
     )
+
+
+def _is_retryable_storage_download_error(exc: Exception) -> bool:
+    status_code = _provider_status_code(exc)
+    if status_code is not None:
+        return status_code in TRANSIENT_PROVIDER_STATUS_CODES
+
+    safe_text = f"{type(exc).__name__} {str(exc)}".lower()
+    non_retryable_markers = (
+        "not found",
+        "404",
+        "unauthorized",
+        "401",
+        "forbidden",
+        "403",
+        "permission denied",
+    )
+    if any(marker in safe_text for marker in non_retryable_markers):
+        return False
+
+    retryable_markers = (
+        "timeout",
+        "timed out",
+        "readtimeout",
+        "connecttimeout",
+        "connection",
+        "network",
+        "temporarily unavailable",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "server error",
+        "internal server",
+        "rate limit",
+        "408",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "529",
+        "storage",
+        "supabase",
+    )
+    return any(marker in safe_text for marker in retryable_markers)
 
 
 def _render_xlsx_cell(value: Any) -> str:
