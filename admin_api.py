@@ -254,6 +254,100 @@ def list_admin_clients(
         db.close()
 
 
+@app.get("/api/admin/client-options")
+def list_admin_client_options(
+    request: Request,
+    search: Optional[str] = None,
+    limit: int = Query(75, ge=1),
+) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    safe_limit = min(limit, 100)
+    normalized_search = (search or "").strip()
+    db = SessionLocal()
+    try:
+        candidates: dict[str, dict[str, Any]] = {}
+
+        submission_query = db.query(ClientSubmission)
+        user_query = db.query(User)
+        if normalized_search:
+            search_like = f"%{normalized_search}%"
+            submission_query = submission_query.filter(
+                or_(
+                    ClientSubmission.user_email.ilike(search_like),
+                    ClientSubmission.first_name.ilike(search_like),
+                    ClientSubmission.last_name.ilike(search_like),
+                    ClientSubmission.office_name.ilike(search_like),
+                    ClientSubmission.phone.ilike(search_like),
+                )
+            )
+            user_query = user_query.filter(
+                or_(
+                    User.email.ilike(search_like),
+                    User.first_name.ilike(search_like),
+                    User.last_name.ilike(search_like),
+                    User.office_name.ilike(search_like),
+                    User.phone.ilike(search_like),
+                )
+            )
+
+        submissions = (
+            submission_query.order_by(ClientSubmission.submitted_at.desc())
+            .limit(safe_limit)
+            .all()
+        )
+        for submission in submissions:
+            _merge_client_option_submission(candidates, submission)
+
+        users = user_query.order_by(User.email.asc()).limit(safe_limit).all()
+        for user in users:
+            _merge_client_option_user(candidates, user)
+
+        candidate_emails = list(candidates.keys())
+        if candidate_emails:
+            latest_submissions = (
+                db.query(ClientSubmission)
+                .filter(func.lower(ClientSubmission.user_email).in_(candidate_emails))
+                .order_by(
+                    func.lower(ClientSubmission.user_email).asc(),
+                    ClientSubmission.submitted_at.desc(),
+                )
+                .all()
+            )
+            seen_latest_emails: set[str] = set()
+            for submission in latest_submissions:
+                email = (_clean_text(getattr(submission, "user_email", None)) or "").lower()
+                if not email or email in seen_latest_emails:
+                    continue
+                seen_latest_emails.add(email)
+                _merge_client_option_submission(candidates, submission)
+
+        items = sorted(
+            candidates.values(),
+            key=lambda candidate: (
+                _datetime_timestamp(candidate.get("_latestSubmittedAt")),
+                candidate.get("email") or "",
+            ),
+            reverse=True,
+        )[:safe_limit]
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "items": [_client_option_payload(item) for item in items],
+                "limit": safe_limit,
+                "count": len(items),
+            }
+        )
+    except Exception:
+        logger.exception("[admin_api] client options query failed.")
+        return _error_response(500, "client_options_failed", "Unable to load client options.")
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/billing/checkout-sessions")
 async def create_admin_checkout_session(request: Request) -> JSONResponse:
     admin_user, error_response = _require_admin_user(request)
@@ -828,6 +922,105 @@ def _stripe_customer_payload(customer: StripeCustomer) -> dict[str, Any]:
         "livemode": bool(getattr(customer, "livemode", False)),
         "createdAt": _iso_datetime(getattr(customer, "created_at", None)),
         "updatedAt": _iso_datetime(getattr(customer, "updated_at", None)),
+    }
+
+
+def _ensure_client_option(
+    candidates: dict[str, dict[str, Any]],
+    email_value: object,
+) -> Optional[dict[str, Any]]:
+    email = (_clean_text(email_value) or "").lower()
+    if not email:
+        return None
+    if email not in candidates:
+        candidates[email] = {
+            "email": email,
+            "firstName": None,
+            "lastName": None,
+            "officeName": None,
+            "orgType": None,
+            "phone": None,
+            "ghlCid": None,
+            "_latestSubmittedAt": None,
+        }
+    return candidates[email]
+
+
+def _merge_client_option_value(candidate: dict[str, Any], key: str, value: object) -> None:
+    cleaned = _clean_text(value)
+    if cleaned and not candidate.get(key):
+        candidate[key] = cleaned
+
+
+def _merge_client_option_submission(
+    candidates: dict[str, dict[str, Any]],
+    submission: ClientSubmission,
+) -> None:
+    candidate = _ensure_client_option(candidates, getattr(submission, "user_email", None))
+    if candidate is None:
+        return
+
+    submitted_at = getattr(submission, "submitted_at", None)
+    current_latest = candidate.get("_latestSubmittedAt")
+    is_new_latest = (
+        isinstance(submitted_at, datetime)
+        and (
+            not isinstance(current_latest, datetime)
+            or submitted_at > current_latest
+        )
+    )
+    if is_new_latest:
+        candidate["_latestSubmittedAt"] = submitted_at
+
+    field_map = {
+        "firstName": "first_name",
+        "lastName": "last_name",
+        "officeName": "office_name",
+        "orgType": "org_type",
+        "phone": "phone",
+        "ghlCid": "ghl_cid",
+    }
+    for payload_key, model_key in field_map.items():
+        cleaned = _clean_text(getattr(submission, model_key, None))
+        if cleaned and (is_new_latest or not candidate.get(payload_key)):
+            candidate[payload_key] = cleaned
+
+
+def _merge_client_option_user(
+    candidates: dict[str, dict[str, Any]],
+    user: User,
+) -> None:
+    candidate = _ensure_client_option(candidates, getattr(user, "email", None))
+    if candidate is None:
+        return
+
+    field_map = {
+        "firstName": "first_name",
+        "lastName": "last_name",
+        "officeName": "office_name",
+        "orgType": "org_type",
+        "phone": "phone",
+    }
+    for payload_key, model_key in field_map.items():
+        _merge_client_option_value(candidate, payload_key, getattr(user, model_key, None))
+
+
+def _datetime_timestamp(value: object) -> float:
+    if isinstance(value, datetime):
+        return value.timestamp()
+    return 0.0
+
+
+def _client_option_payload(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "email": _clean_text(candidate.get("email")),
+        "firstName": _clean_text(candidate.get("firstName")),
+        "lastName": _clean_text(candidate.get("lastName")),
+        "officeName": _clean_text(candidate.get("officeName")),
+        "orgType": _clean_text(candidate.get("orgType")),
+        "phone": _clean_text(candidate.get("phone")),
+        "ghlCid": _clean_text(candidate.get("ghlCid")),
+        "latestSubmittedAt": _iso_datetime(candidate.get("_latestSubmittedAt")),
     }
 
 
