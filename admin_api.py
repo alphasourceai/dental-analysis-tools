@@ -19,6 +19,7 @@ from admin_financial_processing_service import (
     AdminFinancialProcessingError,
     download_upload_file_bytes,
     extract_csv_text,
+    extract_xlsx_text,
     run_financial_csv_analysis,
 )
 from database import SessionLocal
@@ -781,11 +782,18 @@ def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
             or _clean_text(getattr(job_file, "original_filename", None))
             or ""
         )
-        if _file_extension(original_filename) != ".csv":
+        file_extension = _file_extension(original_filename)
+        if file_extension == ".pdf":
             return _error_response(
                 400,
                 "unsupported_file_type",
-                "DA-3B supports CSV Financial Analyzer processing only.",
+                "PDF processing will be added later.",
+            )
+        if file_extension not in {".csv", ".xlsx"}:
+            return _error_response(
+                400,
+                "unsupported_file_type",
+                "Unsupported financial file type.",
             )
 
         bucket = _clean_text(getattr(upload_file, "bucket", None))
@@ -847,21 +855,36 @@ def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
             job_uuid,
             job_file_id,
             45,
-            "Extracting CSV data",
+            f"Extracting {file_extension.lstrip('.').upper()} data",
         )
-        data_input = extract_csv_text(file_bytes)
+        if file_extension == ".csv":
+            data_input = extract_csv_text(file_bytes)
+            source_format = "csv"
+        else:
+            data_input = extract_xlsx_text(file_bytes)
+            source_format = "xlsx"
     except AdminFinancialProcessingError as exc:
         _mark_admin_financial_processing_error(job_uuid, job_file_id, exc.code, exc.message)
         return _error_response(400, exc.code, exc.message)
     except Exception:
-        logger.exception("[admin_analysis] financial CSV extraction failed job_id=%s", job_uuid)
+        logger.exception(
+            "[admin_analysis] financial file extraction failed job_id=%s extension=%s",
+            job_uuid,
+            file_extension,
+        )
+        if file_extension == ".csv":
+            error_code = "csv_extract_failed"
+            error_message = "Unable to extract CSV data."
+        else:
+            error_code = "xlsx_extract_failed"
+            error_message = "Unable to extract XLSX data."
         _mark_admin_financial_processing_error(
             job_uuid,
             job_file_id,
-            "csv_extract_failed",
-            "Unable to extract CSV data.",
+            error_code,
+            error_message,
         )
-        return _error_response(400, "csv_extract_failed", "Unable to extract CSV data.")
+        return _error_response(400, error_code, error_message)
 
     _update_admin_financial_processing_progress(
         job_uuid,
@@ -876,6 +899,7 @@ def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
         analysis_data = run_financial_csv_analysis(
             data_input,
             cancel_checker=lambda: _admin_analysis_job_cancel_requested(job_uuid),
+            source_format=source_format,
         )
     except AdminFinancialProcessingCanceled:
         return _cancel_admin_analysis_job_response(job_uuid)

@@ -6,7 +6,7 @@ import os
 import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from io import StringIO
+from io import BytesIO, StringIO
 from typing import Any, Callable, Optional
 
 from supabase_utils import _get_supabase_admin_client
@@ -20,6 +20,10 @@ PROVIDER_UNAVAILABLE_MESSAGE = (
     "Analysis unavailable from this model due to temporary provider capacity. "
     "Other model results were processed."
 )
+MAX_XLSX_SHEETS = 10
+MAX_XLSX_ROWS_PER_SHEET = 500
+MAX_XLSX_COLUMNS_PER_ROW = 50
+MAX_XLSX_CELL_CHARS = 500
 
 CancelChecker = Callable[[], bool]
 
@@ -93,10 +97,67 @@ def extract_csv_text(file_bytes: bytes) -> str:
     return data_input
 
 
+def extract_xlsx_text(file_bytes: bytes) -> str:
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise AdminFinancialProcessingError(
+            "xlsx_dependency_missing",
+            "XLSX processing is not configured.",
+        ) from exc
+
+    try:
+        workbook = load_workbook(
+            filename=BytesIO(file_bytes),
+            read_only=True,
+            data_only=True,
+        )
+    except Exception as exc:
+        raise AdminFinancialProcessingError(
+            "xlsx_read_failed",
+            "XLSX file could not be read.",
+        ) from exc
+
+    rendered_sheets = []
+    try:
+        for sheet in workbook.worksheets[:MAX_XLSX_SHEETS]:
+            rendered_rows = [f"Sheet: {_render_xlsx_cell(sheet.title)}"]
+            for row_index, row in enumerate(
+                sheet.iter_rows(
+                    max_row=MAX_XLSX_ROWS_PER_SHEET,
+                    max_col=MAX_XLSX_COLUMNS_PER_ROW,
+                    values_only=True,
+                ),
+                start=1,
+            ):
+                rendered_cells = [_render_xlsx_cell(value) for value in row]
+                while rendered_cells and not rendered_cells[-1]:
+                    rendered_cells.pop()
+                if not rendered_cells:
+                    continue
+                rendered_rows.append(" | ".join(rendered_cells))
+                if row_index >= MAX_XLSX_ROWS_PER_SHEET:
+                    break
+
+            if len(rendered_rows) > 1:
+                rendered_sheets.append("\n".join(rendered_rows))
+    finally:
+        workbook.close()
+
+    data_input = "\n\n".join(rendered_sheets).strip()
+    if not data_input:
+        raise AdminFinancialProcessingError(
+            "empty_xlsx",
+            "XLSX file did not contain readable data.",
+        )
+    return data_input
+
+
 def run_financial_csv_analysis(
     data_input: str,
     *,
     cancel_checker: Optional[CancelChecker] = None,
+    source_format: str = "csv",
 ) -> dict[str, Any]:
     _raise_if_canceled(cancel_checker)
     model_labels = _get_model_labels()
@@ -148,7 +209,7 @@ def run_financial_csv_analysis(
     deduplicated_issues = deduplicate_issues(all_issues)
 
     return {
-        "sourceFormat": "csv",
+        "sourceFormat": source_format,
         "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "raw_analyses": raw_analyses,
         "provider_statuses": provider_statuses,
@@ -314,6 +375,19 @@ def _decode_csv_bytes(file_bytes: bytes) -> str:
         "csv_decode_failed",
         "CSV file could not be decoded.",
     )
+
+
+def _render_xlsx_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        text = value.isoformat()
+    else:
+        text = str(value)
+    text = " ".join(text.strip().split())
+    if len(text) > MAX_XLSX_CELL_CHARS:
+        return f"{text[:MAX_XLSX_CELL_CHARS]}..."
+    return text
 
 
 def _get_model_config() -> dict[str, str]:

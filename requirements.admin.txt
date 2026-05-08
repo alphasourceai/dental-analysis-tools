@@ -9,3 +9,4 @@ supabase
 stripe
 openai
 anthropic
+openpyxl
