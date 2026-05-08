@@ -1184,6 +1184,309 @@ def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
         db.close()
 
 
+@app.post("/api/admin/analysis-jobs/{job_id}/process-ar")
+def process_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    job_uuid, validation_error = _job_uuid_or_not_found(job_id)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    job_file_id: Optional[object] = None
+    bucket: Optional[str] = None
+    object_path: Optional[str] = None
+    try:
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_uuid).first()
+        if not job:
+            return _error_response(404, "not_found", "Analysis job was not found.")
+
+        files = _admin_analysis_job_files(db, job.id)
+        ar_files = [
+            file_record
+            for file_record in files
+            if _clean_text(getattr(file_record, "tool_name", None)) == ADMIN_ANALYSIS_AR_TOOL_NAME
+        ]
+        if len(ar_files) != 1:
+            return _error_response(
+                409,
+                "invalid_ar_job_files",
+                "Analysis job must have exactly one AR Analyzer file.",
+            )
+
+        status = (_clean_text(getattr(job, "status", None)) or "").lower()
+        if status == "completed":
+            return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+        if status == "cancel_requested":
+            _set_admin_analysis_job_canceled(db, job, files)
+            db.commit()
+            db.refresh(job)
+            files = _admin_analysis_job_files(db, job.id)
+            return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+
+        job_file = ar_files[0]
+        retrying_storage_download = False
+        if status == "error":
+            job_error_code = _clean_text(getattr(job, "error_code", None))
+            job_file_error_code = _clean_text(getattr(job_file, "error_code", None))
+            job_file_has_output = bool(
+                _clean_text(getattr(job_file, "analysis_data", None))
+                or getattr(job_file, "upload_id", None)
+            )
+            retrying_storage_download = (
+                job_error_code == "storage_download_failed"
+                and (
+                    job_file_error_code == "storage_download_failed"
+                    or not job_file_has_output
+                )
+            )
+            if not retrying_storage_download:
+                return _error_response(
+                    409,
+                    "invalid_job_status",
+                    "Only storage download failures can be retried from error status.",
+                )
+        elif status not in {"queued", "processing"}:
+            return _error_response(
+                409,
+                "invalid_job_status",
+                "Analysis job must be queued or processing.",
+            )
+
+        job_file_id = job_file.id
+        upload_file_id = getattr(job_file, "upload_file_id", None)
+        if not upload_file_id:
+            return _error_response(
+                409,
+                "missing_upload_file",
+                "AR Analyzer file has not been persisted.",
+            )
+
+        upload_file = (
+            db.query(UploadFileRecord)
+            .filter(UploadFileRecord.id == upload_file_id)
+            .first()
+        )
+        if not upload_file:
+            return _error_response(
+                409,
+                "missing_upload_file",
+                "Persisted AR file was not found.",
+            )
+
+        original_filename = (
+            _clean_text(getattr(upload_file, "original_filename", None))
+            or _clean_text(getattr(job_file, "original_filename", None))
+            or ""
+        )
+        file_extension = _file_extension(original_filename)
+        if file_extension not in ADMIN_ANALYSIS_AR_ALLOWED_EXTENSIONS:
+            return _error_response(
+                400,
+                "unsupported_file_type",
+                "Unsupported AR file type.",
+            )
+
+        bucket = _clean_text(getattr(upload_file, "bucket", None))
+        object_path = _clean_text(getattr(upload_file, "object_path", None))
+        now = datetime.now(timezone.utc)
+        job.status = "processing"
+        job.progress_percent = max(_optional_int(getattr(job, "progress_percent", None)) or 0, 20)
+        job.current_step = (
+            "Retrying AR file download"
+            if retrying_storage_download
+            else "Downloading AR file"
+        )
+        if not getattr(job, "started_at", None):
+            job.started_at = now
+        job.updated_at = now
+        job.error_code = None
+        job.error_message = None
+        job.errored_at = None
+
+        job_file.status = "processing"
+        if not getattr(job_file, "started_at", None):
+            job_file.started_at = now
+        job_file.error_code = None
+        job_file.error_message = None
+        job_file.errored_at = None
+        db.commit()
+
+        logger.info("[admin_analysis] AR processing started job_id=%s", job_uuid)
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_analysis] AR processing setup failed job_id=%s", job_id)
+        return _error_response(500, "analysis_processing_failed", "Unable to process AR analysis job.")
+    finally:
+        db.close()
+
+    if _admin_analysis_job_cancel_requested(job_uuid):
+        return _cancel_admin_analysis_job_response(job_uuid)
+
+    try:
+        file_bytes = download_upload_file_bytes(bucket or "", object_path or "")
+    except AdminFinancialProcessingError as exc:
+        error_message = (
+            "Unable to download stored AR file."
+            if exc.code == "storage_download_failed"
+            else exc.message
+        )
+        _mark_admin_ar_processing_error(job_uuid, job_file_id, exc.code, error_message)
+        return _error_response(500, exc.code, error_message)
+    except Exception:
+        logger.exception("[admin_analysis] AR file download failed job_id=%s", job_uuid)
+        _mark_admin_ar_processing_error(
+            job_uuid,
+            job_file_id,
+            "storage_download_failed",
+            "Unable to download stored AR file.",
+        )
+        return _error_response(500, "storage_download_failed", "Unable to download stored AR file.")
+
+    _update_admin_financial_processing_progress(
+        job_uuid,
+        job_file_id,
+        35,
+        "AR file downloaded",
+    )
+    if _admin_analysis_job_cancel_requested(job_uuid):
+        return _cancel_admin_analysis_job_response(job_uuid)
+
+    try:
+        _update_admin_financial_processing_progress(
+            job_uuid,
+            job_file_id,
+            45,
+            f"Extracting {file_extension.lstrip('.').upper()} data",
+        )
+        if file_extension == ".csv":
+            data_input = extract_csv_text(file_bytes)
+            source_format = "csv"
+        else:
+            data_input = extract_xlsx_text(file_bytes)
+            source_format = "xlsx"
+    except AdminFinancialProcessingError as exc:
+        _mark_admin_ar_processing_error(job_uuid, job_file_id, exc.code, exc.message)
+        return _error_response(400, exc.code, exc.message)
+    except Exception:
+        logger.exception(
+            "[admin_analysis] AR file extraction failed job_id=%s extension=%s",
+            job_uuid,
+            file_extension,
+        )
+        if file_extension == ".csv":
+            error_code = "csv_extract_failed"
+            error_message = "Unable to extract AR CSV data."
+        else:
+            error_code = "xlsx_extract_failed"
+            error_message = "Unable to extract AR XLSX data."
+        _mark_admin_ar_processing_error(
+            job_uuid,
+            job_file_id,
+            error_code,
+            error_message,
+        )
+        return _error_response(400, error_code, error_message)
+
+    _update_admin_financial_processing_progress(
+        job_uuid,
+        job_file_id,
+        60,
+        "Running AR model analysis",
+    )
+    if _admin_analysis_job_cancel_requested(job_uuid):
+        return _cancel_admin_analysis_job_response(job_uuid)
+
+    try:
+        analysis_data = run_financial_csv_analysis(
+            data_input,
+            cancel_checker=lambda: _admin_analysis_job_cancel_requested(job_uuid),
+            source_format=source_format,
+        )
+    except AdminFinancialProcessingCanceled:
+        return _cancel_admin_analysis_job_response(job_uuid)
+    except AdminFinancialProcessingError as exc:
+        _mark_admin_ar_processing_error(job_uuid, job_file_id, exc.code, exc.message)
+        return _error_response(502, exc.code, exc.message)
+    except Exception:
+        logger.exception("[admin_analysis] AR model analysis failed job_id=%s", job_uuid)
+        _mark_admin_ar_processing_error(
+            job_uuid,
+            job_file_id,
+            "provider_unavailable",
+            "The analyzer providers are temporarily unavailable. Please try again later.",
+        )
+        return _error_response(
+            502,
+            "provider_unavailable",
+            "The analyzer providers are temporarily unavailable. Please try again later.",
+        )
+
+    if _admin_analysis_job_cancel_requested(job_uuid):
+        return _cancel_admin_analysis_job_response(job_uuid)
+
+    db = SessionLocal()
+    try:
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_uuid).first()
+        if not job:
+            return _error_response(404, "not_found", "Analysis job was not found.")
+        files = _admin_analysis_job_files(db, job.id)
+        status = (_clean_text(getattr(job, "status", None)) or "").lower()
+        if status == "cancel_requested":
+            _set_admin_analysis_job_canceled(db, job, files)
+            db.commit()
+            db.refresh(job)
+            files = _admin_analysis_job_files(db, job.id)
+            return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+
+        job_file = (
+            db.query(AdminAnalysisJobFile)
+            .filter(AdminAnalysisJobFile.id == job_file_id)
+            .first()
+        )
+        if not job_file:
+            return _error_response(404, "not_found", "Analysis job file was not found.")
+
+        now = datetime.now(timezone.utc)
+        job.status = "completed"
+        job.progress_percent = 100
+        job.current_step = "AR analysis processed"
+        job.completed_at = now
+        job.updated_at = now
+        job.error_code = None
+        job.error_message = None
+
+        job_file.status = "completed"
+        job_file.analysis_data = json.dumps(analysis_data)
+        job_file.completed_at = now
+        job_file.processed_at = now
+        job_file.error_code = None
+        job_file.error_message = None
+        db.commit()
+        db.refresh(job)
+        files = _admin_analysis_job_files(db, job.id)
+        logger.info("[admin_analysis] AR processing completed job_id=%s", job_uuid)
+        return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_analysis] AR processing final write failed job_id=%s", job_uuid)
+        _mark_admin_ar_processing_error(
+            job_uuid,
+            job_file_id,
+            "analysis_result_store_failed",
+            "Unable to store AR analysis results.",
+        )
+        return _error_response(
+            500,
+            "analysis_result_store_failed",
+            "Unable to store AR analysis results.",
+        )
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/analysis-jobs/{job_id}/promote-financial")
 def promote_admin_financial_analysis_job(request: Request, job_id: str) -> JSONResponse:
     _, error_response = _require_admin_user(request)
@@ -2321,6 +2624,47 @@ def _mark_admin_financial_processing_error(
     except Exception:
         db.rollback()
         logger.exception("[admin_analysis] failed to mark financial processing error job_id=%s", job_id)
+    finally:
+        db.close()
+
+
+def _mark_admin_ar_processing_error(
+    job_id: object,
+    job_file_id: object,
+    error_code: str,
+    error_message: str,
+) -> None:
+    if not job_id:
+        return
+
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_id).first()
+        if job:
+            job.status = "error"
+            job.current_step = "AR analysis failed"
+            job.error_code = error_code
+            job.error_message = error_message
+            job.errored_at = now
+            job.updated_at = now
+
+        if job_file_id:
+            job_file = (
+                db.query(AdminAnalysisJobFile)
+                .filter(AdminAnalysisJobFile.id == job_file_id)
+                .first()
+            )
+            if job_file:
+                job_file.status = "error"
+                job_file.error_code = error_code
+                job_file.error_message = error_message
+                job_file.errored_at = now
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_analysis] failed to mark AR processing error job_id=%s", job_id)
     finally:
         db.close()
 
