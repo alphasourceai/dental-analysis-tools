@@ -2183,6 +2183,116 @@ def promote_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse
         db.close()
 
 
+@app.post("/api/admin/analysis-jobs/{job_id}/promote-claims")
+def promote_admin_claims_analysis_job(request: Request, job_id: str) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    job_uuid, validation_error = _job_uuid_or_not_found(job_id)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_uuid).first()
+        if not job:
+            return _error_response(404, "not_found", "Analysis job was not found.")
+
+        if (_clean_text(getattr(job, "status", None)) or "").lower() != "completed":
+            return _error_response(
+                409,
+                "invalid_job_status",
+                "Claims analysis job must be completed before promotion.",
+            )
+
+        files = _admin_analysis_job_files(db, job.id)
+        claims_files = [
+            file_record
+            for file_record in files
+            if _clean_text(getattr(file_record, "tool_name", None)) == ADMIN_ANALYSIS_CLAIMS_TOOL_NAME
+        ]
+        if len(claims_files) != 1:
+            return _error_response(
+                409,
+                "invalid_claims_job_files",
+                "Analysis job must have exactly one Insurance Claim Analyzer file.",
+            )
+
+        job_file = claims_files[0]
+        if (_clean_text(getattr(job_file, "status", None)) or "").lower() != "completed":
+            return _error_response(
+                409,
+                "invalid_job_file_status",
+                "Insurance Claim Analyzer file must be completed before promotion.",
+            )
+
+        analysis_data, analysis_error = _admin_claims_analysis_data_object(
+            getattr(job_file, "analysis_data", None)
+        )
+        if analysis_error:
+            return analysis_error
+
+        upload_file_id = getattr(job_file, "upload_file_id", None)
+        if not upload_file_id:
+            return _error_response(
+                409,
+                "missing_upload_file",
+                "Insurance Claim Analyzer file has not been persisted.",
+            )
+
+        upload_file = (
+            db.query(UploadFileRecord)
+            .filter(UploadFileRecord.id == upload_file_id)
+            .first()
+        )
+        if not upload_file:
+            return _error_response(
+                409,
+                "missing_upload_file",
+                "Persisted Claims file was not found.",
+            )
+
+        client_email, validation_error = _required_email(getattr(job, "client_email", None))
+        if validation_error:
+            return validation_error
+
+        promotion_result, promotion_error = _promote_claims_admin_job_records(
+            db=db,
+            job=job,
+            job_file=job_file,
+            upload_file=upload_file,
+            analysis_data=analysis_data,
+            client_email=client_email,
+        )
+        if promotion_error:
+            db.rollback()
+            return promotion_error
+
+        db.commit()
+        db.refresh(job)
+        files = _admin_analysis_job_files(db, job.id)
+        return JSONResponse(
+            {
+                "ok": True,
+                "job": _admin_analysis_job_payload(job, files),
+                "submissionId": promotion_result["submission_id"],
+                "uploadId": promotion_result["upload_id"],
+                "promoted": promotion_result["promoted"],
+            }
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_analysis] Claims promotion failed job_id=%s", job_id)
+        return _error_response(
+            500,
+            "analysis_promotion_failed",
+            "Unable to promote Claims analysis job.",
+        )
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/billing/checkout-sessions")
 async def create_admin_checkout_session(request: Request) -> JSONResponse:
     admin_user, error_response = _require_admin_user(request)
@@ -3513,6 +3623,53 @@ def _legacy_ar_analysis_payload(analysis_data: dict[str, Any]) -> str:
     )
 
 
+def _admin_claims_analysis_data_object(
+    value: object,
+) -> tuple[dict[str, Any], Optional[JSONResponse]]:
+    text = _clean_text(value)
+    if not text:
+        return {}, _error_response(
+            409,
+            "missing_analysis_data",
+            "Claims analysis data is required before promotion.",
+        )
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}, _error_response(
+            409,
+            "invalid_analysis_data",
+            "Claims analysis data must be valid JSON.",
+        )
+    if not isinstance(parsed, dict):
+        return {}, _error_response(
+            409,
+            "invalid_analysis_data",
+            "Claims analysis data must be a JSON object.",
+        )
+
+    required_keys = ("raw_analyses", "deduplicated_issues", "total_issue_count")
+    missing_keys = [key for key in required_keys if key not in parsed]
+    if missing_keys:
+        return {}, _error_response(
+            409,
+            "invalid_analysis_data",
+            "Claims analysis data is missing required fields.",
+        )
+    return parsed, None
+
+
+def _legacy_claims_analysis_payload(analysis_data: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "raw_analyses": analysis_data["raw_analyses"],
+            "deduplicated_issues": analysis_data["deduplicated_issues"],
+            "total_issue_count": analysis_data["total_issue_count"],
+            "all_trends": analysis_data.get("all_trends", []),
+        }
+    )
+
+
 def _promote_financial_admin_job_records(
     *,
     db: Any,
@@ -3797,6 +3954,148 @@ def _promote_ar_admin_job_records(
     }, None
 
 
+def _promote_claims_admin_job_records(
+    *,
+    db: Any,
+    job: AdminAnalysisJob,
+    job_file: AdminAnalysisJobFile,
+    upload_file: UploadFileRecord,
+    analysis_data: dict[str, Any],
+    client_email: str,
+) -> tuple[dict[str, Any], Optional[JSONResponse]]:
+    # Re-read promotion links in this transaction before creating legacy rows so
+    # retries after partial failures do not create duplicate submissions/uploads.
+    job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job.id).first()
+    job_file = (
+        db.query(AdminAnalysisJobFile)
+        .filter(AdminAnalysisJobFile.id == job_file.id)
+        .first()
+    )
+    upload_file = (
+        db.query(UploadFileRecord)
+        .filter(UploadFileRecord.id == upload_file.id)
+        .first()
+    )
+    if not job or not job_file or not upload_file:
+        return {}, _error_response(
+            409,
+            "promotion_source_missing",
+            "Claims analysis promotion source records are missing.",
+        )
+
+    promoted = False
+    now = datetime.now(timezone.utc)
+    upload_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    _upsert_user_for_financial_promotion(db, job, client_email)
+
+    upload_from_job_file = _existing_upload_for_id(db, getattr(job_file, "upload_id", None))
+    upload_from_upload_file = _existing_upload_for_id(db, getattr(upload_file, "upload_id", None))
+    if (
+        upload_from_job_file
+        and upload_from_upload_file
+        and str(upload_from_job_file.id) != str(upload_from_upload_file.id)
+    ):
+        return {}, _error_response(
+            409,
+            "promotion_link_conflict",
+            "Claims analysis job has conflicting upload links.",
+        )
+
+    upload = upload_from_job_file or upload_from_upload_file
+    if upload:
+        upload_safe, upload_error = _validate_claims_promotion_upload(upload, client_email)
+        if not upload_safe:
+            return {}, upload_error
+
+    submission_from_job = _existing_submission_for_id(db, getattr(job, "submission_id", None))
+    submission_from_upload = _existing_submission_for_id(db, getattr(upload, "submission_id", None))
+    if (
+        submission_from_job
+        and submission_from_upload
+        and str(submission_from_job.id) != str(submission_from_upload.id)
+    ):
+        return {}, _error_response(
+            409,
+            "promotion_link_conflict",
+            "Claims analysis job has conflicting submission links.",
+        )
+
+    submission = submission_from_job or submission_from_upload
+    if submission:
+        submission_safe, submission_error = _validate_claims_promotion_submission(
+            submission,
+            client_email,
+        )
+        if not submission_safe:
+            return {}, submission_error
+
+    if not submission:
+        submission = ClientSubmission(
+            user_email=client_email,
+            first_name=_clean_text(getattr(job, "first_name", None)),
+            last_name=_clean_text(getattr(job, "last_name", None)),
+            office_name=_clean_text(getattr(job, "office_name", None)),
+            org_type=_clean_text(getattr(job, "org_type", None)),
+            phone=_clean_text(getattr(job, "phone", None)),
+            submitted_at=now,
+            source="admin",
+            status="completed",
+            completed_at=now,
+            analysis_run_id=_clean_text(getattr(job, "analysis_run_id", None)),
+            ghl_cid=_clean_text(getattr(job, "ghl_cid", None)),
+        )
+        db.add(submission)
+        db.flush()
+        promoted = True
+
+    legacy_analysis_data = _legacy_claims_analysis_payload(analysis_data)
+    if not upload:
+        upload = Upload(
+            file_name=(
+                _clean_text(getattr(upload_file, "original_filename", None))
+                or _clean_text(getattr(job_file, "original_filename", None))
+            ),
+            tool_name=ADMIN_ANALYSIS_CLAIMS_TOOL_NAME,
+            upload_time=upload_time,
+            user_email=client_email,
+            analysis_data=legacy_analysis_data,
+            submission_id=submission.id,
+        )
+        db.add(upload)
+        db.flush()
+        promoted = True
+    else:
+        if not getattr(upload, "submission_id", None):
+            upload.submission_id = submission.id
+            promoted = True
+        if not _clean_text(getattr(upload, "analysis_data", None)):
+            upload.analysis_data = legacy_analysis_data
+            promoted = True
+        if not _clean_text(getattr(upload, "user_email", None)):
+            upload.user_email = client_email
+            promoted = True
+
+    if not getattr(job, "submission_id", None) or str(job.submission_id) != str(submission.id):
+        job.submission_id = submission.id
+        job.updated_at = now
+        promoted = True
+
+    if not getattr(job_file, "upload_id", None) or str(job_file.upload_id) != str(upload.id):
+        job_file.upload_id = upload.id
+        promoted = True
+
+    if not getattr(upload_file, "upload_id", None) or str(upload_file.upload_id) != str(upload.id):
+        upload_file.upload_id = upload.id
+        promoted = True
+
+    return {
+        "submission_id": _id_text(getattr(submission, "id", None)),
+        "upload_id": _id_text(getattr(upload, "id", None)),
+        "promoted": promoted,
+    }, None
+
+
 def _upsert_user_for_financial_promotion(
     db: Any,
     job: AdminAnalysisJob,
@@ -3886,6 +4185,28 @@ def _validate_ar_promotion_upload(
     return True, None
 
 
+def _validate_claims_promotion_upload(
+    upload: Upload,
+    client_email: str,
+) -> tuple[bool, Optional[JSONResponse]]:
+    upload_email = (_clean_text(getattr(upload, "user_email", None)) or "").lower()
+    if upload_email and upload_email != client_email:
+        return False, _error_response(
+            409,
+            "promotion_link_conflict",
+            "Existing upload belongs to a different client.",
+        )
+
+    tool_name = _clean_text(getattr(upload, "tool_name", None))
+    if tool_name and tool_name != ADMIN_ANALYSIS_CLAIMS_TOOL_NAME:
+        return False, _error_response(
+            409,
+            "promotion_link_conflict",
+            "Existing upload is not an Insurance Claim Analyzer upload.",
+        )
+    return True, None
+
+
 def _validate_financial_promotion_submission(
     submission: ClientSubmission,
     client_email: str,
@@ -3901,6 +4222,20 @@ def _validate_financial_promotion_submission(
 
 
 def _validate_ar_promotion_submission(
+    submission: ClientSubmission,
+    client_email: str,
+) -> tuple[bool, Optional[JSONResponse]]:
+    submission_email = (_clean_text(getattr(submission, "user_email", None)) or "").lower()
+    if submission_email and submission_email != client_email:
+        return False, _error_response(
+            409,
+            "promotion_link_conflict",
+            "Existing submission belongs to a different client.",
+        )
+    return True, None
+
+
+def _validate_claims_promotion_submission(
     submission: ClientSubmission,
     client_email: str,
 ) -> tuple[bool, Optional[JSONResponse]]:
