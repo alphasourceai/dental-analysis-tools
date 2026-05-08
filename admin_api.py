@@ -8,7 +8,7 @@ from typing import Any, Optional
 from uuid import UUID, uuid4
 
 import stripe
-from fastapi import FastAPI, Query, Request, Response
+from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile as FastAPIUploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
@@ -24,9 +24,15 @@ from models import (
     StripeCustomer,
     StripeEvent,
     Upload,
+    UploadFile as UploadFileRecord,
     User,
 )
-from supabase_utils import get_current_admin_user, is_admin_user
+from supabase_utils import (
+    _get_supabase_admin_client,
+    get_current_admin_user,
+    is_admin_user,
+    persist_upload_file,
+)
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -37,6 +43,10 @@ ADMIN_ANALYSIS_ALLOWED_TOOL_NAMES = {
     "AR Analyzer",
     "Insurance Claim Analyzer",
 }
+ADMIN_ANALYSIS_FINANCIAL_TOOL_NAME = "Financial Analyzer"
+ADMIN_ANALYSIS_FINANCIAL_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".pdf"}
+ADMIN_ANALYSIS_READ_CHUNK_SIZE = 1024 * 1024
+DEFAULT_ADMIN_ANALYSIS_MAX_FILE_MB = 15
 
 allowed_origins = [
     origin.strip()
@@ -454,6 +464,179 @@ async def create_admin_analysis_job(request: Request) -> JSONResponse:
         db.rollback()
         logger.exception("[admin_api] admin analysis job create failed client_email=%s", client_email)
         return _error_response(500, "analysis_job_create_failed", "Unable to create analysis job.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/analysis-jobs/financial-intake")
+async def create_admin_financial_intake_job(
+    request: Request,
+    client_mode: Optional[str] = Form(None, alias="clientMode"),
+    client_email_value: Optional[str] = Form(None, alias="clientEmail"),
+    first_name_value: Optional[str] = Form(None, alias="firstName"),
+    last_name_value: Optional[str] = Form(None, alias="lastName"),
+    office_name_value: Optional[str] = Form(None, alias="officeName"),
+    org_type_value: Optional[str] = Form(None, alias="orgType"),
+    phone_value: Optional[str] = Form(None, alias="phone"),
+    ghl_cid_value: Optional[str] = Form(None, alias="ghlCid"),
+    financial_file: Optional[FastAPIUploadFile] = File(None, alias="financialFile"),
+) -> JSONResponse:
+    admin_user, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    client_email, validation_error = _required_email(client_email_value)
+    if validation_error:
+        return validation_error
+    first_name, validation_error = _required_text(first_name_value, "firstName")
+    if validation_error:
+        return validation_error
+    last_name, validation_error = _required_text(last_name_value, "lastName")
+    if validation_error:
+        return validation_error
+    office_name, validation_error = _required_text(office_name_value, "officeName")
+    if validation_error:
+        return validation_error
+    org_type, validation_error = _required_text(org_type_value, "orgType")
+    if validation_error:
+        return validation_error
+    if financial_file is None:
+        return _error_response(400, "missing_financial_file", "financialFile is required.")
+
+    single_file_error = await _validate_single_file_field(request, "financialFile")
+    if single_file_error:
+        await financial_file.close()
+        return single_file_error
+
+    original_filename = _clean_text(financial_file.filename)
+    if not original_filename:
+        await financial_file.close()
+        return _error_response(400, "missing_filename", "Uploaded file name is required.")
+
+    extension = _file_extension(original_filename)
+    if extension not in ADMIN_ANALYSIS_FINANCIAL_ALLOWED_EXTENSIONS:
+        await financial_file.close()
+        return _error_response(400, "unsupported_file_type", "Unsupported financial file type.")
+
+    try:
+        file_bytes, file_error = await _read_admin_upload_file(financial_file)
+    finally:
+        await financial_file.close()
+    if file_error:
+        return file_error
+
+    content_type = _clean_text(financial_file.content_type)
+    now = datetime.now(timezone.utc)
+    analysis_run_id = str(uuid4())
+    db = SessionLocal()
+    job_id: Optional[object] = None
+    job_file_id: Optional[object] = None
+    try:
+        job = AdminAnalysisJob(
+            status="intake_pending",
+            created_by_admin_user_id=str(admin_user.get("id") or ""),
+            client_email=client_email,
+            first_name=first_name,
+            last_name=last_name,
+            office_name=office_name,
+            org_type=org_type,
+            phone=_clean_text(phone_value),
+            ghl_cid=_clean_text(ghl_cid_value),
+            client_mode=_clean_text(client_mode),
+            analysis_run_id=analysis_run_id,
+            progress_percent=0,
+            current_step="Financial file intake pending",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+
+        job_file = AdminAnalysisJobFile(
+            job_id=job.id,
+            tool_name=ADMIN_ANALYSIS_FINANCIAL_TOOL_NAME,
+            original_filename=original_filename,
+            content_type=content_type,
+            byte_size=len(file_bytes),
+            status="intake_pending",
+            created_at=now,
+        )
+        db.add(job_file)
+        db.commit()
+        db.refresh(job)
+        db.refresh(job_file)
+        job_file_id = job_file.id
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] admin financial intake job create failed client_email=%s", client_email)
+        db.close()
+        return _error_response(500, "analysis_job_create_failed", "Unable to create analysis job.")
+
+    # persist_upload_file commits UploadFile separately, so the durable intake
+    # record is created first and marked failed if storage cannot be linked.
+    try:
+        upload_file_id = persist_upload_file(
+            file_bytes=file_bytes,
+            user_email=client_email,
+            tool_name=ADMIN_ANALYSIS_FINANCIAL_TOOL_NAME,
+            original_filename=original_filename,
+            content_type=content_type,
+        )
+    except Exception:
+        logger.exception("[admin_api] admin financial intake storage raised job_id=%s", job_id)
+        upload_file_id = None
+    if not upload_file_id:
+        _mark_admin_financial_intake_failed(
+            job_id=job_id,
+            job_file_id=job_file_id,
+            error_code="storage_failed",
+            error_message="Unable to persist uploaded file.",
+        )
+        logger.error(
+            "[admin_api] admin financial intake storage failed job_id=%s client_email=%s filename=%s",
+            job_id,
+            client_email,
+            original_filename,
+        )
+        db.close()
+        return _error_response(500, "storage_failed", "Unable to persist uploaded file.")
+
+    try:
+        job.status = "queued"
+        job.progress_percent = 10
+        job.current_step = "Financial file received"
+        job.updated_at = datetime.now(timezone.utc)
+        job_file.status = "queued"
+        job_file.upload_file_id = upload_file_id
+        db.commit()
+        db.refresh(job)
+        db.refresh(job_file)
+        logger.info(
+            "[admin_api] admin financial intake queued job_id=%s client_email=%s upload_file_id=%s admin_user_id=%s",
+            job.id,
+            client_email,
+            upload_file_id,
+            str(admin_user.get("id") or ""),
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "job": _admin_analysis_job_payload(job, [job_file]),
+            },
+        )
+    except Exception:
+        db.rollback()
+        _cleanup_admin_intake_upload_file(upload_file_id)
+        _mark_admin_financial_intake_failed(
+            job_id=job_id,
+            job_file_id=job_file_id,
+            error_code="analysis_job_link_failed",
+            error_message="Unable to link persisted file to analysis job.",
+        )
+        logger.exception("[admin_api] admin financial intake file link failed job_id=%s", job_id)
+        return _error_response(500, "analysis_job_link_failed", "Unable to create analysis job.")
     finally:
         db.close()
 
@@ -1232,6 +1415,142 @@ def _validate_admin_analysis_file_inputs(
         )
 
     return validated_files, None
+
+
+async def _validate_single_file_field(
+    request: Request,
+    field_name: str,
+) -> Optional[JSONResponse]:
+    try:
+        # Starlette caches parsed multipart form data; this checks field count
+        # without reading the uploaded file stream.
+        form = await request.form()
+    except Exception:
+        logger.exception("[admin_api] invalid multipart form for admin analysis intake.")
+        return _error_response(400, "invalid_multipart", "Request must be valid multipart form data.")
+
+    values = form.getlist(field_name)
+    if len(values) > 1:
+        return _error_response(400, "too_many_files", "Only one financialFile upload is allowed.")
+    return None
+
+
+def _file_extension(filename: object) -> str:
+    filename_text = _clean_text(filename) or ""
+    return os.path.splitext(filename_text)[1].lower()
+
+
+def _admin_analysis_max_file_bytes() -> int:
+    raw_value = os.getenv(
+        "ADMIN_ANALYSIS_MAX_FILE_MB",
+        str(DEFAULT_ADMIN_ANALYSIS_MAX_FILE_MB),
+    ).strip()
+    try:
+        max_file_mb = int(raw_value)
+    except ValueError:
+        max_file_mb = DEFAULT_ADMIN_ANALYSIS_MAX_FILE_MB
+    return max(1, max_file_mb) * 1024 * 1024
+
+
+async def _read_admin_upload_file(
+    upload_file: FastAPIUploadFile,
+) -> tuple[bytes, Optional[JSONResponse]]:
+    max_file_bytes = _admin_analysis_max_file_bytes()
+    chunks: list[bytes] = []
+    total_bytes = 0
+
+    while True:
+        chunk = await upload_file.read(ADMIN_ANALYSIS_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total_bytes += len(chunk)
+        if total_bytes > max_file_bytes:
+            return b"", _error_response(400, "file_too_large", "Uploaded file exceeds the size limit.")
+        chunks.append(chunk)
+
+    if total_bytes == 0:
+        return b"", _error_response(400, "empty_file", "Uploaded file is empty.")
+    return b"".join(chunks), None
+
+
+def _mark_admin_financial_intake_failed(
+    job_id: object,
+    job_file_id: object,
+    error_code: str,
+    error_message: str,
+) -> None:
+    if not job_id:
+        return
+
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        job = db.query(AdminAnalysisJob).filter(AdminAnalysisJob.id == job_id).first()
+        if job:
+            job.status = "error"
+            job.current_step = "Financial file intake failed"
+            job.error_code = error_code
+            job.error_message = error_message
+            job.errored_at = now
+            job.updated_at = now
+
+        if job_file_id:
+            job_file = (
+                db.query(AdminAnalysisJobFile)
+                .filter(AdminAnalysisJobFile.id == job_file_id)
+                .first()
+            )
+            if job_file:
+                job_file.status = "error"
+                job_file.error_code = error_code
+                job_file.error_message = error_message
+                job_file.errored_at = now
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] failed to mark financial intake failed job_id=%s", job_id)
+    finally:
+        db.close()
+
+
+def _cleanup_admin_intake_upload_file(upload_file_id: object) -> None:
+    if not upload_file_id:
+        return
+
+    db = SessionLocal()
+    try:
+        upload_file = (
+            db.query(UploadFileRecord)
+            .filter(UploadFileRecord.id == upload_file_id)
+            .first()
+        )
+        if not upload_file:
+            return
+
+        bucket = _clean_text(getattr(upload_file, "bucket", None))
+        object_path = _clean_text(getattr(upload_file, "object_path", None))
+        if bucket and object_path:
+            try:
+                client = _get_supabase_admin_client()
+                if client:
+                    client.storage.from_(bucket).remove([object_path])
+            except Exception:
+                logger.exception(
+                    "[admin_api] best-effort intake storage cleanup failed upload_file_id=%s",
+                    upload_file_id,
+                )
+
+        db.delete(upload_file)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "[admin_api] best-effort UploadFile cleanup failed upload_file_id=%s",
+            upload_file_id,
+        )
+    finally:
+        db.close()
 
 
 def _job_uuid_or_not_found(job_id: str) -> tuple[Optional[UUID], Optional[JSONResponse]]:
