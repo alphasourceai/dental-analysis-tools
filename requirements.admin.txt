@@ -10,3 +10,4 @@ stripe
 openai
 anthropic
 openpyxl
+fpdf2
