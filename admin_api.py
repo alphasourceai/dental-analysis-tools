@@ -5,6 +5,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import unquote, urlparse
 from uuid import UUID, uuid4
 
 import stripe
@@ -2293,6 +2294,142 @@ def promote_admin_claims_analysis_job(request: Request, job_id: str) -> JSONResp
         db.close()
 
 
+@app.get("/api/admin/pdf-generator/options")
+def get_admin_pdf_generator_options(request: Request) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    db = SessionLocal()
+    try:
+        submissions = (
+            db.query(ClientSubmission)
+            .filter(ClientSubmission.user_email.isnot(None))
+            .order_by(ClientSubmission.submitted_at.desc())
+            .all()
+        )
+        candidate_emails: dict[str, dict[str, Any]] = {}
+        for submission in submissions:
+            email = (_clean_text(getattr(submission, "user_email", None)) or "").lower()
+            if not email:
+                continue
+            candidate = candidate_emails.setdefault(
+                email,
+                {
+                    "email": email,
+                    "submission_count": 0,
+                    "eligible_upload_count": 0,
+                    "latest_submitted_at": None,
+                    "latest_upload_time": None,
+                },
+            )
+            candidate["submission_count"] += 1
+            submitted_at = getattr(submission, "submitted_at", None)
+            if _datetime_timestamp(submitted_at) > _datetime_timestamp(candidate["latest_submitted_at"]):
+                candidate["latest_submitted_at"] = submitted_at
+
+        if candidate_emails:
+            uploads = (
+                db.query(Upload)
+                .filter(func.lower(Upload.user_email).in_(list(candidate_emails.keys())))
+                .filter(Upload.analysis_data.isnot(None))
+                .all()
+            )
+            for upload in uploads:
+                if not _clean_text(getattr(upload, "analysis_data", None)):
+                    continue
+                email = (_clean_text(getattr(upload, "user_email", None)) or "").lower()
+                candidate = candidate_emails.get(email)
+                if not candidate:
+                    continue
+                candidate["eligible_upload_count"] += 1
+                upload_time = getattr(upload, "upload_time", None)
+                if _datetime_timestamp(_coerce_datetime(upload_time)) > _datetime_timestamp(
+                    _coerce_datetime(candidate["latest_upload_time"])
+                ):
+                    candidate["latest_upload_time"] = upload_time
+
+        clients = [
+            {
+                "email": item["email"],
+                "submissionCount": item["submission_count"],
+                "eligibleUploadCount": item["eligible_upload_count"],
+                "latestSubmittedAt": _iso_datetime(item["latest_submitted_at"]),
+                "latestUploadTime": _clean_text(item["latest_upload_time"]),
+            }
+            for item in candidate_emails.values()
+            if item["eligible_upload_count"] > 0
+        ]
+        clients.sort(key=lambda item: item["email"])
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "clients": clients,
+                "count": len(clients),
+            }
+        )
+    except Exception:
+        logger.exception("[admin_pdf_generator] options lookup failed")
+        return _error_response(500, "pdf_generator_options_failed", "Unable to load PDF generator options.")
+    finally:
+        db.close()
+
+
+@app.get("/api/admin/pdf-generator/client")
+def get_admin_pdf_generator_client(
+    request: Request,
+    email: Optional[str] = None,
+) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    client_email, validation_error = _required_email(email)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        submissions = (
+            db.query(ClientSubmission)
+            .filter(func.lower(ClientSubmission.user_email) == client_email)
+            .order_by(ClientSubmission.submitted_at.desc())
+            .all()
+        )
+        uploads = (
+            db.query(Upload)
+            .filter(func.lower(Upload.user_email) == client_email)
+            .filter(Upload.analysis_data.isnot(None))
+            .order_by(Upload.upload_time.desc())
+            .all()
+        )
+        eligible_uploads = [
+            upload for upload in uploads if _clean_text(getattr(upload, "analysis_data", None))
+        ]
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "clientEmail": client_email,
+                "submissions": [
+                    _pdf_generator_submission_payload(submission)
+                    for submission in submissions
+                ],
+                "uploads": [
+                    _pdf_generator_upload_payload(upload)
+                    for upload in eligible_uploads
+                ],
+                "count": len(eligible_uploads),
+            }
+        )
+    except Exception:
+        logger.exception("[admin_pdf_generator] client lookup failed client_email=%s", client_email)
+        return _error_response(500, "pdf_generator_client_failed", "Unable to load PDF generator client details.")
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/billing/checkout-sessions")
 async def create_admin_checkout_session(request: Request) -> JSONResponse:
     admin_user, error_response = _require_admin_user(request)
@@ -2954,6 +3091,21 @@ def _datetime_timestamp(value: object) -> float:
     if isinstance(value, datetime):
         return value.timestamp()
     return 0.0
+
+
+def _coerce_datetime(value: object) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    text = _clean_text(value)
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
 
 
 def _client_option_payload(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -4247,6 +4399,210 @@ def _validate_claims_promotion_submission(
             "Existing submission belongs to a different client.",
         )
     return True, None
+
+
+def _pdf_generator_submission_payload(submission: ClientSubmission) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(submission, "id", None)),
+        "clientEmail": _clean_text(getattr(submission, "user_email", None)),
+        "firstName": _clean_text(getattr(submission, "first_name", None)),
+        "lastName": _clean_text(getattr(submission, "last_name", None)),
+        "officeName": _clean_text(getattr(submission, "office_name", None)),
+        "orgType": _clean_text(getattr(submission, "org_type", None)),
+        "phone": _clean_text(getattr(submission, "phone", None)),
+        "source": _clean_text(getattr(submission, "source", None)),
+        "status": _clean_text(getattr(submission, "status", None)),
+        "submittedAt": _iso_datetime(getattr(submission, "submitted_at", None)),
+        "completedAt": _iso_datetime(getattr(submission, "completed_at", None)),
+        "analysisRunId": _clean_text(getattr(submission, "analysis_run_id", None)),
+    }
+
+
+def _pdf_generator_upload_payload(upload: Upload) -> dict[str, Any]:
+    analysis_payload = _pdf_generator_analysis_payload(getattr(upload, "analysis_data", None))
+    pdf_url = _clean_text(getattr(upload, "pdf_url", None)) or ""
+    report_path = _pdf_generator_report_path(pdf_url)
+    signed_url, signed_warning = _pdf_generator_signed_url(report_path)
+    warnings = []
+    if _clean_text(getattr(upload, "analysis_data", None)) and analysis_payload is None:
+        warnings.append("analysis_data_unreadable")
+    if pdf_url and not report_path:
+        warnings.append("report_path_unavailable")
+    if signed_warning:
+        warnings.append(signed_warning)
+
+    return {
+        "id": _id_text(getattr(upload, "id", None)),
+        "fileName": _clean_text(getattr(upload, "file_name", None)),
+        "toolName": _clean_text(getattr(upload, "tool_name", None)),
+        "uploadTime": _clean_text(getattr(upload, "upload_time", None)),
+        "clientEmail": _clean_text(getattr(upload, "user_email", None)),
+        "submissionId": _id_text(getattr(upload, "submission_id", None)),
+        "paid": bool(getattr(upload, "paid", False)),
+        "analysis": {
+            "hasAnalysisData": analysis_payload is not None,
+            "opportunities": _pdf_generator_opportunities(analysis_payload or {}),
+            "trends": _pdf_generator_trends(analysis_payload or {}),
+            "keyTrends": _pdf_generator_key_trends(analysis_payload or {}),
+        },
+        "pdf": {
+            "pdfVersion": _optional_int(getattr(upload, "pdf_version", None)) or 0,
+            "pdfUrl": pdf_url or None,
+            "pdfGeneratedAt": _iso_datetime(getattr(upload, "pdf_generated_at", None)),
+            "reportPath": report_path or None,
+            "signedUrl": signed_url,
+        },
+        "warnings": warnings,
+    }
+
+
+def _pdf_generator_analysis_payload(value: object) -> Optional[dict[str, Any]]:
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _pdf_generator_opportunities(payload: dict[str, Any]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    deduplicated = payload.get("deduplicated_issues", [])
+    if not isinstance(deduplicated, list):
+        return items
+
+    for issue in deduplicated:
+        if not isinstance(issue, dict):
+            continue
+        title = _clean_text(issue.get("title")) or ""
+        impact = _clean_text(issue.get("impact")) or ""
+        recommendation = _clean_text(issue.get("recommendation")) or ""
+        if title or impact or recommendation:
+            items.append(
+                {
+                    "title": title,
+                    "impact": impact,
+                    "recommendation": recommendation,
+                }
+            )
+    return items
+
+
+def _pdf_generator_trends(payload: dict[str, Any]) -> list[str]:
+    items: list[str] = []
+    trends = payload.get("all_trends", [])
+    if not isinstance(trends, list):
+        return items
+
+    for trend in trends:
+        if isinstance(trend, dict):
+            text = _clean_text(trend.get("text")) or ""
+        else:
+            text = _clean_text(trend) or ""
+        if text:
+            items.append(text)
+    return items
+
+
+def _pdf_generator_key_trends(payload: dict[str, Any]) -> list[str]:
+    if not payload:
+        return []
+
+    key_trends: list[str] = []
+    seen: set[str] = set()
+
+    trends = payload.get("all_trends", [])
+    if isinstance(trends, list):
+        for trend in trends:
+            if isinstance(trend, dict):
+                text = _clean_text(trend.get("text"))
+            else:
+                text = _clean_text(trend)
+            if not text:
+                continue
+            normalized = text.lower()
+            if normalized in seen:
+                continue
+            if any(char.isdigit() for char in text) or "%" in text:
+                key_trends.append(text)
+                seen.add(normalized)
+            if len(key_trends) >= 3:
+                break
+
+    issues = payload.get("deduplicated_issues", [])
+    if isinstance(issues, list):
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            title = _clean_text(issue.get("title")) or ""
+            impact = _clean_text(issue.get("impact")) or ""
+            if not title:
+                continue
+            normalized = title.lower()
+            if normalized in seen:
+                continue
+            text = f"{title}: {impact}" if impact and len(impact) > 20 else title
+            key_trends.append(text)
+            seen.add(normalized)
+            if len(key_trends) >= 5:
+                break
+
+    return key_trends[:5]
+
+
+def _pdf_generator_report_path(pdf_url: str, bucket: str = "consulting-uploads") -> str:
+    if not pdf_url:
+        return ""
+    if pdf_url.startswith("reports/"):
+        return pdf_url
+    if pdf_url.startswith(f"{bucket}/"):
+        return pdf_url[len(bucket) + 1:]
+    try:
+        parsed = urlparse(pdf_url)
+        path = unquote(parsed.path or "")
+    except Exception:
+        path = pdf_url
+    markers = [
+        f"/storage/v1/object/public/{bucket}/",
+        f"/storage/v1/object/sign/{bucket}/",
+        f"/storage/v1/object/{bucket}/",
+        f"/{bucket}/",
+    ]
+    for marker in markers:
+        if marker in path:
+            return path.split(marker, 1)[1]
+    return ""
+
+
+def _pdf_generator_signed_url(path: str, expires_in: int = 3600) -> tuple[Optional[str], Optional[str]]:
+    if not path:
+        return None, None
+    client = _get_supabase_admin_client()
+    if not client:
+        logger.warning("[admin_pdf_generator] signed url skipped; storage client unavailable path=%s", path)
+        return None, "signed_url_unavailable"
+    try:
+        response = client.storage.from_("consulting-uploads").create_signed_url(path, expires_in)
+    except Exception:
+        logger.warning("[admin_pdf_generator] signed url failed path=%s", path, exc_info=True)
+        return None, "signed_url_unavailable"
+
+    signed_url = ""
+    if isinstance(response, dict):
+        signed_url = response.get("signedURL") or response.get("signedUrl") or ""
+    elif isinstance(response, str):
+        signed_url = response
+    if not signed_url:
+        return None, "signed_url_unavailable"
+    return signed_url, None
 
 
 def _checkout_session_payload(session: StripeCheckoutSession) -> dict[str, Any]:
