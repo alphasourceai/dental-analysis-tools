@@ -23,6 +23,13 @@ from admin_financial_processing_service import (
     extract_xlsx_text,
     run_financial_csv_analysis,
 )
+from admin_pdf_generator_service import (
+    cleanup_pdf_report,
+    create_report_signed_url,
+    generate_pdf_bytes,
+    safe_path_component,
+    upload_pdf_report,
+)
 from database import SessionLocal
 from models import (
     AdminAnalysisJob,
@@ -2430,6 +2437,158 @@ def get_admin_pdf_generator_client(
         db.close()
 
 
+@app.post("/api/admin/pdf-generator/generate")
+async def generate_admin_pdf_report(request: Request) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    (
+        upload_id,
+        opportunities,
+        trends,
+        key_trends,
+        additional_notes,
+        validation_error,
+    ) = _validate_pdf_generation_body(body)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        upload = db.query(Upload).filter(Upload.id == upload_id).first()
+        if not upload:
+            return _error_response(404, "upload_not_found", "Upload was not found.")
+
+        analysis_payload = _pdf_generator_analysis_payload(getattr(upload, "analysis_data", None))
+        if analysis_payload is None:
+            return _error_response(
+                400,
+                "analysis_data_unavailable",
+                "Upload analysis data is missing or unreadable.",
+            )
+
+        client_email = _clean_text(getattr(upload, "user_email", None)) or ""
+        submission = None
+        submission_id = getattr(upload, "submission_id", None)
+        if submission_id:
+            submission = db.query(ClientSubmission).filter(ClientSubmission.id == submission_id).first()
+        if not submission and client_email:
+            submission = (
+                db.query(ClientSubmission)
+                .filter(func.lower(ClientSubmission.user_email) == client_email.lower())
+                .order_by(ClientSubmission.submitted_at.desc())
+                .first()
+            )
+
+        current_version = _optional_int(getattr(upload, "pdf_version", None)) or 0
+        next_version = current_version + 1
+        upload_id_text = str(getattr(upload, "id"))
+        tool_name = _clean_text(getattr(upload, "tool_name", None)) or "analysis"
+        upload_time = _clean_text(getattr(upload, "upload_time", None)) or "-"
+        metadata = {
+            "client_name": _full_name(submission) or client_email or "Unknown client",
+            "office_name": _clean_text(getattr(submission, "office_name", None)) if submission else "",
+            "client_email": client_email,
+            "tool_name": tool_name,
+            "upload_time": upload_time,
+        }
+    except Exception:
+        logger.exception("[admin_pdf_generator] generate lookup failed upload_id=%s", upload_id)
+        return _error_response(500, "pdf_generation_lookup_failed", "Unable to load upload for PDF generation.")
+    finally:
+        db.close()
+
+    date_prefix = datetime.utcnow().strftime("%Y-%m-%d")
+    safe_email = safe_path_component(client_email)
+    safe_tool = safe_path_component(tool_name)
+    file_name = f"{safe_email}_{safe_tool}_{date_prefix}_v{next_version}.pdf"
+    object_path = f"reports/{safe_email}/{date_prefix}/{safe_tool}/{upload_id_text}/{file_name}"
+    sections = {
+        "opportunities": opportunities,
+        "trends": trends,
+        "key_trends": key_trends,
+    }
+
+    try:
+        pdf_bytes = generate_pdf_bytes(metadata, sections, additional_notes, next_version)
+    except Exception:
+        logger.exception("[admin_pdf_generator] pdf generation failed upload_id=%s", upload_id)
+        return _error_response(500, "pdf_generation_failed", "Unable to generate PDF.")
+
+    pdf_url, upload_error = upload_pdf_report(pdf_bytes, object_path)
+    if upload_error:
+        logger.error(
+            "[admin_pdf_generator] pdf upload failed upload_id=%s path=%s error_type=%s",
+            upload_id,
+            object_path,
+            type(upload_error).__name__,
+        )
+        return _error_response(500, "pdf_upload_failed", "Unable to save PDF to storage.")
+
+    signed_url, signed_warning = create_report_signed_url(object_path)
+    warnings = [signed_warning] if signed_warning else []
+    generated_at = datetime.now(timezone.utc)
+
+    db = SessionLocal()
+    metadata_committed = False
+    try:
+        upload = db.query(Upload).filter(Upload.id == upload_id).first()
+        if not upload:
+            cleanup_pdf_report(object_path)
+            return _error_response(404, "upload_not_found", "Upload was not found.")
+
+        upload.pdf_version = next_version
+        upload.pdf_url = pdf_url
+        upload.pdf_generated_at = generated_at
+        db.commit()
+        metadata_committed = True
+        db.refresh(upload)
+
+        upload_payload = _pdf_generator_upload_payload(upload)
+        payload_pdf = upload_payload.get("pdf")
+        if isinstance(payload_pdf, dict):
+            payload_pdf["reportPath"] = object_path
+            payload_pdf["signedUrl"] = signed_url
+        payload_warnings = upload_payload.get("warnings")
+        if isinstance(payload_warnings, list):
+            for warning in payload_warnings:
+                if warning and warning not in warnings:
+                    warnings.append(warning)
+
+        logger.info("[admin_pdf_generator] generated upload_id=%s version=%s", upload_id, next_version)
+        return JSONResponse(
+            {
+                "ok": True,
+                "upload": upload_payload,
+                "pdf": {
+                    "pdfVersion": next_version,
+                    "pdfUrl": pdf_url,
+                    "pdfGeneratedAt": _iso_datetime(generated_at),
+                    "reportPath": object_path,
+                    "signedUrl": signed_url,
+                },
+                "warnings": warnings,
+            }
+        )
+    except Exception:
+        db.rollback()
+        if not metadata_committed:
+            cleanup_pdf_report(object_path)
+        logger.exception("[admin_pdf_generator] pdf metadata update failed upload_id=%s", upload_id)
+        return _error_response(
+            500,
+            "pdf_metadata_update_failed",
+            "PDF was generated but metadata could not be updated.",
+        )
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/billing/checkout-sessions")
 async def create_admin_checkout_session(request: Request) -> JSONResponse:
     admin_user, error_response = _require_admin_user(request)
@@ -4603,6 +4762,170 @@ def _pdf_generator_signed_url(path: str, expires_in: int = 3600) -> tuple[Option
     if not signed_url:
         return None, "signed_url_unavailable"
     return signed_url, None
+
+
+def _validate_pdf_generation_body(
+    body: dict[str, Any],
+) -> tuple[UUID, list[dict[str, str]], list[str], list[str], str, Optional[JSONResponse]]:
+    upload_id_text = _clean_text(body.get("uploadId"))
+    if not upload_id_text:
+        return UUID(int=0), [], [], [], "", _error_response(400, "missing_upload_id", "uploadId is required.")
+    try:
+        upload_id = UUID(upload_id_text)
+    except ValueError:
+        return UUID(int=0), [], [], [], "", _error_response(400, "invalid_upload_id", "uploadId must be a valid UUID.")
+
+    opportunities_value = body.get("opportunities", [])
+    trends_value = body.get("trends", [])
+    key_trends_value = body.get("keyTrends", [])
+    additional_notes, notes_error = _pdf_generation_text(
+        body.get("additionalNotes", ""),
+        "additionalNotes",
+        6000,
+        allow_empty=True,
+    )
+    if notes_error:
+        return UUID(int=0), [], [], [], "", notes_error
+
+    opportunities, opportunities_error = _pdf_generation_opportunities(opportunities_value)
+    if opportunities_error:
+        return UUID(int=0), [], [], [], "", opportunities_error
+
+    trends, trends_error = _pdf_generation_text_list(
+        trends_value,
+        "trends",
+        max_items=20,
+        max_length=4000,
+    )
+    if trends_error:
+        return UUID(int=0), [], [], [], "", trends_error
+
+    key_trends, key_trends_error = _pdf_generation_text_list(
+        key_trends_value,
+        "keyTrends",
+        max_items=10,
+        max_length=4000,
+    )
+    if key_trends_error:
+        return UUID(int=0), [], [], [], "", key_trends_error
+
+    has_content = bool(opportunities or trends or key_trends or additional_notes)
+    if not has_content:
+        return UUID(int=0), [], [], [], "", _error_response(
+            400,
+            "missing_pdf_content",
+            "At least one opportunity, trend, key trend, or note is required.",
+        )
+
+    return upload_id, opportunities, trends, key_trends, additional_notes, None
+
+
+def _pdf_generation_opportunities(value: object) -> tuple[list[dict[str, str]], Optional[JSONResponse]]:
+    if value is None:
+        value = []
+    if not isinstance(value, list):
+        return [], _error_response(400, "invalid_opportunities", "opportunities must be a list.")
+    if len(value) > 20:
+        return [], _error_response(400, "too_many_opportunities", "opportunities must include 20 items or fewer.")
+
+    opportunities: list[dict[str, str]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            return [], _error_response(400, "invalid_opportunity", "Each opportunity must be an object.")
+
+        title, title_error = _pdf_generation_text(
+            item.get("title", ""),
+            f"opportunities[{index}].title",
+            4000,
+            allow_empty=True,
+        )
+        if title_error:
+            return [], title_error
+        impact, impact_error = _pdf_generation_text(
+            item.get("impact", ""),
+            f"opportunities[{index}].impact",
+            4000,
+            allow_empty=True,
+        )
+        if impact_error:
+            return [], impact_error
+        recommendation, recommendation_error = _pdf_generation_text(
+            item.get("recommendation", ""),
+            f"opportunities[{index}].recommendation",
+            4000,
+            allow_empty=True,
+        )
+        if recommendation_error:
+            return [], recommendation_error
+
+        if title or impact or recommendation:
+            opportunities.append(
+                {
+                    "title": title,
+                    "impact": impact,
+                    "recommendation": recommendation,
+                }
+            )
+
+    return opportunities, None
+
+
+def _pdf_generation_text_list(
+    value: object,
+    field_name: str,
+    *,
+    max_items: int,
+    max_length: int,
+) -> tuple[list[str], Optional[JSONResponse]]:
+    if value is None:
+        value = []
+    if not isinstance(value, list):
+        return [], _error_response(400, f"invalid_{field_name}", f"{field_name} must be a list.")
+    if len(value) > max_items:
+        return [], _error_response(
+            400,
+            f"too_many_{field_name}",
+            f"{field_name} must include {max_items} items or fewer.",
+        )
+
+    items: list[str] = []
+    for index, item in enumerate(value):
+        text, text_error = _pdf_generation_text(
+            item,
+            f"{field_name}[{index}]",
+            max_length,
+            allow_empty=True,
+        )
+        if text_error:
+            return [], text_error
+        if text:
+            items.append(text)
+    return items, None
+
+
+def _pdf_generation_text(
+    value: object,
+    field_name: str,
+    max_length: int,
+    *,
+    allow_empty: bool,
+) -> tuple[str, Optional[JSONResponse]]:
+    if value is None:
+        text = ""
+    elif isinstance(value, str):
+        text = value.strip()
+    else:
+        return "", _error_response(400, "invalid_pdf_content", f"{field_name} must be text.")
+
+    if not text and not allow_empty:
+        return "", _error_response(400, "missing_pdf_content", f"{field_name} is required.")
+    if len(text) > max_length:
+        return "", _error_response(
+            400,
+            "pdf_content_too_long",
+            f"{field_name} must be {max_length} characters or fewer.",
+        )
+    return text, None
 
 
 def _checkout_session_payload(session: StripeCheckoutSession) -> dict[str, Any]:
