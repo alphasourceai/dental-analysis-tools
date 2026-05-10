@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 from uuid import UUID, uuid4
 
 import stripe
@@ -41,6 +41,7 @@ from models import (
     StripeEvent,
     Upload,
     UploadFile as UploadFileRecord,
+    UploadPortalFile,
     User,
 )
 from supabase_utils import (
@@ -2589,6 +2590,71 @@ async def generate_admin_pdf_report(request: Request) -> JSONResponse:
         db.close()
 
 
+@app.get("/api/admin/secure-uploads/files")
+def list_admin_secure_upload_files(
+    request: Request,
+    completedOnly: bool = True,
+    email: Optional[str] = None,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    limit: int = Query(50, ge=1),
+    offset: int = Query(0, ge=0),
+) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    start_dt, start_error = _admin_date_filter_start(startDate, "startDate")
+    if start_error:
+        return start_error
+    end_dt, end_error = _admin_date_filter_start(endDate, "endDate")
+    if end_error:
+        return end_error
+    if start_dt and end_dt and end_dt < start_dt:
+        return _error_response(400, "invalid_date_range", "endDate must be on or after startDate.")
+
+    safe_limit = min(limit, 100)
+    normalized_email = (_clean_text(email) or "").lower()
+    end_exclusive = end_dt + timedelta(days=1) if end_dt else None
+
+    db = SessionLocal()
+    try:
+        query = db.query(UploadPortalFile)
+        if completedOnly:
+            query = query.filter(UploadPortalFile.completed_at.isnot(None))
+        if normalized_email:
+            query = query.filter(UploadPortalFile.user_email.ilike(f"%{normalized_email}%"))
+        if start_dt:
+            query = query.filter(UploadPortalFile.created_at >= start_dt)
+        if end_exclusive:
+            query = query.filter(UploadPortalFile.created_at < end_exclusive)
+
+        rows = (
+            query.order_by(UploadPortalFile.created_at.desc())
+            .offset(offset)
+            .limit(safe_limit + 1)
+            .all()
+        )
+        has_more = len(rows) > safe_limit
+        rows = rows[:safe_limit]
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "items": [_secure_upload_file_payload(row) for row in rows],
+                "count": len(rows),
+                "limit": safe_limit,
+                "offset": offset,
+                "hasMore": has_more,
+            }
+        )
+    except Exception:
+        logger.exception("[admin_secure_uploads] file inbox lookup failed")
+        return _error_response(500, "secure_uploads_lookup_failed", "Unable to load secure upload files.")
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/billing/checkout-sessions")
 async def create_admin_checkout_session(request: Request) -> JSONResponse:
     admin_user, error_response = _require_admin_user(request)
@@ -4972,6 +5038,54 @@ def _billing_override_payload(override: BillingOverride) -> dict[str, Any]:
         "adminUserId": _clean_text(getattr(override, "admin_user_id", None)),
         "createdAt": _iso_datetime(getattr(override, "created_at", None)),
     }
+
+
+def _secure_upload_file_payload(upload_file: UploadPortalFile) -> dict[str, Any]:
+    bucket = _clean_text(getattr(upload_file, "gcs_bucket", None))
+    object_name = _clean_text(getattr(upload_file, "object_name", None))
+    gs_path = f"gs://{bucket}/{object_name}" if bucket and object_name else None
+    console_url = None
+    if bucket and object_name:
+        encoded_object = quote(object_name, safe="/")
+        console_url = (
+            "https://console.cloud.google.com/storage/browser/_details/"
+            f"{bucket}/{encoded_object}"
+        )
+
+    byte_size_value = getattr(upload_file, "byte_size", None)
+    byte_size = None
+    if byte_size_value is not None:
+        try:
+            byte_size = int(byte_size_value)
+        except (TypeError, ValueError):
+            byte_size = None
+
+    return {
+        "id": _id_text(getattr(upload_file, "id", None)),
+        "requestId": _id_text(getattr(upload_file, "request_id", None)),
+        "sessionId": _id_text(getattr(upload_file, "session_id", None)),
+        "userId": _id_text(getattr(upload_file, "user_id", None)),
+        "userEmail": _clean_text(getattr(upload_file, "user_email", None)),
+        "originalFilename": _clean_text(getattr(upload_file, "original_filename", None)),
+        "contentType": _clean_text(getattr(upload_file, "content_type", None)),
+        "byteSize": byte_size,
+        "gcsBucket": bucket,
+        "objectName": object_name,
+        "gsPath": gs_path,
+        "consoleUrl": console_url,
+        "createdAt": _iso_datetime(getattr(upload_file, "created_at", None)),
+        "completedAt": _iso_datetime(getattr(upload_file, "completed_at", None)),
+    }
+
+
+def _admin_date_filter_start(value: object, field_name: str) -> tuple[Optional[datetime], Optional[JSONResponse]]:
+    text = _clean_text(value)
+    if not text:
+        return None, None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc), None
+    except ValueError:
+        return None, _error_response(400, f"invalid_{field_name}", f"{field_name} must use YYYY-MM-DD.")
 
 
 def _id_text(value: object) -> Optional[str]:
