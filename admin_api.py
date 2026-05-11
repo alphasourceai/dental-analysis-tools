@@ -71,7 +71,57 @@ ADMIN_ANALYSIS_CLAIMS_TOOL_NAME = "Insurance Claim Analyzer"
 ADMIN_ANALYSIS_CLAIMS_ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 ADMIN_ANALYSIS_READ_CHUNK_SIZE = 1024 * 1024
 DEFAULT_ADMIN_ANALYSIS_MAX_FILE_MB = 15
-ADMIN_USER_WRITE_ROLES = {"admin", "super_admin"}
+PERMISSION_CLIENTS_READ = "clients_read"
+PERMISSION_BILLING_READ = "billing_read"
+PERMISSION_BILLING_WRITE = "billing_write"
+PERMISSION_ANALYSIS_READ = "analysis_read"
+PERMISSION_ANALYSIS_WRITE = "analysis_write"
+PERMISSION_PDF_READ = "pdf_read"
+PERMISSION_PDF_GENERATE = "pdf_generate"
+PERMISSION_SECURE_UPLOADS_READ = "secure_uploads_read"
+PERMISSION_SECURE_UPLOADS_WRITE = "secure_uploads_write"
+PERMISSION_ADMIN_MANAGEMENT_READ = "admin_management_read"
+PERMISSION_ADMIN_MANAGEMENT_WRITE = "admin_management_write"
+ADMIN_API_DASHBOARD_ROLES = {"super_admin", "admin", "analyst", "billing_admin", "viewer"}
+ADMIN_API_ALL_PERMISSIONS = {
+    PERMISSION_CLIENTS_READ,
+    PERMISSION_BILLING_READ,
+    PERMISSION_BILLING_WRITE,
+    PERMISSION_ANALYSIS_READ,
+    PERMISSION_ANALYSIS_WRITE,
+    PERMISSION_PDF_READ,
+    PERMISSION_PDF_GENERATE,
+    PERMISSION_SECURE_UPLOADS_READ,
+    PERMISSION_SECURE_UPLOADS_WRITE,
+    PERMISSION_ADMIN_MANAGEMENT_READ,
+    PERMISSION_ADMIN_MANAGEMENT_WRITE,
+}
+ADMIN_ROLE_PERMISSION_MAP = {
+    "super_admin": ADMIN_API_ALL_PERMISSIONS,
+    "admin": ADMIN_API_ALL_PERMISSIONS - {PERMISSION_ADMIN_MANAGEMENT_WRITE},
+    "analyst": {
+        PERMISSION_CLIENTS_READ,
+        PERMISSION_ANALYSIS_READ,
+        PERMISSION_ANALYSIS_WRITE,
+        PERMISSION_PDF_READ,
+        PERMISSION_PDF_GENERATE,
+        PERMISSION_SECURE_UPLOADS_READ,
+        PERMISSION_SECURE_UPLOADS_WRITE,
+    },
+    "billing_admin": {
+        PERMISSION_CLIENTS_READ,
+        PERMISSION_BILLING_READ,
+        PERMISSION_BILLING_WRITE,
+    },
+    "viewer": {
+        PERMISSION_CLIENTS_READ,
+        PERMISSION_BILLING_READ,
+        PERMISSION_ANALYSIS_READ,
+        PERMISSION_PDF_READ,
+        PERMISSION_SECURE_UPLOADS_READ,
+    },
+}
+ADMIN_USER_WRITE_ROLES = set(ADMIN_ROLE_PERMISSION_MAP.keys())
 
 allowed_origins = [
     origin.strip()
@@ -106,20 +156,17 @@ def health() -> dict[str, object]:
 
 @app.get("/api/admin/me")
 def get_admin_me(request: Request) -> JSONResponse:
-    user, error_response = _require_admin_user(request)
+    user, admin_user, error_response = _require_dashboard_access(request)
     if error_response:
         return error_response
 
-    admin_user = _admin_user_for_user_id(user.get("id"))
     admin_access = _admin_access_payload_for_user(user, admin_user)
 
     return JSONResponse(
         {
             "ok": True,
             "admin": admin_access,
-            "permissions": {
-                "canManageAdminAccess": _admin_can_manage_access(admin_user),
-            },
+            "permissions": _admin_permissions_payload(admin_user),
             # Compatibility fields for existing React Admin clients.
             "user": {
                 "id": admin_access["id"],
@@ -132,7 +179,7 @@ def get_admin_me(request: Request) -> JSONResponse:
 
 @app.get("/api/admin/admin-users")
 def list_admin_users(request: Request) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_ADMIN_MANAGEMENT_READ)
     if error_response:
         return error_response
 
@@ -154,7 +201,7 @@ def list_admin_users(request: Request) -> JSONResponse:
 
 @app.post("/api/admin/admin-users")
 async def create_admin_user_access(request: Request) -> JSONResponse:
-    current_user, _, error_response = _require_admin_access_manager(request)
+    current_user, _, error_response = _require_admin_permission(request, PERMISSION_ADMIN_MANAGEMENT_WRITE)
     if error_response:
         return error_response
 
@@ -262,9 +309,10 @@ def list_admin_clients(
     limit: int = Query(25, ge=1),
     offset: int = Query(0, ge=0),
 ) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, admin_access, error_response = _require_admin_permission(request, PERMISSION_CLIENTS_READ)
     if error_response:
         return error_response
+    can_read_billing = _admin_has_permission(admin_access, PERMISSION_BILLING_READ)
 
     safe_limit = min(limit, 100)
     normalized_search = (search or "").strip().lower()
@@ -353,41 +401,42 @@ def list_admin_clients(
                 email: _empty_billing_summary()
                 for email in normalized_client_emails
             }
-            checkout_session_rows = (
-                db.query(StripeCheckoutSession)
-                .filter(func.lower(StripeCheckoutSession.client_email).in_(normalized_client_emails))
-                .order_by(
-                    func.lower(StripeCheckoutSession.client_email).asc(),
-                    StripeCheckoutSession.created_at.desc(),
+            if can_read_billing:
+                checkout_session_rows = (
+                    db.query(StripeCheckoutSession)
+                    .filter(func.lower(StripeCheckoutSession.client_email).in_(normalized_client_emails))
+                    .order_by(
+                        func.lower(StripeCheckoutSession.client_email).asc(),
+                        StripeCheckoutSession.created_at.desc(),
+                    )
+                    .all()
                 )
-                .all()
-            )
-            for session in checkout_session_rows:
-                billing_email = (_clean_text(session.client_email) or "").lower()
-                summary = billing_summaries.setdefault(billing_email, _empty_billing_summary())
-                payment_status = (_clean_text(session.payment_status) or "").lower()
-                status = (_clean_text(session.status) or "").lower()
-                summary["checkoutSessionCount"] += 1
-                if payment_status == "paid":
-                    summary["paidCheckoutSessionCount"] += 1
-                if payment_status != "paid" or status == "open":
-                    summary["openCheckoutSessionCount"] += 1
-                if summary["latestPaymentStatus"] is None:
-                    summary["latestPaymentStatus"] = _clean_text(session.payment_status)
+                for session in checkout_session_rows:
+                    billing_email = (_clean_text(session.client_email) or "").lower()
+                    summary = billing_summaries.setdefault(billing_email, _empty_billing_summary())
+                    payment_status = (_clean_text(session.payment_status) or "").lower()
+                    status = (_clean_text(session.status) or "").lower()
+                    summary["checkoutSessionCount"] += 1
+                    if payment_status == "paid":
+                        summary["paidCheckoutSessionCount"] += 1
+                    if payment_status != "paid" or status == "open":
+                        summary["openCheckoutSessionCount"] += 1
+                    if summary["latestPaymentStatus"] is None:
+                        summary["latestPaymentStatus"] = _clean_text(session.payment_status)
 
-            override_count_rows = (
-                db.query(
-                    func.lower(BillingOverride.client_email).label("client_email"),
-                    func.count(BillingOverride.id).label("override_count"),
+                override_count_rows = (
+                    db.query(
+                        func.lower(BillingOverride.client_email).label("client_email"),
+                        func.count(BillingOverride.id).label("override_count"),
+                    )
+                    .filter(func.lower(BillingOverride.client_email).in_(normalized_client_emails))
+                    .group_by(func.lower(BillingOverride.client_email))
+                    .all()
                 )
-                .filter(func.lower(BillingOverride.client_email).in_(normalized_client_emails))
-                .group_by(func.lower(BillingOverride.client_email))
-                .all()
-            )
-            for row in override_count_rows:
-                billing_email = row.client_email
-                summary = billing_summaries.setdefault(billing_email, _empty_billing_summary())
-                summary["manualOverrideCount"] = int(row.override_count or 0)
+                for row in override_count_rows:
+                    billing_email = row.client_email
+                    summary = billing_summaries.setdefault(billing_email, _empty_billing_summary())
+                    summary["manualOverrideCount"] = int(row.override_count or 0)
 
             latest_rows = (
                 db.query(ClientSubmission)
@@ -444,7 +493,7 @@ def list_admin_client_options(
     search: Optional[str] = None,
     limit: int = Query(75, ge=1),
 ) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_CLIENTS_READ)
     if error_response:
         return error_response
 
@@ -534,7 +583,7 @@ def list_admin_client_options(
 
 @app.post("/api/admin/analysis-jobs")
 async def create_admin_analysis_job(request: Request) -> JSONResponse:
-    admin_user, error_response = _require_admin_user(request)
+    admin_user, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -639,7 +688,7 @@ async def create_admin_financial_intake_job(
     ghl_cid_value: Optional[str] = Form(None, alias="ghlCid"),
     financial_file: Optional[FastAPIUploadFile] = File(None, alias="financialFile"),
 ) -> JSONResponse:
-    admin_user, error_response = _require_admin_user(request)
+    admin_user, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -812,7 +861,7 @@ async def create_admin_ar_intake_job(
     ghl_cid_value: Optional[str] = Form(None, alias="ghlCid"),
     ar_file: Optional[FastAPIUploadFile] = File(None, alias="arFile"),
 ) -> JSONResponse:
-    admin_user, error_response = _require_admin_user(request)
+    admin_user, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -983,7 +1032,7 @@ async def create_admin_claims_intake_job(
     ghl_cid_value: Optional[str] = Form(None, alias="ghlCid"),
     claims_file: Optional[FastAPIUploadFile] = File(None, alias="claimsFile"),
 ) -> JSONResponse:
-    admin_user, error_response = _require_admin_user(request)
+    admin_user, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -1143,7 +1192,7 @@ async def create_admin_claims_intake_job(
 
 @app.get("/api/admin/analysis-jobs/{job_id}")
 def get_admin_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_READ)
     if error_response:
         return error_response
 
@@ -1167,7 +1216,7 @@ def get_admin_analysis_job(request: Request, job_id: str) -> JSONResponse:
 
 @app.post("/api/admin/analysis-jobs/{job_id}/cancel")
 def cancel_admin_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -1201,7 +1250,7 @@ def cancel_admin_analysis_job(request: Request, job_id: str) -> JSONResponse:
 
 @app.post("/api/admin/analysis-jobs/{job_id}/process-financial")
 def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -1505,7 +1554,7 @@ def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
 
 @app.post("/api/admin/analysis-jobs/{job_id}/process-ar")
 def process_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -1808,7 +1857,7 @@ def process_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse
 
 @app.post("/api/admin/analysis-jobs/{job_id}/process-claims")
 def process_admin_claims_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -2111,7 +2160,7 @@ def process_admin_claims_analysis_job(request: Request, job_id: str) -> JSONResp
 
 @app.post("/api/admin/analysis-jobs/{job_id}/promote-financial")
 def promote_admin_financial_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -2221,7 +2270,7 @@ def promote_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
 
 @app.post("/api/admin/analysis-jobs/{job_id}/promote-ar")
 def promote_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -2331,7 +2380,7 @@ def promote_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse
 
 @app.post("/api/admin/analysis-jobs/{job_id}/promote-claims")
 def promote_admin_claims_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -2441,7 +2490,7 @@ def promote_admin_claims_analysis_job(request: Request, job_id: str) -> JSONResp
 
 @app.get("/api/admin/pdf-generator/options")
 def get_admin_pdf_generator_options(request: Request) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_PDF_READ)
     if error_response:
         return error_response
 
@@ -2526,7 +2575,7 @@ def get_admin_pdf_generator_client(
     request: Request,
     email: Optional[str] = None,
 ) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_PDF_READ)
     if error_response:
         return error_response
 
@@ -2577,7 +2626,7 @@ def get_admin_pdf_generator_client(
 
 @app.post("/api/admin/pdf-generator/generate")
 async def generate_admin_pdf_report(request: Request) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_PDF_GENERATE)
     if error_response:
         return error_response
 
@@ -2737,7 +2786,7 @@ def list_admin_secure_upload_files(
     limit: int = Query(50, ge=1),
     offset: int = Query(0, ge=0),
 ) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_SECURE_UPLOADS_READ)
     if error_response:
         return error_response
 
@@ -2794,7 +2843,7 @@ def list_admin_secure_upload_files(
 
 @app.post("/api/admin/secure-uploads/requests")
 async def create_admin_secure_upload_request(request: Request) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_SECURE_UPLOADS_WRITE)
     if error_response:
         return error_response
 
@@ -2876,7 +2925,7 @@ async def create_admin_secure_upload_request(request: Request) -> JSONResponse:
 
 @app.post("/api/admin/billing/checkout-sessions")
 async def create_admin_checkout_session(request: Request) -> JSONResponse:
-    admin_user, error_response = _require_admin_user(request)
+    admin_user, _, error_response = _require_admin_permission(request, PERMISSION_BILLING_WRITE)
     if error_response:
         return error_response
 
@@ -3036,7 +3085,7 @@ def get_admin_billing_client(
     request: Request,
     email: Optional[str] = None,
 ) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_BILLING_READ)
     if error_response:
         return error_response
 
@@ -3133,7 +3182,7 @@ def get_admin_billing_overview(
     limit: int = Query(50, ge=1),
     offset: int = Query(0, ge=0),
 ) -> JSONResponse:
-    _, error_response = _require_admin_user(request)
+    _, _, error_response = _require_admin_permission(request, PERMISSION_BILLING_READ)
     if error_response:
         return error_response
 
@@ -3232,7 +3281,7 @@ def get_admin_billing_overview(
 
 @app.post("/api/admin/billing/overrides")
 async def create_admin_billing_override(request: Request) -> JSONResponse:
-    admin_user, error_response = _require_admin_user(request)
+    admin_user, _, error_response = _require_admin_permission(request, PERMISSION_BILLING_WRITE)
     if error_response:
         return error_response
 
@@ -5454,7 +5503,11 @@ def _required_admin_user_role(value: object) -> tuple[str, Optional[JSONResponse
     if not role:
         return "", _error_response(400, "missing_role", "role is required.")
     if role not in ADMIN_USER_WRITE_ROLES:
-        return "", _error_response(400, "invalid_role", "role must be admin or super_admin.")
+        return "", _error_response(
+            400,
+            "invalid_role",
+            "role must be super_admin, admin, analyst, billing_admin, or viewer.",
+        )
     return role, None
 
 
@@ -5596,30 +5649,87 @@ def _admin_user_payload(admin_user: AdminUser) -> dict[str, Any]:
     }
 
 
-def _admin_can_manage_access(admin_user: Optional[AdminUser]) -> bool:
+def _admin_role_permissions(role: object) -> set[str]:
+    normalized_role = (_clean_text(role) or "").lower()
+    return set(ADMIN_ROLE_PERMISSION_MAP.get(normalized_role, set()))
+
+
+def _admin_dashboard_access_allows(admin_user: Optional[AdminUser]) -> bool:
     if not admin_user:
         return False
     role = (_clean_text(getattr(admin_user, "role", None)) or "").lower()
     status = (_clean_text(getattr(admin_user, "status", None)) or "active").lower()
-    return role == "super_admin" and status == "active" and not getattr(admin_user, "deactivated_at", None)
+    return role in ADMIN_API_DASHBOARD_ROLES and status == "active" and not getattr(admin_user, "deactivated_at", None)
+
+
+def _admin_has_permission(admin_user: Optional[AdminUser], permission: str) -> bool:
+    if not _admin_dashboard_access_allows(admin_user):
+        return False
+    return permission in _admin_role_permissions(getattr(admin_user, "role", None))
+
+
+def _admin_permissions_payload(admin_user: Optional[AdminUser]) -> dict[str, bool]:
+    return {
+        "canReadClients": _admin_has_permission(admin_user, PERMISSION_CLIENTS_READ),
+        "canReadBilling": _admin_has_permission(admin_user, PERMISSION_BILLING_READ),
+        "canWriteBilling": _admin_has_permission(admin_user, PERMISSION_BILLING_WRITE),
+        "canReadAnalysis": _admin_has_permission(admin_user, PERMISSION_ANALYSIS_READ),
+        "canWriteAnalysis": _admin_has_permission(admin_user, PERMISSION_ANALYSIS_WRITE),
+        "canReadPdf": _admin_has_permission(admin_user, PERMISSION_PDF_READ),
+        "canGeneratePdf": _admin_has_permission(admin_user, PERMISSION_PDF_GENERATE),
+        "canReadSecureUploads": _admin_has_permission(admin_user, PERMISSION_SECURE_UPLOADS_READ),
+        "canWriteSecureUploads": _admin_has_permission(admin_user, PERMISSION_SECURE_UPLOADS_WRITE),
+        "canReadAdminManagement": _admin_has_permission(admin_user, PERMISSION_ADMIN_MANAGEMENT_READ),
+        "canManageAdminAccess": _admin_has_permission(admin_user, PERMISSION_ADMIN_MANAGEMENT_WRITE),
+    }
+
+
+def _admin_can_manage_access(admin_user: Optional[AdminUser]) -> bool:
+    return _admin_has_permission(admin_user, PERMISSION_ADMIN_MANAGEMENT_WRITE)
+
+
+def _require_dashboard_access(
+    request: Request,
+) -> tuple[dict[str, Any], Optional[AdminUser], Optional[JSONResponse]]:
+    access_token = _bearer_token(request)
+    if not access_token:
+        return {}, None, _error_response(401, "unauthorized", "Authentication is required.")
+
+    user = get_current_admin_user(access_token)
+    if not user or not user.get("id"):
+        return {}, None, _error_response(401, "unauthorized", "Authentication is invalid.")
+
+    admin_user = _admin_user_for_user_id(user.get("id"))
+    if not _admin_dashboard_access_allows(admin_user):
+        logger.warning("[admin_api] dashboard access denied user_id=%s", user.get("id"))
+        return {}, None, _error_response(403, "forbidden", "Admin dashboard access is required.")
+
+    return user, admin_user, None
+
+
+def _require_admin_permission(
+    request: Request,
+    permission: str,
+) -> tuple[dict[str, Any], Optional[AdminUser], Optional[JSONResponse]]:
+    user, admin_user, error_response = _require_dashboard_access(request)
+    if error_response:
+        return {}, None, error_response
+
+    if not _admin_has_permission(admin_user, permission):
+        logger.warning(
+            "[admin_api] admin permission denied user_id=%s permission=%s",
+            user.get("id"),
+            permission,
+        )
+        return {}, None, _error_response(403, "forbidden", "You do not have permission to perform this action.")
+
+    return user, admin_user, None
 
 
 def _require_admin_access_manager(
     request: Request,
 ) -> tuple[dict[str, Any], Optional[AdminUser], Optional[JSONResponse]]:
-    user, error_response = _require_admin_user(request)
-    if error_response:
-        return {}, None, error_response
-
-    admin_user = _admin_user_for_user_id(user.get("id"))
-    if not _admin_can_manage_access(admin_user):
-        return {}, None, _error_response(
-            403,
-            "forbidden",
-            "Admin access management requires super admin access.",
-        )
-
-    return user, admin_user, None
+    return _require_admin_permission(request, PERMISSION_ADMIN_MANAGEMENT_WRITE)
 
 
 def _uuid_or_none(value: object) -> Optional[UUID]:
