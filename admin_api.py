@@ -70,6 +70,7 @@ ADMIN_ANALYSIS_CLAIMS_TOOL_NAME = "Insurance Claim Analyzer"
 ADMIN_ANALYSIS_CLAIMS_ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 ADMIN_ANALYSIS_READ_CHUNK_SIZE = 1024 * 1024
 DEFAULT_ADMIN_ANALYSIS_MAX_FILE_MB = 15
+ADMIN_USER_WRITE_ROLES = {"admin", "super_admin"}
 
 allowed_origins = [
     origin.strip()
@@ -146,6 +147,64 @@ def list_admin_users(request: Request) -> JSONResponse:
     except Exception:
         logger.exception("[admin_api] admin user list failed.")
         return _error_response(500, "admin_users_lookup_failed", "Unable to load admin users.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/admin-users")
+async def create_admin_user_access(request: Request) -> JSONResponse:
+    current_user, _, error_response = _require_admin_access_manager(request)
+    if error_response:
+        return error_response
+
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    target_user_id, validation_error = _required_uuid(body.get("userId"), "userId")
+    if validation_error:
+        return validation_error
+    email, validation_error = _required_admin_access_email(body.get("email"))
+    if validation_error:
+        return validation_error
+    role, validation_error = _required_admin_user_role(body.get("role"))
+    if validation_error:
+        return validation_error
+
+    created_by = _uuid_or_none(current_user.get("id"))
+    now = datetime.now(timezone.utc)
+    db = SessionLocal()
+    try:
+        existing = db.query(AdminUser).filter(AdminUser.user_id == target_user_id).first()
+        if existing:
+            return _error_response(409, "admin_user_exists", "Admin access already exists for this user.")
+
+        admin_user = AdminUser(
+            user_id=target_user_id,
+            email=email,
+            role=role,
+            status="active",
+            created_at=now,
+            updated_at=now,
+            created_by=created_by,
+            deactivated_at=None,
+        )
+        db.add(admin_user)
+        db.commit()
+        db.refresh(admin_user)
+        return JSONResponse(
+            {
+                "ok": True,
+                "adminUser": _admin_user_payload(admin_user),
+            }
+        )
+    except IntegrityError:
+        db.rollback()
+        return _error_response(409, "admin_user_exists", "Admin access already exists for this user.")
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] admin user create failed target_user_id=%s", target_user_id)
+        return _error_response(500, "admin_user_create_failed", "Unable to add admin access.")
     finally:
         db.close()
 
@@ -5291,6 +5350,16 @@ def _required_email(value: object) -> tuple[str, Optional[JSONResponse]]:
     return email, None
 
 
+def _required_admin_access_email(value: object) -> tuple[str, Optional[JSONResponse]]:
+    email = _clean_text(value)
+    if not email:
+        return "", _error_response(400, "missing_email", "email is required.")
+    email = email.lower()
+    if len(email) > 254 or "@" not in email:
+        return "", _error_response(400, "invalid_email", "email must be a valid email.")
+    return email, None
+
+
 def _required_text(value: object, field_name: str) -> tuple[str, Optional[JSONResponse]]:
     text = _clean_text(value)
     if not text:
@@ -5323,6 +5392,25 @@ def _required_reason(value: object) -> tuple[str, Optional[JSONResponse]]:
     if len(reason) > 2000:
         return "", _error_response(400, "invalid_reason", "reason must be 2000 characters or fewer.")
     return reason, None
+
+
+def _required_admin_user_role(value: object) -> tuple[str, Optional[JSONResponse]]:
+    role = (_clean_text(value) or "").lower()
+    if not role:
+        return "", _error_response(400, "missing_role", "role is required.")
+    if role not in ADMIN_USER_WRITE_ROLES:
+        return "", _error_response(400, "invalid_role", "role must be admin or super_admin.")
+    return role, None
+
+
+def _required_uuid(value: object, field_name: str) -> tuple[UUID, Optional[JSONResponse]]:
+    text = _clean_text(value)
+    if not text:
+        return UUID(int=0), _error_response(400, f"missing_{field_name}", f"{field_name} is required.")
+    try:
+        return UUID(text), None
+    except ValueError:
+        return UUID(int=0), _error_response(400, f"invalid_{field_name}", f"{field_name} must be a valid UUID.")
 
 
 def _optional_uuid(value: object, field_name: str) -> tuple[Optional[UUID], Optional[JSONResponse]]:
@@ -5458,6 +5546,31 @@ def _admin_can_manage_access(admin_user: Optional[AdminUser]) -> bool:
     role = (_clean_text(getattr(admin_user, "role", None)) or "").lower()
     status = (_clean_text(getattr(admin_user, "status", None)) or "active").lower()
     return role == "super_admin" and status == "active" and not getattr(admin_user, "deactivated_at", None)
+
+
+def _require_admin_access_manager(
+    request: Request,
+) -> tuple[dict[str, Any], Optional[AdminUser], Optional[JSONResponse]]:
+    user, error_response = _require_admin_user(request)
+    if error_response:
+        return {}, None, error_response
+
+    admin_user = _admin_user_for_user_id(user.get("id"))
+    if not _admin_can_manage_access(admin_user):
+        return {}, None, _error_response(
+            403,
+            "forbidden",
+            "Admin access management requires super admin access.",
+        )
+
+    return user, admin_user, None
+
+
+def _uuid_or_none(value: object) -> Optional[UUID]:
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _require_admin_user(request: Request) -> tuple[dict[str, Any], Optional[JSONResponse]]:
