@@ -50,6 +50,7 @@ from supabase_utils import (
     get_current_admin_user,
     is_admin_user,
     persist_upload_file,
+    resolve_admin_auth_user_by_email,
 )
 from upload_portal import PortalError, create_upload_request
 
@@ -161,7 +162,14 @@ async def create_admin_user_access(request: Request) -> JSONResponse:
     if parse_error:
         return parse_error
 
-    target_user_id, validation_error = _required_uuid(body.get("userId"), "userId")
+    if _clean_text(body.get("userId")):
+        return _error_response(
+            400,
+            "unsupported_user_id",
+            "Supabase Auth user ID is resolved by the backend.",
+        )
+
+    display_name, validation_error = _required_admin_display_name(body.get("name"))
     if validation_error:
         return validation_error
     email, validation_error = _required_admin_access_email(body.get("email"))
@@ -173,14 +181,44 @@ async def create_admin_user_access(request: Request) -> JSONResponse:
 
     created_by = _uuid_or_none(current_user.get("id"))
     now = datetime.now(timezone.utc)
+
     db = SessionLocal()
     try:
-        existing = db.query(AdminUser).filter(AdminUser.user_id == target_user_id).first()
-        if existing:
+        existing_email = db.query(AdminUser).filter(func.lower(AdminUser.email) == email).first()
+        if existing_email:
+            return _error_response(409, "admin_user_exists", "Admin access already exists for this user.")
+    except Exception:
+        logger.exception("[admin_api] admin user email duplicate check failed email=%s", email)
+        return _error_response(500, "admin_user_lookup_failed", "Unable to check admin access.")
+    finally:
+        db.close()
+
+    auth_user, auth_error = resolve_admin_auth_user_by_email(email)
+    if auth_error:
+        return _error_response(
+            int(auth_error.get("status") or 500),
+            str(auth_error.get("code") or "supabase_auth_failed"),
+            str(auth_error.get("message") or "Unable to resolve Supabase Auth user."),
+        )
+
+    target_user_id = _uuid_or_none(auth_user.get("user_id") if auth_user else None)
+    if not target_user_id:
+        return _error_response(
+            502,
+            "supabase_auth_invalid_user",
+            "Supabase Auth user response was invalid.",
+        )
+
+    db = SessionLocal()
+    try:
+        existing_email = db.query(AdminUser).filter(func.lower(AdminUser.email) == email).first()
+        existing_user = db.query(AdminUser).filter(AdminUser.user_id == target_user_id).first()
+        if existing_email or existing_user:
             return _error_response(409, "admin_user_exists", "Admin access already exists for this user.")
 
         admin_user = AdminUser(
             user_id=target_user_id,
+            display_name=display_name,
             email=email,
             role=role,
             status="active",
@@ -196,6 +234,10 @@ async def create_admin_user_access(request: Request) -> JSONResponse:
             {
                 "ok": True,
                 "adminUser": _admin_user_payload(admin_user),
+                "auth": {
+                    "existingUser": bool(auth_user.get("existing")),
+                    "inviteSent": bool(auth_user.get("invited")),
+                },
             }
         )
     except IntegrityError:
@@ -203,7 +245,11 @@ async def create_admin_user_access(request: Request) -> JSONResponse:
         return _error_response(409, "admin_user_exists", "Admin access already exists for this user.")
     except Exception:
         db.rollback()
-        logger.exception("[admin_api] admin user create failed target_user_id=%s", target_user_id)
+        logger.exception(
+            "[admin_api] admin user create failed target_user_id=%s invite_sent=%s",
+            target_user_id,
+            bool(auth_user.get("invited")) if auth_user else False,
+        )
         return _error_response(500, "admin_user_create_failed", "Unable to add admin access.")
     finally:
         db.close()
@@ -5360,6 +5406,15 @@ def _required_admin_access_email(value: object) -> tuple[str, Optional[JSONRespo
     return email, None
 
 
+def _required_admin_display_name(value: object) -> tuple[str, Optional[JSONResponse]]:
+    display_name = _clean_text(value)
+    if not display_name:
+        return "", _error_response(400, "missing_name", "name is required.")
+    if len(display_name) > 160:
+        return "", _error_response(400, "invalid_name", "name must be 160 characters or fewer.")
+    return display_name, None
+
+
 def _required_text(value: object, field_name: str) -> tuple[str, Optional[JSONResponse]]:
     text = _clean_text(value)
     if not text:
@@ -5533,6 +5588,7 @@ def _admin_user_payload(admin_user: AdminUser) -> dict[str, Any]:
     return {
         "userId": _id_text(getattr(admin_user, "user_id", None)),
         "email": _clean_text(getattr(admin_user, "email", None)),
+        "displayName": _clean_text(getattr(admin_user, "display_name", None)),
         "role": _clean_text(getattr(admin_user, "role", None)) or "admin",
         "status": _clean_text(getattr(admin_user, "status", None)) or "active",
         "createdAt": _iso_datetime(getattr(admin_user, "created_at", None)),
