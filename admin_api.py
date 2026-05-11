@@ -108,12 +108,16 @@ def get_admin_me(request: Request) -> JSONResponse:
     if error_response:
         return error_response
 
-    admin_access = _admin_access_payload_for_user(user)
+    admin_user = _admin_user_for_user_id(user.get("id"))
+    admin_access = _admin_access_payload_for_user(user, admin_user)
 
     return JSONResponse(
         {
             "ok": True,
             "admin": admin_access,
+            "permissions": {
+                "canManageAdminAccess": _admin_can_manage_access(admin_user),
+            },
             # Compatibility fields for existing React Admin clients.
             "user": {
                 "id": admin_access["id"],
@@ -5405,9 +5409,14 @@ def _optional_int(value: object) -> Optional[int]:
     return None
 
 
-def _admin_access_payload_for_user(user: dict[str, Any]) -> dict[str, str]:
+def _admin_access_payload_for_user(
+    user: dict[str, Any],
+    admin_user: Optional[AdminUser] = None,
+) -> dict[str, str]:
     user_id = str(user.get("id") or "")
-    admin_user_payload = _admin_user_payload_for_user_id(user_id)
+    if admin_user is None:
+        admin_user = _admin_user_for_user_id(user_id)
+    admin_user_payload = _admin_user_payload(admin_user) if admin_user else None
     return {
         "id": user_id,
         "email": str(user.get("email") or ""),
@@ -5416,7 +5425,7 @@ def _admin_access_payload_for_user(user: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _admin_user_payload_for_user_id(user_id: object) -> Optional[dict[str, Any]]:
+def _admin_user_for_user_id(user_id: object) -> Optional[AdminUser]:
     try:
         normalized_user_id = UUID(str(user_id))
     except (TypeError, ValueError):
@@ -5424,10 +5433,7 @@ def _admin_user_payload_for_user_id(user_id: object) -> Optional[dict[str, Any]]
 
     db = SessionLocal()
     try:
-        admin_user = db.query(AdminUser).filter(AdminUser.user_id == normalized_user_id).first()
-        if not admin_user:
-            return None
-        return _admin_user_payload(admin_user)
+        return db.query(AdminUser).filter(AdminUser.user_id == normalized_user_id).first()
     except Exception:
         logger.exception("[admin_api] admin user metadata lookup failed user_id=%s", user_id)
         return None
@@ -5444,6 +5450,14 @@ def _admin_user_payload(admin_user: AdminUser) -> dict[str, Any]:
         "createdAt": _iso_datetime(getattr(admin_user, "created_at", None)),
         "updatedAt": _iso_datetime(getattr(admin_user, "updated_at", None)),
     }
+
+
+def _admin_can_manage_access(admin_user: Optional[AdminUser]) -> bool:
+    if not admin_user:
+        return False
+    role = (_clean_text(getattr(admin_user, "role", None)) or "").lower()
+    status = (_clean_text(getattr(admin_user, "status", None)) or "active").lower()
+    return role == "super_admin" and status == "active" and not getattr(admin_user, "deactivated_at", None)
 
 
 def _require_admin_user(request: Request) -> tuple[dict[str, Any], Optional[JSONResponse]]:
