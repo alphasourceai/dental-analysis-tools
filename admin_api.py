@@ -34,6 +34,7 @@ from database import SessionLocal
 from models import (
     AdminAnalysisJob,
     AdminAnalysisJobFile,
+    AdminUser,
     BillingOverride,
     ClientSubmission,
     StripeCheckoutSession,
@@ -107,16 +108,42 @@ def get_admin_me(request: Request) -> JSONResponse:
     if error_response:
         return error_response
 
+    admin_access = _admin_access_payload_for_user(user)
+
     return JSONResponse(
         {
             "ok": True,
+            "admin": admin_access,
+            # Compatibility fields for existing React Admin clients.
             "user": {
-                "id": str(user.get("id") or ""),
-                "email": str(user.get("email") or ""),
+                "id": admin_access["id"],
+                "email": admin_access["email"],
             },
-            "role": "admin",
+            "role": admin_access["role"],
         }
     )
+
+
+@app.get("/api/admin/admin-users")
+def list_admin_users(request: Request) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    db = SessionLocal()
+    try:
+        rows = db.query(AdminUser).order_by(AdminUser.user_id.asc()).all()
+        return JSONResponse(
+            {
+                "ok": True,
+                "items": [_admin_user_payload(row) for row in rows],
+            }
+        )
+    except Exception:
+        logger.exception("[admin_api] admin user list failed.")
+        return _error_response(500, "admin_users_lookup_failed", "Unable to load admin users.")
+    finally:
+        db.close()
 
 
 @app.get("/api/admin/clients")
@@ -5376,6 +5403,47 @@ def _optional_int(value: object) -> Optional[int]:
     if isinstance(value, int):
         return value
     return None
+
+
+def _admin_access_payload_for_user(user: dict[str, Any]) -> dict[str, str]:
+    user_id = str(user.get("id") or "")
+    admin_user_payload = _admin_user_payload_for_user_id(user_id)
+    return {
+        "id": user_id,
+        "email": str(user.get("email") or ""),
+        "role": (admin_user_payload or {}).get("role") or "admin",
+        "status": (admin_user_payload or {}).get("status") or "active",
+    }
+
+
+def _admin_user_payload_for_user_id(user_id: object) -> Optional[dict[str, Any]]:
+    try:
+        normalized_user_id = UUID(str(user_id))
+    except (TypeError, ValueError):
+        return None
+
+    db = SessionLocal()
+    try:
+        admin_user = db.query(AdminUser).filter(AdminUser.user_id == normalized_user_id).first()
+        if not admin_user:
+            return None
+        return _admin_user_payload(admin_user)
+    except Exception:
+        logger.exception("[admin_api] admin user metadata lookup failed user_id=%s", user_id)
+        return None
+    finally:
+        db.close()
+
+
+def _admin_user_payload(admin_user: AdminUser) -> dict[str, Any]:
+    return {
+        "userId": _id_text(getattr(admin_user, "user_id", None)),
+        "email": _clean_text(getattr(admin_user, "email", None)),
+        "role": _clean_text(getattr(admin_user, "role", None)) or "admin",
+        "status": _clean_text(getattr(admin_user, "status", None)) or "active",
+        "createdAt": _iso_datetime(getattr(admin_user, "created_at", None)),
+        "updatedAt": _iso_datetime(getattr(admin_user, "updated_at", None)),
+    }
 
 
 def _require_admin_user(request: Request) -> tuple[dict[str, Any], Optional[JSONResponse]]:
