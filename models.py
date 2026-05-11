@@ -257,6 +257,12 @@ class AdminUser(Base):
 
     user_id = Column(PGUUID(as_uuid=True), primary_key=True)
     role = Column(String(50), nullable=False)
+    email = Column(Text, nullable=True)
+    status = Column(Text, nullable=False, server_default=text("'active'"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    created_by = Column(PGUUID(as_uuid=True), nullable=True)
+    deactivated_at = Column(DateTime(timezone=True), nullable=True)
 
 # Upload portal request model
 class UploadPortalRequest(Base):
