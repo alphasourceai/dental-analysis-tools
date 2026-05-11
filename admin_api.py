@@ -50,6 +50,7 @@ from supabase_utils import (
     is_admin_user,
     persist_upload_file,
 )
+from upload_portal import PortalError, create_upload_request
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -2655,6 +2656,60 @@ def list_admin_secure_upload_files(
         db.close()
 
 
+@app.post("/api/admin/secure-uploads/requests")
+async def create_admin_secure_upload_request(request: Request) -> JSONResponse:
+    _, error_response = _require_admin_user(request)
+    if error_response:
+        return error_response
+
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    email_value = body.get("clientEmail")
+    if email_value is None:
+        email_value = body.get("email")
+
+    client_email, validation_error = _required_email(email_value)
+    if validation_error:
+        return validation_error
+
+    try:
+        result = create_upload_request(client_email, request_ip=_request_client_ip(request))
+    except PortalError as exc:
+        status_code = exc.status if isinstance(exc.status, int) else 400
+        safe_message = exc.message or "Unable to create secure upload request."
+        logger.warning(
+            "[admin_secure_uploads] request creation rejected client_email=%s code=%s",
+            client_email,
+            exc.code,
+        )
+        return _error_response(status_code, exc.code, safe_message)
+    except Exception:
+        logger.exception(
+            "[admin_secure_uploads] request creation failed client_email=%s",
+            client_email,
+        )
+        return _error_response(
+            500,
+            "secure_upload_request_failed",
+            "Unable to create secure upload request.",
+        )
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "request": {
+                "requestId": _clean_text(result.get("request_id")),
+                "clientEmail": client_email,
+                "expiresAt": _clean_text(result.get("expires_at")),
+                "expiresInMinutes": _portal_token_ttl_minutes(),
+                "emailSent": True,
+            },
+        }
+    )
+
+
 @app.post("/api/admin/billing/checkout-sessions")
 async def create_admin_checkout_session(request: Request) -> JSONResponse:
     admin_user, error_response = _require_admin_user(request)
@@ -5086,6 +5141,22 @@ def _admin_date_filter_start(value: object, field_name: str) -> tuple[Optional[d
         return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc), None
     except ValueError:
         return None, _error_response(400, f"invalid_{field_name}", f"{field_name} must use YYYY-MM-DD.")
+
+
+def _request_client_ip(request: Request) -> Optional[str]:
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",", 1)[0].strip()
+    if forwarded_for:
+        return forwarded_for
+    if request.client and request.client.host:
+        return request.client.host
+    return None
+
+
+def _portal_token_ttl_minutes() -> int:
+    try:
+        return max(1, int(os.getenv("PORTAL_TOKEN_TTL_MINUTES", "60")))
+    except ValueError:
+        return 60
 
 
 def _id_text(value: object) -> Optional[str]:
