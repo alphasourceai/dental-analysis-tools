@@ -12,6 +12,7 @@ from models import AdminUser, UploadFile
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+ADMIN_ACCESS_ROLES = {"admin", "super_admin"}
 
 _admin_client = None
 _auth_client = None
@@ -312,6 +313,15 @@ def get_current_admin_user(access_token):
         return None
 
 
+def _admin_access_allows(admin_user):
+    if not admin_user:
+        return False
+    role = (_extract_attr(admin_user, "role") or "").strip().lower()
+    status = (_extract_attr(admin_user, "status") or "active").strip().lower()
+    deactivated_at = _extract_attr(admin_user, "deactivated_at")
+    return role in ADMIN_ACCESS_ROLES and status == "active" and not deactivated_at
+
+
 def is_admin_user(user_id):
     normalized_user_id = _normalize_uuid(user_id)
     if not normalized_user_id:
@@ -320,7 +330,7 @@ def is_admin_user(user_id):
     db = SessionLocal()
     try:
         admin_user = db.query(AdminUser).filter(AdminUser.user_id == normalized_user_id).first()
-        is_admin = bool(admin_user and (admin_user.role or "").strip().lower() == "admin")
+        is_admin = _admin_access_allows(admin_user)
         logging.info("[auth] admin_users db check user_id=%s result=%s", user_id, is_admin)
         if is_admin:
             return True
@@ -343,9 +353,8 @@ def is_admin_user(user_id):
         "Accept": "application/json",
     }
     params = {
-        "select": "user_id",
+        "select": "user_id,role,status,deactivated_at",
         "user_id": f"eq.{normalized_user_id}",
-        "role": "eq.admin",
         "limit": "1",
     }
     try:
@@ -369,7 +378,7 @@ def is_admin_user(user_id):
     except ValueError as exc:
         logging.error("[auth] admin_users rest check invalid json user_id=%s err=%s", user_id, str(exc))
         return False
-    is_admin = bool(payload)
+    is_admin = any(_admin_access_allows(row) for row in payload if isinstance(row, dict))
     logging.info("[auth] admin_users rest check user_id=%s result=%s", user_id, is_admin)
     return is_admin
 
