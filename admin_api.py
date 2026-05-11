@@ -2674,6 +2674,34 @@ async def create_admin_secure_upload_request(request: Request) -> JSONResponse:
     if validation_error:
         return validation_error
 
+    db = SessionLocal()
+    try:
+        user_exists = (
+            db.query(User.id)
+            .filter(func.lower(User.email) == client_email)
+            .first()
+            is not None
+        )
+    except Exception:
+        logger.exception(
+            "[admin_secure_uploads] user lookup failed client_email=%s",
+            client_email,
+        )
+        return _error_response(
+            500,
+            "secure_upload_user_lookup_failed",
+            "Unable to verify secure upload client user.",
+        )
+    finally:
+        db.close()
+
+    if not user_exists:
+        return _error_response(
+            404,
+            "secure_upload_user_not_found",
+            "Secure upload requests can only be sent to an existing client user.",
+        )
+
     try:
         result = create_upload_request(client_email, request_ip=_request_client_ip(request))
     except PortalError as exc:
