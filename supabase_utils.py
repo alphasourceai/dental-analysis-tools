@@ -13,6 +13,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 ADMIN_ACCESS_ROLES = {"admin", "super_admin"}
+ADMIN_AUTH_LIST_PAGE_SIZE = 100
+ADMIN_AUTH_LIST_MAX_PAGES = 50
 
 _admin_client = None
 _auth_client = None
@@ -59,6 +61,186 @@ def _normalize_uuid(value):
         except ValueError:
             return None
     return None
+
+
+def _normalize_email(value):
+    return (value or "").strip().lower()
+
+
+def _safe_auth_error(status, code, message):
+    return {"status": status, "code": code, "message": message}
+
+
+def _auth_admin_api():
+    client = _get_supabase_admin_client()
+    if not client:
+        return None, _safe_auth_error(
+            500,
+            "supabase_auth_not_configured",
+            "Supabase Auth admin access is not configured.",
+        )
+    auth = getattr(client, "auth", None)
+    admin_api = getattr(auth, "admin", None)
+    if not admin_api:
+        return None, _safe_auth_error(
+            500,
+            "supabase_auth_admin_unavailable",
+            "Supabase Auth admin access is unavailable.",
+        )
+    return admin_api, None
+
+
+def _auth_user_payload(user, normalized_email):
+    if not user:
+        return None
+    user_id = _extract_attr(user, "id")
+    user_email = _normalize_email(_extract_attr(user, "email") or normalized_email)
+    if not user_id:
+        return None
+    return {
+        "user_id": str(user_id),
+        "email": user_email,
+    }
+
+
+def _auth_users_from_response(response):
+    if response is None:
+        return []
+    if isinstance(response, list):
+        return response
+    users = _extract_attr(response, "users")
+    if isinstance(users, list):
+        return users
+    data = _extract_attr(response, "data")
+    if isinstance(data, list):
+        return data
+    if hasattr(data, "users"):
+        return getattr(data, "users") or []
+    return []
+
+
+def find_supabase_auth_user_by_email(email):
+    normalized_email = _normalize_email(email)
+    if not normalized_email:
+        return None, _safe_auth_error(400, "invalid_email", "Email is required.")
+
+    admin_api, error = _auth_admin_api()
+    if error:
+        return None, error
+
+    direct_lookup = getattr(admin_api, "get_user_by_email", None)
+    if callable(direct_lookup):
+        try:
+            response = direct_lookup(normalized_email)
+            user = _extract_attr(response, "user") or response
+            payload = _auth_user_payload(user, normalized_email)
+            if payload and payload["email"] == normalized_email:
+                return payload, None
+        except Exception as exc:
+            logging.warning("[auth] direct Supabase Auth user email lookup failed err=%s", str(exc))
+
+    list_users = getattr(admin_api, "list_users", None)
+    if not callable(list_users):
+        return None, _safe_auth_error(
+            500,
+            "supabase_auth_lookup_unavailable",
+            "Supabase Auth user lookup is unavailable.",
+        )
+
+    try:
+        for page in range(1, ADMIN_AUTH_LIST_MAX_PAGES + 1):
+            response = list_users(page=page, per_page=ADMIN_AUTH_LIST_PAGE_SIZE)
+            users = _auth_users_from_response(response)
+            for user in users:
+                payload = _auth_user_payload(user, normalized_email)
+                if payload and payload["email"] == normalized_email:
+                    return payload, None
+            if len(users) < ADMIN_AUTH_LIST_PAGE_SIZE:
+                return None, None
+    except Exception as exc:
+        logging.error("[auth] Supabase Auth user lookup failed err=%s", str(exc))
+        return None, _safe_auth_error(
+            502,
+            "supabase_auth_lookup_failed",
+            "Unable to look up Supabase Auth user.",
+        )
+
+    return None, _safe_auth_error(
+        500,
+        "supabase_auth_lookup_limit_exceeded",
+        "Unable to confirm Supabase Auth user by email.",
+    )
+
+
+def invite_supabase_auth_user_by_email(email):
+    normalized_email = _normalize_email(email)
+    if not normalized_email:
+        return None, _safe_auth_error(400, "invalid_email", "Email is required.")
+
+    redirect_to = os.getenv("ADMIN_INVITE_REDIRECT_URL", "").strip()
+    if not redirect_to:
+        return None, _safe_auth_error(
+            500,
+            "admin_invite_redirect_missing",
+            "Admin invite redirect URL is not configured.",
+        )
+
+    admin_api, error = _auth_admin_api()
+    if error:
+        return None, error
+
+    invite_user = getattr(admin_api, "invite_user_by_email", None)
+    if not callable(invite_user):
+        return None, _safe_auth_error(
+            500,
+            "supabase_auth_invite_unavailable",
+            "Supabase Auth invite is unavailable.",
+        )
+
+    try:
+        response = invite_user(normalized_email, {"redirect_to": redirect_to})
+    except Exception as exc:
+        logging.error("[auth] Supabase Auth invite failed err=%s", str(exc))
+        return None, _safe_auth_error(
+            502,
+            "supabase_auth_invite_failed",
+            "Unable to send Supabase Auth invite.",
+        )
+
+    user = _extract_attr(response, "user") or response
+    payload = _auth_user_payload(user, normalized_email)
+    if not payload:
+        logging.error("[auth] Supabase Auth invite response missing user id")
+        return None, _safe_auth_error(
+            502,
+            "supabase_auth_invite_invalid_response",
+            "Supabase Auth invite response was invalid.",
+        )
+    return payload, None
+
+
+def resolve_admin_auth_user_by_email(email):
+    normalized_email = _normalize_email(email)
+    existing_user, error = find_supabase_auth_user_by_email(normalized_email)
+    if error:
+        return None, error
+    if existing_user:
+        return {
+            "user_id": existing_user["user_id"],
+            "email": normalized_email,
+            "invited": False,
+            "existing": True,
+        }, None
+
+    invited_user, error = invite_supabase_auth_user_by_email(normalized_email)
+    if error:
+        return None, error
+    return {
+        "user_id": invited_user["user_id"],
+        "email": normalized_email,
+        "invited": True,
+        "existing": False,
+    }, None
 
 
 def _get_supabase_auth_key():
