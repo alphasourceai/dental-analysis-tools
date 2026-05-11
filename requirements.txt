@@ -1,6 +1,7 @@
 streamlit
 openai
 pandas
+openpyxl
 pillow
 PyMuPDF
 pytesseract
