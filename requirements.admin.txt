@@ -11,3 +11,4 @@ openai
 anthropic
 openpyxl
 fpdf2
+sendgrid
