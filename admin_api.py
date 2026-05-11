@@ -134,7 +134,7 @@ if allowed_origins:
         CORSMiddleware,
         allow_origins=allowed_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
 
@@ -298,6 +298,109 @@ async def create_admin_user_access(request: Request) -> JSONResponse:
             bool(auth_user.get("invited")) if auth_user else False,
         )
         return _error_response(500, "admin_user_create_failed", "Unable to add admin access.")
+    finally:
+        db.close()
+
+
+@app.patch("/api/admin/admin-users/{user_id}")
+async def update_admin_user_access(request: Request, user_id: str) -> JSONResponse:
+    current_user, _, error_response = _require_admin_permission(request, PERMISSION_ADMIN_MANAGEMENT_WRITE)
+    if error_response:
+        return error_response
+
+    target_user_id, validation_error = _required_uuid(user_id, "userId")
+    if validation_error:
+        return validation_error
+
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    has_role_update = "role" in body
+    has_status_update = "status" in body
+    has_name_update = "name" in body
+    if not has_role_update and not has_status_update and not has_name_update:
+        return _error_response(
+            400,
+            "missing_admin_user_update",
+            "At least one of role, status, or name is required.",
+        )
+
+    next_role = None
+    if has_role_update:
+        next_role, validation_error = _required_admin_user_role(body.get("role"))
+        if validation_error:
+            return validation_error
+
+    next_status = None
+    if has_status_update:
+        next_status, validation_error = _required_admin_user_status(body.get("status"))
+        if validation_error:
+            return validation_error
+
+    next_display_name = None
+    if has_name_update:
+        next_display_name, validation_error = _optional_admin_display_name(body.get("name"))
+        if validation_error:
+            return validation_error
+
+    current_user_id = _uuid_or_none(current_user.get("id"))
+    now = datetime.now(timezone.utc)
+
+    db = SessionLocal()
+    try:
+        admin_user = db.query(AdminUser).filter(AdminUser.user_id == target_user_id).first()
+        if not admin_user:
+            return _error_response(404, "admin_user_not_found", "Admin access was not found.")
+
+        is_self_update = current_user_id == target_user_id
+        current_role = (_clean_text(getattr(admin_user, "role", None)) or "").lower()
+        current_status = (_clean_text(getattr(admin_user, "status", None)) or "active").lower()
+        currently_active_super_admin = (
+            current_role == "super_admin"
+            and current_status == "active"
+            and not getattr(admin_user, "deactivated_at", None)
+        )
+
+        if is_self_update and current_role == "super_admin" and next_role and next_role != "super_admin":
+            return _error_response(400, "self_demotion_blocked", "You cannot change your own super admin role.")
+        if is_self_update and next_status == "inactive":
+            return _error_response(400, "self_deactivation_blocked", "You cannot deactivate your own admin access.")
+
+        final_role = next_role or current_role
+        final_status = next_status or current_status or "active"
+        final_active_super_admin = final_role == "super_admin" and final_status == "active"
+        if currently_active_super_admin and not final_active_super_admin and _active_super_admin_count(db) <= 1:
+            return _error_response(
+                400,
+                "last_super_admin_blocked",
+                "At least one active super admin is required.",
+            )
+
+        if next_role:
+            admin_user.role = next_role
+        if next_status == "inactive":
+            admin_user.status = "inactive"
+            admin_user.deactivated_at = now
+        elif next_status == "active":
+            admin_user.status = "active"
+            admin_user.deactivated_at = None
+        if has_name_update:
+            admin_user.display_name = next_display_name
+        admin_user.updated_at = now
+
+        db.commit()
+        db.refresh(admin_user)
+        return JSONResponse(
+            {
+                "ok": True,
+                "adminUser": _admin_user_payload(admin_user),
+            }
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] admin user update failed target_user_id=%s", target_user_id)
+        return _error_response(500, "admin_user_update_failed", "Unable to update admin access.")
     finally:
         db.close()
 
@@ -5464,6 +5567,15 @@ def _required_admin_display_name(value: object) -> tuple[str, Optional[JSONRespo
     return display_name, None
 
 
+def _optional_admin_display_name(value: object) -> tuple[str, Optional[JSONResponse]]:
+    display_name = _clean_text(value)
+    if not display_name:
+        return "", _error_response(400, "missing_name", "name is required when provided.")
+    if len(display_name) > 160:
+        return "", _error_response(400, "invalid_name", "name must be 160 characters or fewer.")
+    return display_name, None
+
+
 def _required_text(value: object, field_name: str) -> tuple[str, Optional[JSONResponse]]:
     text = _clean_text(value)
     if not text:
@@ -5509,6 +5621,15 @@ def _required_admin_user_role(value: object) -> tuple[str, Optional[JSONResponse
             "role must be super_admin, admin, analyst, billing_admin, or viewer.",
         )
     return role, None
+
+
+def _required_admin_user_status(value: object) -> tuple[str, Optional[JSONResponse]]:
+    status = (_clean_text(value) or "").lower()
+    if not status:
+        return "", _error_response(400, "invalid_status", "status must be active or inactive.")
+    if status not in {"active", "inactive"}:
+        return "", _error_response(400, "invalid_status", "status must be active or inactive.")
+    return status, None
 
 
 def _required_uuid(value: object, field_name: str) -> tuple[UUID, Optional[JSONResponse]]:
@@ -5647,6 +5768,17 @@ def _admin_user_payload(admin_user: AdminUser) -> dict[str, Any]:
         "createdAt": _iso_datetime(getattr(admin_user, "created_at", None)),
         "updatedAt": _iso_datetime(getattr(admin_user, "updated_at", None)),
     }
+
+
+def _active_super_admin_count(db: Any) -> int:
+    return int(
+        db.query(func.count(AdminUser.user_id))
+        .filter(func.lower(AdminUser.role) == "super_admin")
+        .filter(func.lower(AdminUser.status) == "active")
+        .filter(AdminUser.deactivated_at.is_(None))
+        .scalar()
+        or 0
+    )
 
 
 def _admin_role_permissions(role: object) -> set[str]:
