@@ -38,6 +38,7 @@ from models import (
     BillingOverride,
     ClientSubmission,
     StripeCheckoutSession,
+    StripeCheckoutSessionUpload,
     StripeCustomer,
     StripeEvent,
     Upload,
@@ -3065,9 +3066,10 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
         return validation_error
     if not _is_safe_checkout_url(success_url) or not _is_safe_checkout_url(cancel_url):
         return _error_response(400, "invalid_url", "Checkout URLs must use http or https.")
-    upload_id, validation_error = _optional_uuid(body.get("uploadId"), "uploadId")
+    upload_ids, validation_error = _checkout_upload_ids_from_body(body)
     if validation_error:
         return validation_error
+    upload_id = upload_ids[0] if upload_ids else None
     client_submission_id, validation_error = _optional_uuid(
         body.get("clientSubmissionId"),
         "clientSubmissionId",
@@ -3077,6 +3079,9 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
 
     db = SessionLocal()
     try:
+        upload_records, validation_error = _validate_checkout_uploads(db, upload_ids, client_email)
+        if validation_error:
+            return validation_error
         user_record = db.query(User).filter(func.lower(User.email) == client_email).first()
         stripe_customer_id, livemode = _get_or_create_stripe_customer(
             db=db,
@@ -3089,9 +3094,13 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
             "purpose": purpose,
             "created_by_admin_user_id": str(admin_user.get("id") or ""),
             "source": "consulting_admin_api",
+            "upload_count": str(len(upload_ids)),
         }
         if upload_id:
             metadata["upload_id"] = str(upload_id)
+        upload_ids_metadata = ",".join(str(selected_upload_id) for selected_upload_id in upload_ids)
+        if upload_ids_metadata and len(upload_ids_metadata) <= 500:
+            metadata["upload_ids"] = upload_ids_metadata
         if client_submission_id:
             metadata["client_submission_id"] = str(client_submission_id)
 
@@ -3142,6 +3151,14 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
             livemode=bool(session_data.get("livemode", livemode)),
         )
         db.add(local_session)
+        db.flush()
+        for selected_upload_id in upload_ids:
+            db.add(
+                StripeCheckoutSessionUpload(
+                    checkout_session_id=local_session.id,
+                    upload_id=selected_upload_id,
+                )
+            )
         db.commit()
         logger.info(
             "[admin_api] Stripe checkout session created id=%s client_email=%s purpose=%s amount=%s currency=%s admin_user_id=%s",
@@ -3159,6 +3176,10 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
                 "url": checkout_url,
                 "status": _clean_text(session_data.get("status")) or "open",
                 "paymentStatus": _clean_text(session_data.get("payment_status")) or "unpaid",
+                "uploadId": _id_text(upload_id),
+                "clientSubmissionId": _id_text(client_submission_id),
+                "uploadIds": [_id_text(selected_upload_id) for selected_upload_id in upload_ids],
+                "relatedUploads": [_upload_payload(upload) for upload in upload_records],
             }
         )
     except stripe.error.StripeError:
@@ -3238,6 +3259,7 @@ def get_admin_billing_client(
         ]
         latest_session = checkout_sessions[0] if checkout_sessions else None
         latest_paid_session = paid_sessions[0] if paid_sessions else None
+        checkout_related_uploads = _checkout_related_uploads_by_session(db, checkout_sessions)
 
         return JSONResponse(
             {
@@ -3255,10 +3277,16 @@ def get_admin_billing_client(
                     ),
                 },
                 "latestPaidSession": (
-                    _checkout_session_payload(latest_paid_session) if latest_paid_session else None
+                    _checkout_session_payload(
+                        latest_paid_session,
+                        checkout_related_uploads.get(_id_text(getattr(latest_paid_session, "id", None)) or "", []),
+                    ) if latest_paid_session else None
                 ),
                 "checkoutSessions": [
-                    _checkout_session_payload(session)
+                    _checkout_session_payload(
+                        session,
+                        checkout_related_uploads.get(_id_text(getattr(session, "id", None)) or "", []),
+                    )
                     for session in checkout_sessions[:25]
                 ],
                 "uploads": [_upload_payload(upload) for upload in uploads],
@@ -3350,6 +3378,7 @@ def get_admin_billing_overview(
             .limit(safe_limit)
             .all()
         )
+        checkout_related_uploads = _checkout_related_uploads_by_session(db, checkout_rows)
 
         return JSONResponse(
             {
@@ -3362,7 +3391,10 @@ def get_admin_billing_overview(
                     "needsReviewEventCount": needs_review_event_count,
                 },
                 "checkoutSessions": [
-                    _checkout_session_payload(session)
+                    _checkout_session_payload(
+                        session,
+                        checkout_related_uploads.get(_id_text(getattr(session, "id", None)) or "", []),
+                    )
                     for session in checkout_rows
                 ],
                 "billingOverrides": [
@@ -5365,7 +5397,80 @@ def _pdf_generation_text(
     return text, None
 
 
-def _checkout_session_payload(session: StripeCheckoutSession) -> dict[str, Any]:
+def _checkout_related_uploads_by_session(
+    db: Any,
+    sessions: list[StripeCheckoutSession],
+) -> dict[str, list[Upload]]:
+    session_ids = [
+        getattr(session, "id")
+        for session in sessions
+        if getattr(session, "id", None)
+    ]
+    related_uploads_by_session_id = {
+        str(session_id): []
+        for session_id in session_ids
+    }
+    if not session_ids:
+        return related_uploads_by_session_id
+
+    link_rows = (
+        db.query(StripeCheckoutSessionUpload, Upload)
+        .join(Upload, Upload.id == StripeCheckoutSessionUpload.upload_id)
+        .filter(StripeCheckoutSessionUpload.checkout_session_id.in_(session_ids))
+        .order_by(StripeCheckoutSessionUpload.created_at.asc())
+        .all()
+    )
+    for link, upload in link_rows:
+        session_id = _id_text(getattr(link, "checkout_session_id", None))
+        if session_id:
+            related_uploads_by_session_id.setdefault(session_id, []).append(upload)
+
+    legacy_upload_ids = [
+        getattr(session, "upload_id")
+        for session in sessions
+        if getattr(session, "upload_id", None)
+        and not related_uploads_by_session_id.get(str(getattr(session, "id", "")))
+    ]
+    if not legacy_upload_ids:
+        return related_uploads_by_session_id
+
+    legacy_upload_rows = db.query(Upload).filter(Upload.id.in_(legacy_upload_ids)).all()
+    legacy_uploads_by_id = {
+        str(getattr(upload, "id")): upload
+        for upload in legacy_upload_rows
+        if getattr(upload, "id", None)
+    }
+    for session in sessions:
+        session_id = _id_text(getattr(session, "id", None))
+        legacy_upload_id = _id_text(getattr(session, "upload_id", None))
+        if (
+            session_id
+            and legacy_upload_id
+            and not related_uploads_by_session_id.get(session_id)
+            and legacy_upload_id in legacy_uploads_by_id
+        ):
+            related_uploads_by_session_id[session_id] = [legacy_uploads_by_id[legacy_upload_id]]
+
+    return related_uploads_by_session_id
+
+
+def _checkout_session_payload(
+    session: StripeCheckoutSession,
+    related_uploads: Optional[list[Upload]] = None,
+) -> dict[str, Any]:
+    related_uploads = related_uploads or []
+    upload_ids = []
+    seen_upload_ids = set()
+    for upload in related_uploads:
+        upload_id = _id_text(getattr(upload, "id", None))
+        if upload_id and upload_id not in seen_upload_ids:
+            upload_ids.append(upload_id)
+            seen_upload_ids.add(upload_id)
+
+    legacy_upload_id = _id_text(getattr(session, "upload_id", None))
+    if legacy_upload_id and legacy_upload_id not in seen_upload_ids:
+        upload_ids.append(legacy_upload_id)
+
     return {
         "id": _id_text(getattr(session, "id", None)),
         "stripeCheckoutSessionId": _clean_text(
@@ -5381,7 +5486,9 @@ def _checkout_session_payload(session: StripeCheckoutSession) -> dict[str, Any]:
         "currency": _clean_text(getattr(session, "currency", None)),
         "checkoutUrl": _clean_text(getattr(session, "checkout_url", None)),
         "livemode": bool(getattr(session, "livemode", False)),
-        "uploadId": _id_text(getattr(session, "upload_id", None)),
+        "uploadId": legacy_upload_id,
+        "uploadIds": upload_ids,
+        "relatedUploads": [_upload_payload(upload) for upload in related_uploads],
         "clientSubmissionId": _id_text(getattr(session, "client_submission_id", None)),
         "createdAt": _iso_datetime(getattr(session, "created_at", None)),
         "updatedAt": _iso_datetime(getattr(session, "updated_at", None)),
@@ -5650,6 +5757,69 @@ def _optional_uuid(value: object, field_name: str) -> tuple[Optional[UUID], Opti
         return UUID(text), None
     except ValueError:
         return None, _error_response(400, f"invalid_{field_name}", f"{field_name} must be a valid UUID.")
+
+
+def _checkout_upload_ids_from_body(body: dict[str, Any]) -> tuple[list[UUID], Optional[JSONResponse]]:
+    parsed_upload_ids: list[UUID] = []
+    upload_id, validation_error = _optional_uuid(body.get("uploadId"), "uploadId")
+    if validation_error:
+        return [], validation_error
+    if upload_id:
+        parsed_upload_ids.append(upload_id)
+
+    raw_upload_ids = body.get("uploadIds")
+    if raw_upload_ids is not None:
+        if not isinstance(raw_upload_ids, list):
+            return [], _error_response(400, "invalid_uploadIds", "uploadIds must be an array of UUID strings.")
+        for raw_upload_id in raw_upload_ids:
+            selected_upload_id, validation_error = _required_uuid(raw_upload_id, "uploadIds")
+            if validation_error:
+                return [], validation_error
+            parsed_upload_ids.append(selected_upload_id)
+
+    deduped_upload_ids = []
+    seen_upload_ids = set()
+    for selected_upload_id in parsed_upload_ids:
+        selected_upload_id_text = str(selected_upload_id)
+        if selected_upload_id_text in seen_upload_ids:
+            continue
+        deduped_upload_ids.append(selected_upload_id)
+        seen_upload_ids.add(selected_upload_id_text)
+    return deduped_upload_ids, None
+
+
+def _validate_checkout_uploads(
+    db: Any,
+    upload_ids: list[UUID],
+    client_email: str,
+) -> tuple[list[Upload], Optional[JSONResponse]]:
+    if not upload_ids:
+        return [], None
+
+    uploads = db.query(Upload).filter(Upload.id.in_(upload_ids)).all()
+    uploads_by_id = {
+        str(getattr(upload, "id")): upload
+        for upload in uploads
+        if getattr(upload, "id", None)
+    }
+    missing_upload_ids = [
+        str(selected_upload_id)
+        for selected_upload_id in upload_ids
+        if str(selected_upload_id) not in uploads_by_id
+    ]
+    if missing_upload_ids:
+        return [], _error_response(404, "upload_not_found", "One or more selected uploads could not be found.")
+
+    mismatched_upload_ids = [
+        str(selected_upload_id)
+        for selected_upload_id in upload_ids
+        if (_clean_text(getattr(uploads_by_id[str(selected_upload_id)], "user_email", None)) or "").lower()
+        != client_email
+    ]
+    if mismatched_upload_ids:
+        return [], _error_response(400, "upload_client_mismatch", "Selected uploads must belong to clientEmail.")
+
+    return [uploads_by_id[str(selected_upload_id)] for selected_upload_id in upload_ids], None
 
 
 def _is_safe_checkout_url(value: str) -> bool:
