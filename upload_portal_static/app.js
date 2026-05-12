@@ -48,7 +48,7 @@ function fileKey(file) {
 
 function parseToken() {
   const params = new URLSearchParams(window.location.search);
-  return params.get("token") || "";
+  return params.get("upload_token") || params.get("token") || "";
 }
 
 function clearTokenFromUrl() {

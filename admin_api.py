@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import json
+import mimetypes
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, unquote, urlparse
 from uuid import UUID, uuid4
@@ -11,7 +13,7 @@ from uuid import UUID, uuid4
 import stripe
 from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile as FastAPIUploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, or_
 
@@ -54,11 +56,23 @@ from supabase_utils import (
     persist_upload_file,
     resolve_admin_auth_user_by_email,
 )
-from upload_portal import PortalError, create_upload_request
+from upload_portal import (
+    PortalError,
+    complete_upload,
+    create_signed_upload_url,
+    create_upload_request,
+    verify_upload_token,
+)
 
 logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="Admin API")
+UPLOAD_PORTAL_STATIC_ROOT = Path(__file__).resolve().parent / "upload_portal_static"
+UPLOAD_PORTAL_DEFAULT_ALLOWED_ORIGINS = [
+    "https://upload.alphasourceai.com",
+    "https://alphasourceai.com",
+    "https://www.alphasourceai.com",
+]
 
 ADMIN_ANALYSIS_ALLOWED_TOOL_NAMES = {
     "Financial Analyzer",
@@ -141,6 +155,107 @@ if allowed_origins:
     )
 
 
+def _upload_portal_allowed_origin(origin: Optional[str]) -> Optional[str]:
+    allowlist = [
+        item.strip()
+        for item in os.getenv("PORTAL_ALLOWED_ORIGINS", "").split(",")
+        if item.strip()
+    ]
+    if not allowlist:
+        allowlist = UPLOAD_PORTAL_DEFAULT_ALLOWED_ORIGINS
+    if origin and origin in allowlist:
+        return origin
+    return None
+
+
+def _upload_portal_origin_allowed(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    return _upload_portal_allowed_origin(origin) is not None
+
+
+def _upload_portal_cors_headers(request: Request) -> dict[str, str]:
+    headers = {
+        "Access-Control-Allow-Headers": "authorization, content-type",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    }
+    allowed_origin = _upload_portal_allowed_origin(request.headers.get("origin"))
+    if allowed_origin:
+        headers["Access-Control-Allow-Origin"] = allowed_origin
+        headers["Vary"] = "Origin"
+    return headers
+
+
+def _upload_portal_json_response(
+    request: Request,
+    status_code: int,
+    payload: dict[str, Any],
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content=payload,
+        headers=_upload_portal_cors_headers(request),
+    )
+
+
+def _upload_portal_error_response(request: Request, exc: PortalError) -> JSONResponse:
+    status_code = exc.status if isinstance(exc.status, int) else 400
+    return _upload_portal_json_response(
+        request,
+        status_code,
+        {"error": exc.message, "code": exc.code, "detail": exc.detail},
+    )
+
+
+async def _upload_portal_json_body(request: Request) -> tuple[dict[str, Any], Optional[JSONResponse]]:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}, _upload_portal_json_response(
+            request,
+            400,
+            {"error": "Invalid JSON payload", "code": "invalid_json", "detail": None},
+        )
+    if not isinstance(body, dict):
+        return {}, _upload_portal_json_response(
+            request,
+            400,
+            {"error": "Invalid JSON payload", "code": "invalid_json", "detail": None},
+        )
+    return body, None
+
+
+def _upload_portal_bearer_token(request: Request) -> str:
+    header = request.headers.get("authorization", "")
+    if header.startswith("Bearer "):
+        return header[len("Bearer "):].strip()
+    return ""
+
+
+def _upload_portal_static_path(path: str = "") -> Optional[Path]:
+    root = UPLOAD_PORTAL_STATIC_ROOT.resolve()
+    if not path:
+        file_path = root / "index.html"
+    else:
+        file_path = (root / unquote(path).lstrip("/")).resolve()
+    try:
+        file_path.relative_to(root)
+    except ValueError:
+        return None
+    if not file_path.exists() or not file_path.is_file():
+        return None
+    return file_path
+
+
+def _upload_portal_static_response(path: str = "") -> Response:
+    file_path = _upload_portal_static_path(path)
+    if not file_path:
+        return Response("Not found", status_code=404, media_type="text/plain")
+    media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+    return FileResponse(str(file_path), media_type=media_type)
+
+
 @app.get("/")
 def root() -> dict[str, object]:
     return {"ok": True, "service": "admin-api"}
@@ -154,6 +269,117 @@ def root_head() -> Response:
 @app.get("/health")
 def health() -> dict[str, object]:
     return {"ok": True, "service": "admin-api"}
+
+
+@app.get("/uploads")
+def upload_portal_index() -> Response:
+    return _upload_portal_static_response()
+
+
+@app.get("/uploads/")
+def upload_portal_index_slash() -> Response:
+    return _upload_portal_static_response()
+
+
+@app.get("/uploads/{path:path}")
+def upload_portal_static(path: str) -> Response:
+    return _upload_portal_static_response(path)
+
+
+@app.options("/api/upload-portal/{path:path}")
+def upload_portal_options(path: str, request: Request) -> Response:
+    if not _upload_portal_origin_allowed(request):
+        return _upload_portal_json_response(
+            request,
+            403,
+            {"error": "Origin not allowed", "code": "forbidden", "detail": None},
+        )
+    return Response(status_code=204, headers=_upload_portal_cors_headers(request))
+
+
+@app.get("/api/upload-portal/health")
+def upload_portal_health(request: Request) -> JSONResponse:
+    return _upload_portal_json_response(request, 200, {"ok": True, "status": "healthy"})
+
+
+@app.post("/api/upload-portal/verify")
+async def upload_portal_verify(request: Request) -> JSONResponse:
+    if not _upload_portal_origin_allowed(request):
+        return _upload_portal_json_response(
+            request,
+            403,
+            {"error": "Origin not allowed", "code": "forbidden", "detail": None},
+        )
+    body, parse_error = await _upload_portal_json_body(request)
+    if parse_error:
+        return parse_error
+    try:
+        result = verify_upload_token(body.get("token", ""))
+    except PortalError as exc:
+        return _upload_portal_error_response(request, exc)
+    except Exception:
+        logger.exception("[upload_portal] verify failed")
+        return _upload_portal_json_response(
+            request,
+            500,
+            {"error": "Server error", "code": "server_error", "detail": None},
+        )
+    return _upload_portal_json_response(request, 200, {"ok": True, "data": result})
+
+
+@app.post("/api/upload-portal/signed-upload-url")
+async def upload_portal_signed_upload_url(request: Request) -> JSONResponse:
+    if not _upload_portal_origin_allowed(request):
+        return _upload_portal_json_response(
+            request,
+            403,
+            {"error": "Origin not allowed", "code": "forbidden", "detail": None},
+        )
+    body, parse_error = await _upload_portal_json_body(request)
+    if parse_error:
+        return parse_error
+    try:
+        result = create_signed_upload_url(
+            _upload_portal_bearer_token(request),
+            body.get("filename", ""),
+            body.get("content_type"),
+            body.get("byte_size"),
+        )
+    except PortalError as exc:
+        return _upload_portal_error_response(request, exc)
+    except Exception:
+        logger.exception("[upload_portal] signed upload URL creation failed")
+        return _upload_portal_json_response(
+            request,
+            500,
+            {"error": "Server error", "code": "server_error", "detail": None},
+        )
+    return _upload_portal_json_response(request, 200, {"ok": True, "data": result})
+
+
+@app.post("/api/upload-portal/complete")
+async def upload_portal_complete(request: Request) -> JSONResponse:
+    if not _upload_portal_origin_allowed(request):
+        return _upload_portal_json_response(
+            request,
+            403,
+            {"error": "Origin not allowed", "code": "forbidden", "detail": None},
+        )
+    body, parse_error = await _upload_portal_json_body(request)
+    if parse_error:
+        return parse_error
+    try:
+        result = complete_upload(_upload_portal_bearer_token(request), body.get("upload_id", ""))
+    except PortalError as exc:
+        return _upload_portal_error_response(request, exc)
+    except Exception:
+        logger.exception("[upload_portal] upload completion failed")
+        return _upload_portal_json_response(
+            request,
+            500,
+            {"error": "Server error", "code": "server_error", "detail": None},
+        )
+    return _upload_portal_json_response(request, 200, {"ok": True, "data": result})
 
 
 @app.get("/api/admin/me")
