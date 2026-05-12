@@ -10,6 +10,7 @@ from typing import Any, Optional
 from urllib.parse import quote, unquote, urlparse
 from uuid import UUID, uuid4
 
+import requests
 import stripe
 from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile as FastAPIUploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -3200,6 +3201,175 @@ def list_admin_secure_upload_files(
         db.close()
 
 
+@app.post("/api/admin/secure-uploads/files/{file_id}/download-url")
+def create_admin_secure_upload_download_url(request: Request, file_id: str) -> JSONResponse:
+    admin_auth_user, _, error_response = _require_admin_permission(request, PERMISSION_SECURE_UPLOADS_READ)
+    if error_response:
+        return error_response
+
+    secure_upload_file_id, validation_error = _required_uuid(file_id, "file_id")
+    if validation_error:
+        return validation_error
+
+    admin_id = _clean_text(admin_auth_user.get("id"))
+    admin_email = _clean_text(admin_auth_user.get("email"))
+
+    db = SessionLocal()
+    try:
+        upload_file = (
+            db.query(UploadPortalFile)
+            .filter(UploadPortalFile.id == secure_upload_file_id)
+            .first()
+        )
+    except Exception:
+        logger.exception(
+            "[admin_secure_uploads] download lookup failed admin_id=%s admin_email=%s file_id=%s",
+            admin_id,
+            admin_email,
+            secure_upload_file_id,
+        )
+        return _error_response(500, "secure_upload_download_lookup_failed", "Unable to load secure upload file.")
+    finally:
+        db.close()
+
+    if not upload_file:
+        logger.info(
+            "[admin_secure_uploads] download_url_result admin_id=%s admin_email=%s file_id=%s status=not_found",
+            admin_id,
+            admin_email,
+            secure_upload_file_id,
+        )
+        return _error_response(404, "secure_upload_file_not_found", "Secure upload file was not found.")
+
+    if not getattr(upload_file, "completed_at", None):
+        logger.info(
+            "[admin_secure_uploads] download_url_result admin_id=%s admin_email=%s file_id=%s status=incomplete",
+            admin_id,
+            admin_email,
+            secure_upload_file_id,
+        )
+        return _error_response(400, "secure_upload_incomplete", "Secure upload file is not completed yet.")
+
+    bucket = _clean_text(getattr(upload_file, "gcs_bucket", None))
+    object_name = _clean_text(getattr(upload_file, "object_name", None))
+    if not bucket or not object_name:
+        logger.warning(
+            "[admin_secure_uploads] download_url_result admin_id=%s admin_email=%s file_id=%s status=missing_storage_location",
+            admin_id,
+            admin_email,
+            secure_upload_file_id,
+        )
+        return _error_response(
+            400,
+            "secure_upload_storage_location_missing",
+            "Secure upload file storage location is missing.",
+        )
+
+    configured_bucket = _clean_text(os.getenv("GCS_BUCKET_NAME"))
+    if configured_bucket and bucket != configured_bucket:
+        logger.warning(
+            "[admin_secure_uploads] download_url_result admin_id=%s admin_email=%s file_id=%s status=bucket_mismatch",
+            admin_id,
+            admin_email,
+            secure_upload_file_id,
+        )
+        return _error_response(
+            403,
+            "secure_upload_bucket_mismatch",
+            "Secure upload file is not in the configured storage bucket.",
+        )
+
+    signer_base_url = _clean_text(os.getenv("PORTAL_SIGNER_SERVICE_URL"))
+    signer_api_key = _clean_text(os.getenv("PORTAL_SIGNER_API_KEY"))
+    if not signer_base_url or not signer_api_key:
+        logger.warning(
+            "[admin_secure_uploads] download_url_result admin_id=%s admin_email=%s file_id=%s status=signer_config_missing",
+            admin_id,
+            admin_email,
+            secure_upload_file_id,
+        )
+        return _error_response(
+            500,
+            "secure_upload_download_not_configured",
+            "Secure upload download signing is not configured.",
+        )
+
+    content_type = _secure_upload_download_content_type(getattr(upload_file, "content_type", None))
+    file_name = _secure_upload_download_filename(getattr(upload_file, "original_filename", None))
+    try:
+        signer_response = requests.post(
+            f"{signer_base_url.rstrip('/')}/signed-download-url",
+            headers={"Authorization": f"Bearer {signer_api_key}"},
+            json={
+                "object_name": object_name,
+                "content_type": content_type,
+                "filename": file_name,
+            },
+            timeout=15,
+        )
+    except requests.RequestException:
+        logger.warning(
+            "[admin_secure_uploads] download_url_result admin_id=%s admin_email=%s file_id=%s status=signer_request_failed",
+            admin_id,
+            admin_email,
+            secure_upload_file_id,
+        )
+        return _error_response(502, "secure_upload_download_signer_failed", "Unable to create download link.")
+
+    if signer_response.status_code >= 300:
+        logger.warning(
+            "[admin_secure_uploads] download_url_result admin_id=%s admin_email=%s file_id=%s status=signer_rejected signer_status=%s",
+            admin_id,
+            admin_email,
+            secure_upload_file_id,
+            signer_response.status_code,
+        )
+        return _error_response(502, "secure_upload_download_signer_failed", "Unable to create download link.")
+
+    try:
+        signer_payload = signer_response.json()
+    except ValueError:
+        logger.warning(
+            "[admin_secure_uploads] download_url_result admin_id=%s admin_email=%s file_id=%s status=signer_invalid_json",
+            admin_id,
+            admin_email,
+            secure_upload_file_id,
+        )
+        return _error_response(502, "secure_upload_download_signer_failed", "Unable to create download link.")
+
+    signed_url = _clean_text(signer_payload.get("signed_url") if isinstance(signer_payload, dict) else None)
+    expires_in_seconds = _positive_int(
+        signer_payload.get("expires_in_seconds") if isinstance(signer_payload, dict) else None
+    )
+    if not signed_url or not expires_in_seconds:
+        logger.warning(
+            "[admin_secure_uploads] download_url_result admin_id=%s admin_email=%s file_id=%s status=signer_response_incomplete",
+            admin_id,
+            admin_email,
+            secure_upload_file_id,
+        )
+        return _error_response(502, "secure_upload_download_signer_failed", "Unable to create download link.")
+
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds)
+    logger.info(
+        "[admin_secure_uploads] download_url_result admin_id=%s admin_email=%s file_id=%s status=signed expires_in_seconds=%s",
+        admin_id,
+        admin_email,
+        secure_upload_file_id,
+        expires_in_seconds,
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "downloadUrl": signed_url,
+            "expiresInSeconds": expires_in_seconds,
+            "expiresAt": _iso_datetime(expires_at),
+            "fileName": file_name,
+            "contentType": content_type,
+        }
+    )
+
+
 @app.post("/api/admin/secure-uploads/requests")
 async def create_admin_secure_upload_request(request: Request) -> JSONResponse:
     _, _, error_response = _require_admin_permission(request, PERMISSION_SECURE_UPLOADS_WRITE)
@@ -5865,6 +6035,30 @@ def _secure_upload_file_payload(upload_file: UploadPortalFile) -> dict[str, Any]
         "createdAt": _iso_datetime(getattr(upload_file, "created_at", None)),
         "completedAt": _iso_datetime(getattr(upload_file, "completed_at", None)),
     }
+
+
+def _secure_upload_download_filename(value: object) -> str:
+    text = _clean_text(value) or "secure-upload-file"
+    cleaned = text.replace("\x00", "").replace("\r", "").replace("\n", "")
+    file_name = os.path.basename(cleaned).strip()
+    return file_name or "secure-upload-file"
+
+
+def _secure_upload_download_content_type(value: object) -> str:
+    content_type = _clean_text(value) or "application/octet-stream"
+    if "\r" in content_type or "\n" in content_type or len(content_type) > 200:
+        return "application/octet-stream"
+    return content_type
+
+
+def _positive_int(value: object) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _admin_date_filter_start(value: object, field_name: str) -> tuple[Optional[datetime], Optional[JSONResponse]]:
