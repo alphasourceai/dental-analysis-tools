@@ -376,7 +376,7 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
         if combined:
             render_bullet(combined, f"opportunity:{idx}")
 
-    logo_path = os.path.join(root, "public", "logo with bg color 1128.png")
+    logo_path = os.path.join(root, "public", "logo-dark-text.png")
     header_y = pdf.get_y()
     if os.path.exists(logo_path):
         try:
@@ -408,8 +408,6 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
         ("Office/Group", metadata.get("office_name")),
         ("Client Email", metadata.get("client_email")),
         ("Tool", metadata.get("tool_name")),
-        ("Generated", report_date_text),
-        ("Version", version if version else "-"),
     ]
     detail_padding_x = 7
     detail_padding_y = 5
