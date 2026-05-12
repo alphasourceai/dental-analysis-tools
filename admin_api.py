@@ -20,6 +20,7 @@ from admin_financial_processing_service import (
     AdminFinancialProcessingError,
     download_upload_file_bytes,
     extract_csv_text,
+    extract_pdf_text,
     extract_xlsx_text,
     run_financial_csv_analysis,
 )
@@ -67,9 +68,9 @@ ADMIN_ANALYSIS_ALLOWED_TOOL_NAMES = {
 ADMIN_ANALYSIS_FINANCIAL_TOOL_NAME = "Financial Analyzer"
 ADMIN_ANALYSIS_FINANCIAL_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".pdf"}
 ADMIN_ANALYSIS_AR_TOOL_NAME = "AR Analyzer"
-ADMIN_ANALYSIS_AR_ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
+ADMIN_ANALYSIS_AR_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".pdf"}
 ADMIN_ANALYSIS_CLAIMS_TOOL_NAME = "Insurance Claim Analyzer"
-ADMIN_ANALYSIS_CLAIMS_ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
+ADMIN_ANALYSIS_CLAIMS_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".pdf"}
 ADMIN_ANALYSIS_READ_CHUNK_SIZE = 1024 * 1024
 DEFAULT_ADMIN_ANALYSIS_MAX_FILE_MB = 15
 PERMISSION_CLIENTS_READ = "clients_read"
@@ -1836,9 +1837,17 @@ def process_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse
         if file_extension == ".csv":
             data_input = extract_csv_text(file_bytes)
             source_format = "csv"
-        else:
+        elif file_extension == ".xlsx":
             data_input = extract_xlsx_text(file_bytes)
             source_format = "xlsx"
+        elif file_extension == ".pdf":
+            data_input = extract_pdf_text(file_bytes)
+            source_format = "pdf"
+        else:
+            raise AdminFinancialProcessingError(
+                "unsupported_file_type",
+                "Unsupported AR file type.",
+            )
     except AdminFinancialProcessingError as exc:
         _mark_admin_ar_processing_error(job_uuid, job_file_id, exc.code, exc.message)
         return _error_response(400, exc.code, exc.message)
@@ -1851,9 +1860,15 @@ def process_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse
         if file_extension == ".csv":
             error_code = "csv_extract_failed"
             error_message = "Unable to extract AR CSV data."
-        else:
+        elif file_extension == ".xlsx":
             error_code = "xlsx_extract_failed"
             error_message = "Unable to extract AR XLSX data."
+        elif file_extension == ".pdf":
+            error_code = "pdf_extract_failed"
+            error_message = "Unable to extract AR PDF text."
+        else:
+            error_code = "unsupported_file_type"
+            error_message = "Unsupported AR file type."
         _mark_admin_ar_processing_error(
             job_uuid,
             job_file_id,
@@ -2139,9 +2154,17 @@ def process_admin_claims_analysis_job(request: Request, job_id: str) -> JSONResp
         if file_extension == ".csv":
             data_input = extract_csv_text(file_bytes)
             source_format = "csv"
-        else:
+        elif file_extension == ".xlsx":
             data_input = extract_xlsx_text(file_bytes)
             source_format = "xlsx"
+        elif file_extension == ".pdf":
+            data_input = extract_pdf_text(file_bytes)
+            source_format = "pdf"
+        else:
+            raise AdminFinancialProcessingError(
+                "unsupported_file_type",
+                "Unsupported Claims file type.",
+            )
     except AdminFinancialProcessingError as exc:
         _mark_admin_claims_processing_error(job_uuid, job_file_id, exc.code, exc.message)
         return _error_response(400, exc.code, exc.message)
@@ -2154,9 +2177,15 @@ def process_admin_claims_analysis_job(request: Request, job_id: str) -> JSONResp
         if file_extension == ".csv":
             error_code = "csv_extract_failed"
             error_message = "Unable to extract Claims CSV data."
-        else:
+        elif file_extension == ".xlsx":
             error_code = "xlsx_extract_failed"
             error_message = "Unable to extract Claims XLSX data."
+        elif file_extension == ".pdf":
+            error_code = "pdf_extract_failed"
+            error_message = "Unable to extract Claims PDF text."
+        else:
+            error_code = "unsupported_file_type"
+            error_message = "Unsupported Claims file type."
         _mark_admin_claims_processing_error(
             job_uuid,
             job_file_id,
