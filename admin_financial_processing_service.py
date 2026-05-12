@@ -26,6 +26,8 @@ MAX_XLSX_SHEETS = 10
 MAX_XLSX_ROWS_PER_SHEET = 500
 MAX_XLSX_COLUMNS_PER_ROW = 50
 MAX_XLSX_CELL_CHARS = 500
+MAX_PDF_PAGES = 30
+MAX_PDF_CHARS = 60000
 
 CancelChecker = Callable[[], bool]
 
@@ -171,6 +173,56 @@ def extract_xlsx_text(file_bytes: bytes) -> str:
         raise AdminFinancialProcessingError(
             "empty_xlsx",
             "XLSX file did not contain readable data.",
+        )
+    return data_input
+
+
+def extract_pdf_text(file_bytes: bytes) -> str:
+    try:
+        import fitz
+    except ImportError as exc:
+        raise AdminFinancialProcessingError(
+            "pdf_dependency_missing",
+            "PDF processing is not configured.",
+        ) from exc
+
+    try:
+        with fitz.open(stream=file_bytes, filetype="pdf") as document:
+            if getattr(document, "needs_pass", False):
+                raise AdminFinancialProcessingError(
+                    "pdf_read_failed",
+                    "PDF file could not be read.",
+                )
+
+            rendered_pages: list[str] = []
+            extracted_chars = 0
+            for page_index, page in enumerate(document):
+                if page_index >= MAX_PDF_PAGES or extracted_chars >= MAX_PDF_CHARS:
+                    break
+
+                page_text = _normalize_pdf_text(page.get_text("text") or "")
+                if not page_text:
+                    continue
+
+                remaining_chars = MAX_PDF_CHARS - extracted_chars
+                if len(page_text) > remaining_chars:
+                    page_text = page_text[:remaining_chars].rstrip()
+
+                rendered_pages.append(page_text)
+                extracted_chars += len(page_text)
+    except AdminFinancialProcessingError:
+        raise
+    except Exception as exc:
+        raise AdminFinancialProcessingError(
+            "pdf_extract_failed",
+            "PDF text could not be extracted.",
+        ) from exc
+
+    data_input = "\n\n".join(rendered_pages).strip()
+    if not data_input:
+        raise AdminFinancialProcessingError(
+            "empty_pdf_text",
+            "PDF did not contain selectable text. Scanned or image-only PDFs are not supported yet because OCR is not enabled.",
         )
     return data_input
 
@@ -455,6 +507,11 @@ def _render_xlsx_cell(value: Any) -> str:
     if len(text) > MAX_XLSX_CELL_CHARS:
         return f"{text[:MAX_XLSX_CELL_CHARS]}..."
     return text
+
+
+def _normalize_pdf_text(value: str) -> str:
+    lines = [" ".join(line.strip().split()) for line in value.splitlines()]
+    return "\n".join(line for line in lines if line)
 
 
 def _get_model_config() -> dict[str, str]:

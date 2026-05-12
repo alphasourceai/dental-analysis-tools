@@ -10,5 +10,6 @@ stripe
 openai
 anthropic
 openpyxl
+PyMuPDF
 fpdf2
 sendgrid
