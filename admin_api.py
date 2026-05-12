@@ -3598,6 +3598,8 @@ def _process_stripe_event(db: Any, event_data: dict[str, Any], now: datetime) ->
     if session_livemode is not None:
         local_session.livemode = bool(session_livemode)
     local_session.updated_at = now
+    if _checkout_session_is_paid_or_complete(local_session):
+        _mark_checkout_session_uploads_paid(db, local_session)
     logger.info(
         "[admin_api] Stripe checkout session completed session_id=%s status=%s payment_status=%s",
         checkout_session_id,
@@ -3605,6 +3607,60 @@ def _process_stripe_event(db: Any, event_data: dict[str, Any], now: datetime) ->
         local_session.payment_status,
     )
     return "processed"
+
+
+def _checkout_session_is_paid_or_complete(session: StripeCheckoutSession) -> bool:
+    payment_status = (_clean_text(getattr(session, "payment_status", None)) or "").lower()
+    status = (_clean_text(getattr(session, "status", None)) or "").lower()
+    return payment_status == "paid" or status in {"complete", "completed"}
+
+
+def _mark_checkout_session_uploads_paid(db: Any, session: StripeCheckoutSession) -> int:
+    session_db_id = getattr(session, "id", None)
+    stripe_session_id = _clean_text(getattr(session, "stripe_checkout_session_id", None))
+    upload_ids = []
+    seen_upload_ids = set()
+
+    if session_db_id:
+        link_rows = (
+            db.query(StripeCheckoutSessionUpload.upload_id)
+            .filter(StripeCheckoutSessionUpload.checkout_session_id == session_db_id)
+            .all()
+        )
+        for row in link_rows:
+            upload_id = row[0]
+            upload_id_text = _id_text(upload_id)
+            if upload_id and upload_id_text and upload_id_text not in seen_upload_ids:
+                upload_ids.append(upload_id)
+                seen_upload_ids.add(upload_id_text)
+
+    legacy_upload_id = getattr(session, "upload_id", None)
+    legacy_upload_id_text = _id_text(legacy_upload_id)
+    if legacy_upload_id and legacy_upload_id_text and legacy_upload_id_text not in seen_upload_ids:
+        upload_ids.append(legacy_upload_id)
+
+    if not upload_ids:
+        logger.info(
+            "[admin_api] checkout_session_uploads_paid session_id=%s local_session_id=%s marked_upload_count=0",
+            stripe_session_id,
+            _id_text(session_db_id),
+        )
+        return 0
+
+    marked_count = (
+        db.query(Upload)
+        .filter(Upload.id.in_(upload_ids))
+        .filter(Upload.paid.is_(False))
+        .update({Upload.paid: True}, synchronize_session=False)
+    )
+    logger.info(
+        "[admin_api] checkout_session_uploads_paid session_id=%s local_session_id=%s related_upload_count=%s marked_upload_count=%s",
+        stripe_session_id,
+        _id_text(session_db_id),
+        len(upload_ids),
+        marked_count,
+    )
+    return int(marked_count or 0)
 
 
 def _stripe_checkout_session_from_event(event_data: dict[str, Any]) -> dict[str, Any]:
