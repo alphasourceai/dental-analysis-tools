@@ -1,6 +1,6 @@
 import os
 import bcrypt
-from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from database import Base, engine, get_db
 
@@ -152,6 +152,18 @@ class StripeCheckoutSession(Base):
     livemode = Column(Boolean, nullable=False, server_default=text("false"))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+# Stripe Checkout Session to Upload link model
+class StripeCheckoutSessionUpload(Base):
+    __tablename__ = "stripe_checkout_session_uploads"
+    __table_args__ = (
+        UniqueConstraint("checkout_session_id", "upload_id", name="stripe_checkout_session_uploads_session_upload_key"),
+    )
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    checkout_session_id = Column(PGUUID(as_uuid=True), ForeignKey("stripe_checkout_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    upload_id = Column(PGUUID(as_uuid=True), ForeignKey("uploads.id"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 # Stripe payment audit/link model
 class StripePayment(Base):
