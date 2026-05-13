@@ -1,7 +1,7 @@
 import os
 import bcrypt
 from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, text
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from database import Base, engine, get_db
 
 # User model
@@ -286,6 +286,28 @@ class AdminAnalysisPhiAcknowledgment(Base):
     ip_address = Column(Text, nullable=True)
     user_agent = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+
+# Unified admin audit event model
+class AdminAuditEvent(Base):
+    __tablename__ = "admin_audit_events"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    occurred_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+    source = Column(Text, nullable=False)
+    event_type = Column(Text, nullable=False, index=True)
+    actor_admin_user_id = Column(Text, nullable=True, index=True)
+    actor_admin_email = Column(Text, nullable=True)
+    actor_display_name = Column(Text, nullable=True)
+    actor_role = Column(Text, nullable=True)
+    client_email = Column(Text, nullable=True)
+    target_type = Column(Text, nullable=True)
+    target_id = Column(Text, nullable=True)
+    ip_address = Column(Text, nullable=True)
+    user_agent = Column(Text, nullable=True)
+    device_summary = Column(Text, nullable=True)
+    location = Column(Text, nullable=True)
+    metadata_json = Column("metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 # Admin access mapping (Supabase Auth)
 class AdminUser(Base):

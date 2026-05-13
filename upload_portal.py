@@ -11,7 +11,7 @@ import requests
 from sqlalchemy import func
 
 from database import SessionLocal
-from models import UploadPortalFile, UploadPortalRequest, UploadPortalSession, User
+from models import AdminAuditEvent, UploadPortalFile, UploadPortalRequest, UploadPortalSession, User
 
 logger = logging.getLogger("upload_portal")
 
@@ -124,6 +124,76 @@ def _log_event(event: str, **fields: Any) -> None:
         sanitized[key] = value
     payload = " ".join(f"{key}={value}" for key, value in sanitized.items())
     logger.info("event=%s %s", event, payload)
+
+
+def _audit_device_summary(user_agent: Optional[str]) -> str:
+    if not user_agent:
+        return "Unknown"
+    lowered = user_agent.lower()
+    if "edg/" in lowered or "edge/" in lowered:
+        browser = "Edge"
+    elif "firefox/" in lowered:
+        browser = "Firefox"
+    elif "chrome/" in lowered or "crios/" in lowered:
+        browser = "Chrome"
+    elif "safari/" in lowered:
+        browser = "Safari"
+    else:
+        browser = "Unknown browser"
+
+    if "iphone" in lowered or "ipad" in lowered:
+        platform = "iOS"
+    elif "android" in lowered:
+        platform = "Android"
+    elif "mac os x" in lowered or "macintosh" in lowered:
+        platform = "macOS"
+    elif "windows" in lowered:
+        platform = "Windows"
+    elif "linux" in lowered:
+        platform = "Linux"
+    else:
+        platform = "Unknown device"
+
+    if browser == "Unknown browser" and platform == "Unknown device":
+        return "Unknown"
+    if browser == "Unknown browser":
+        return platform
+    if platform == "Unknown device":
+        return browser
+    return f"{browser} on {platform}"
+
+
+def _record_upload_portal_audit_event(
+    *,
+    event_type: str,
+    target_id: Optional[str],
+    client_email: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
+    request_ip: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> None:
+    db = SessionLocal()
+    try:
+        db.add(
+            AdminAuditEvent(
+                source="upload_portal",
+                event_type=event_type,
+                client_email=normalize_email(client_email or "") or None,
+                target_type="secure_upload_file",
+                target_id=target_id,
+                ip_address=request_ip,
+                user_agent=(user_agent or "")[:500] or None,
+                device_summary=_audit_device_summary(user_agent),
+                location="Unknown" if request_ip else None,
+                metadata_json=metadata or {},
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        _log_event("portal_audit_write_failed", event_type=event_type)
+    finally:
+        db.close()
 
 
 def _require_request_config() -> None:
@@ -580,7 +650,12 @@ def create_signed_upload_url(raw_session_token: str, original_filename: str,
     return {"upload_id": str(file_row.id), "signed_url": signed_url}
 
 
-def complete_upload(raw_session_token: str, upload_id: str) -> Dict[str, Any]:
+def complete_upload(
+    raw_session_token: str,
+    upload_id: str,
+    request_ip: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
     session_data = _load_session(raw_session_token)
     request_id = session_data["request_id"]
     session_id = session_data["session_id"]
@@ -610,6 +685,8 @@ def complete_upload(raw_session_token: str, upload_id: str) -> Dict[str, Any]:
         file_row.user_id = user.id
         file_row.user_email = normalized_email
         file_row.completed_at = _utcnow()
+        content_type = file_row.content_type
+        byte_size = file_row.byte_size
         db.commit()
     except PortalError:
         db.rollback()
@@ -622,6 +699,17 @@ def complete_upload(raw_session_token: str, upload_id: str) -> Dict[str, Any]:
         db.close()
 
     _log_event("portal_upload_completed", request_id=request_id, session_id=session_id)
+    _record_upload_portal_audit_event(
+        event_type="secure_upload.file_completed",
+        target_id=upload_id,
+        client_email=normalized_email,
+        metadata={
+            "contentType": content_type,
+            "byteSize": byte_size,
+        },
+        request_ip=request_ip,
+        user_agent=user_agent,
+    )
     return {"upload_id": upload_id, "status": "completed"}
 
 
