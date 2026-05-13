@@ -151,6 +151,8 @@ class StripeCheckoutSession(Base):
     amount_total = Column(Integer, nullable=True)
     currency = Column(String(10), nullable=True)
     checkout_url = Column(Text, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    expired_at = Column(DateTime(timezone=True), nullable=True, index=True)
     success_url = Column(Text, nullable=True)
     cancel_url = Column(Text, nullable=True)
     livemode = Column(Boolean, nullable=False, server_default=text("false"))

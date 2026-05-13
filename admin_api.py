@@ -793,12 +793,12 @@ def list_admin_clients(
                 for session in checkout_session_rows:
                     billing_email = (_clean_text(session.client_email) or "").lower()
                     summary = billing_summaries.setdefault(billing_email, _empty_billing_summary())
-                    payment_status = (_clean_text(session.payment_status) or "").lower()
-                    status = (_clean_text(session.status) or "").lower()
                     summary["checkoutSessionCount"] += 1
-                    if payment_status == "paid":
+                    if _checkout_session_is_paid_or_complete(session):
                         summary["paidCheckoutSessionCount"] += 1
-                    if payment_status != "paid" or status == "open":
+                    if _checkout_session_is_expired(session):
+                        summary["expiredCheckoutSessionCount"] += 1
+                    if _checkout_session_is_open_or_unpaid(session):
                         summary["openCheckoutSessionCount"] += 1
                     if summary["latestPaymentStatus"] is None:
                         summary["latestPaymentStatus"] = _clean_text(session.payment_status)
@@ -3812,6 +3812,7 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
         session_data = _stripe_object_to_dict(checkout_session)
         checkout_session_id = _clean_text(session_data.get("id"))
         checkout_url = _clean_text(session_data.get("url"))
+        expires_at = _stripe_timestamp_to_datetime(session_data.get("expires_at"))
         if not checkout_session_id or not checkout_url:
             logger.error("[admin_api] Stripe checkout session missing id or url.")
             db.rollback()
@@ -3831,6 +3832,7 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
             amount_total=_optional_int(session_data.get("amount_total")) or amount,
             currency=_clean_text(session_data.get("currency")) or currency,
             checkout_url=checkout_url,
+            expires_at=expires_at,
             success_url=success_url,
             cancel_url=cancel_url,
             livemode=bool(session_data.get("livemode", livemode)),
@@ -3861,6 +3863,8 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
                 "url": checkout_url,
                 "status": _clean_text(session_data.get("status")) or "open",
                 "paymentStatus": _clean_text(session_data.get("payment_status")) or "unpaid",
+                "expiresAt": _iso_datetime(expires_at),
+                "expiredAt": None,
                 "uploadId": _id_text(upload_id),
                 "clientSubmissionId": _id_text(client_submission_id),
                 "uploadIds": [_id_text(selected_upload_id) for selected_upload_id in upload_ids],
@@ -3885,6 +3889,88 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
             purpose,
         )
         return _error_response(500, "checkout_session_failed", "Unable to create checkout session.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/billing/checkout-sessions/{session_id}/expire")
+async def expire_admin_checkout_session(request: Request, session_id: str) -> JSONResponse:
+    _, _, error_response = _require_admin_permission(request, PERMISSION_BILLING_WRITE)
+    if error_response:
+        return error_response
+
+    session_uuid, validation_error = _required_uuid(session_id, "session_id")
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        local_session = db.query(StripeCheckoutSession).filter(StripeCheckoutSession.id == session_uuid).first()
+        if not local_session:
+            return _error_response(404, "checkout_session_not_found", "Checkout session was not found.")
+
+        stripe_checkout_session_id = _clean_text(getattr(local_session, "stripe_checkout_session_id", None))
+        if not stripe_checkout_session_id:
+            return _error_response(
+                409,
+                "checkout_session_not_expirable",
+                "Checkout session cannot be expired.",
+            )
+
+        if _checkout_session_is_paid_or_complete(local_session):
+            return _error_response(
+                409,
+                "checkout_session_already_paid",
+                "Paid checkout sessions cannot be expired.",
+            )
+
+        if _checkout_session_is_expired(local_session):
+            return _error_response(
+                409,
+                "checkout_session_already_expired",
+                "Checkout session is already expired.",
+            )
+
+        if not _checkout_session_is_open_or_unpaid(local_session):
+            return _error_response(
+                409,
+                "checkout_session_not_expirable",
+                "Only open unpaid checkout sessions can be expired.",
+            )
+
+        stripe_secret_key = os.getenv("STRIPE_SECRET_KEY", "").strip()
+        if not stripe_secret_key:
+            logger.error("[admin_api] Stripe secret key is not configured.")
+            return _error_response(503, "stripe_not_configured", "Stripe is not configured.")
+
+        expired_session = stripe.checkout.Session.expire(
+            stripe_checkout_session_id,
+            api_key=stripe_secret_key,
+        )
+        session_data = _stripe_object_to_dict(expired_session)
+        now = datetime.now(timezone.utc)
+        _apply_checkout_session_data(
+            local_session,
+            session_data,
+            now,
+            expired_at=_stripe_timestamp_to_datetime(session_data.get("expired_at")) or now,
+        )
+        db.commit()
+        db.refresh(local_session)
+        logger.info(
+            "[admin_api] Stripe checkout session expired manually session_id=%s local_session_id=%s",
+            stripe_checkout_session_id,
+            session_uuid,
+        )
+        return JSONResponse({"ok": True, "checkoutSession": _checkout_session_payload(local_session)})
+    except stripe.error.StripeError:
+        db.rollback()
+        logger.exception("[admin_api] Stripe checkout session expire failed local_session_id=%s", session_uuid)
+        return _error_response(502, "stripe_checkout_expire_failed", "Unable to expire checkout session.")
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] checkout session expire failed local_session_id=%s", session_uuid)
+        return _error_response(500, "checkout_session_expire_failed", "Unable to expire checkout session.")
     finally:
         db.close()
 
@@ -3934,13 +4020,17 @@ def get_admin_billing_client(
         paid_sessions = [
             session
             for session in checkout_sessions
-            if (_clean_text(session.payment_status) or "").lower() == "paid"
+            if _checkout_session_is_paid_or_complete(session)
+        ]
+        expired_sessions = [
+            session
+            for session in checkout_sessions
+            if _checkout_session_is_expired(session)
         ]
         open_sessions = [
             session
             for session in checkout_sessions
-            if (_clean_text(session.payment_status) or "").lower() != "paid"
-            or (_clean_text(session.status) or "").lower() == "open"
+            if _checkout_session_is_open_or_unpaid(session)
         ]
         latest_session = checkout_sessions[0] if checkout_sessions else None
         latest_paid_session = paid_sessions[0] if paid_sessions else None
@@ -3960,6 +4050,7 @@ def get_admin_billing_client(
                     "checkoutSessionCount": len(checkout_sessions),
                     "paidCheckoutSessionCount": len(paid_sessions),
                     "openCheckoutSessionCount": len(open_sessions),
+                    "expiredCheckoutSessionCount": len(expired_sessions),
                     "manualOverrideCount": len(billing_overrides),
                     "latestPaymentStatus": _clean_text(
                         getattr(latest_session, "payment_status", None)
@@ -4007,8 +4098,10 @@ def get_admin_billing_overview(
         return error_response
 
     normalized_status = (status or "open").strip().lower()
-    if normalized_status not in {"open", "paid", "all"}:
-        return _error_response(400, "invalid_status", "status must be open, paid, or all.")
+    if normalized_status == "unpaid":
+        normalized_status = "open"
+    if normalized_status not in {"open", "paid", "expired", "all"}:
+        return _error_response(400, "invalid_status", "status must be open, unpaid, paid, expired, or all.")
 
     safe_limit = min(limit, 100)
     normalized_search = (search or "").strip()
@@ -4028,14 +4121,9 @@ def get_admin_billing_overview(
             override_query = override_query.filter(BillingOverride.client_email.ilike(search_like))
 
         checkout_session_count = checkout_query.count()
-        paid_checkout_session_count = checkout_query.filter(
-            func.lower(StripeCheckoutSession.payment_status) == "paid"
-        ).count()
-        open_checkout_filter = or_(
-            StripeCheckoutSession.payment_status.is_(None),
-            func.lower(StripeCheckoutSession.payment_status) != "paid",
-            func.lower(StripeCheckoutSession.status) == "open",
-        )
+        paid_checkout_session_count = checkout_query.filter(_checkout_paid_filter()).count()
+        expired_checkout_session_count = checkout_query.filter(_checkout_expired_filter()).count()
+        open_checkout_filter = _checkout_open_filter()
         open_checkout_session_count = checkout_query.filter(open_checkout_filter).count()
         manual_override_count = override_query.count()
         needs_review_event_count = (
@@ -4046,9 +4134,9 @@ def get_admin_billing_overview(
 
         filtered_checkout_query = checkout_query
         if normalized_status == "paid":
-            filtered_checkout_query = filtered_checkout_query.filter(
-                func.lower(StripeCheckoutSession.payment_status) == "paid"
-            )
+            filtered_checkout_query = filtered_checkout_query.filter(_checkout_paid_filter())
+        elif normalized_status == "expired":
+            filtered_checkout_query = filtered_checkout_query.filter(_checkout_expired_filter())
         elif normalized_status == "open":
             filtered_checkout_query = filtered_checkout_query.filter(open_checkout_filter)
 
@@ -4076,6 +4164,7 @@ def get_admin_billing_overview(
                     "checkoutSessionCount": checkout_session_count,
                     "paidCheckoutSessionCount": paid_checkout_session_count,
                     "openCheckoutSessionCount": open_checkout_session_count,
+                    "expiredCheckoutSessionCount": expired_checkout_session_count,
                     "manualOverrideCount": manual_override_count,
                     "needsReviewEventCount": needs_review_event_count,
                 },
@@ -4251,13 +4340,13 @@ def _record_stripe_event(event: Any, payload: bytes) -> JSONResponse:
 
 def _process_stripe_event(db: Any, event_data: dict[str, Any], now: datetime) -> str:
     event_type = _clean_text(event_data.get("type")) or "unknown"
-    if event_type != "checkout.session.completed":
+    if event_type not in {"checkout.session.completed", "checkout.session.expired"}:
         return "processed"
 
     session_data = _stripe_checkout_session_from_event(event_data)
     checkout_session_id = _clean_text(session_data.get("id"))
     if not checkout_session_id:
-        logger.warning("[admin_api] Stripe checkout.session.completed missing session id.")
+        logger.warning("[admin_api] Stripe %s missing session id.", event_type)
         return "needs_review"
 
     local_session = (
@@ -4267,30 +4356,28 @@ def _process_stripe_event(db: Any, event_data: dict[str, Any], now: datetime) ->
     )
     if not local_session:
         logger.warning(
-            "[admin_api] Stripe checkout session not found for completed event session_id=%s",
+            "[admin_api] Stripe checkout session not found for event_type=%s session_id=%s",
+            event_type,
             checkout_session_id,
         )
         return "needs_review"
 
-    local_session.status = _clean_text(session_data.get("status")) or local_session.status
-    local_session.payment_status = (
-        _clean_text(session_data.get("payment_status")) or local_session.payment_status
+    _apply_checkout_session_data(
+        local_session,
+        session_data,
+        now,
+        event_livemode=event_data.get("livemode"),
+        expired_at=(
+            _stripe_timestamp_to_datetime(event_data.get("created")) or now
+            if event_type == "checkout.session.expired"
+            else None
+        ),
     )
-    amount_total = _optional_int(session_data.get("amount_total"))
-    if amount_total is not None:
-        local_session.amount_total = amount_total
-    local_session.currency = _clean_text(session_data.get("currency")) or local_session.currency
-    local_session.stripe_customer_id = (
-        _stripe_id(session_data.get("customer")) or local_session.stripe_customer_id
-    )
-    session_livemode = session_data.get("livemode", event_data.get("livemode"))
-    if session_livemode is not None:
-        local_session.livemode = bool(session_livemode)
-    local_session.updated_at = now
-    if _checkout_session_is_paid_or_complete(local_session):
+    if event_type == "checkout.session.completed" and _checkout_session_is_paid_or_complete(local_session):
         _mark_checkout_session_uploads_paid(db, local_session)
     logger.info(
-        "[admin_api] Stripe checkout session completed session_id=%s status=%s payment_status=%s",
+        "[admin_api] Stripe checkout session event processed event_type=%s session_id=%s status=%s payment_status=%s",
+        event_type,
         checkout_session_id,
         local_session.status,
         local_session.payment_status,
@@ -4302,6 +4389,47 @@ def _checkout_session_is_paid_or_complete(session: StripeCheckoutSession) -> boo
     payment_status = (_clean_text(getattr(session, "payment_status", None)) or "").lower()
     status = (_clean_text(getattr(session, "status", None)) or "").lower()
     return payment_status == "paid" or status in {"complete", "completed"}
+
+
+def _checkout_session_is_expired(session: StripeCheckoutSession) -> bool:
+    status = (_clean_text(getattr(session, "status", None)) or "").lower()
+    return status == "expired" or bool(getattr(session, "expired_at", None))
+
+
+def _checkout_session_is_open_or_unpaid(session: StripeCheckoutSession) -> bool:
+    return not _checkout_session_is_paid_or_complete(session) and not _checkout_session_is_expired(session)
+
+
+def _apply_checkout_session_data(
+    local_session: StripeCheckoutSession,
+    session_data: dict[str, Any],
+    now: datetime,
+    *,
+    event_livemode: object = None,
+    expired_at: Optional[datetime] = None,
+) -> None:
+    local_session.status = _clean_text(session_data.get("status")) or local_session.status
+    local_session.payment_status = (
+        _clean_text(session_data.get("payment_status")) or local_session.payment_status
+    )
+    amount_total = _optional_int(session_data.get("amount_total"))
+    if amount_total is not None:
+        local_session.amount_total = amount_total
+    local_session.currency = _clean_text(session_data.get("currency")) or local_session.currency
+    local_session.stripe_customer_id = (
+        _stripe_id(session_data.get("customer")) or local_session.stripe_customer_id
+    )
+    session_livemode = session_data.get("livemode", event_livemode)
+    if session_livemode is not None:
+        local_session.livemode = bool(session_livemode)
+    expires_at = _stripe_timestamp_to_datetime(session_data.get("expires_at"))
+    if expires_at is not None:
+        local_session.expires_at = expires_at
+    if expired_at is not None:
+        local_session.expired_at = expired_at
+    elif _checkout_session_is_expired(local_session) and not getattr(local_session, "expired_at", None):
+        local_session.expired_at = now
+    local_session.updated_at = now
 
 
 def _mark_checkout_session_uploads_paid(db: Any, session: StripeCheckoutSession) -> int:
@@ -6159,11 +6287,36 @@ def _filter_uploads_by_void_status(query: Any, upload_status: str) -> Any:
     return query.filter(Upload.voided_at.is_(None))
 
 
-def _paid_or_complete_checkout_filter() -> Any:
+def _checkout_paid_filter() -> Any:
     return or_(
         func.lower(StripeCheckoutSession.payment_status) == "paid",
         func.lower(StripeCheckoutSession.status).in_(["complete", "completed"]),
     )
+
+
+def _checkout_expired_filter() -> Any:
+    return or_(
+        func.lower(StripeCheckoutSession.status) == "expired",
+        StripeCheckoutSession.expired_at.isnot(None),
+    )
+
+
+def _checkout_open_filter() -> Any:
+    return and_(
+        or_(
+            StripeCheckoutSession.payment_status.is_(None),
+            func.lower(StripeCheckoutSession.payment_status) != "paid",
+        ),
+        or_(
+            StripeCheckoutSession.status.is_(None),
+            ~func.lower(StripeCheckoutSession.status).in_(["complete", "completed", "expired"]),
+        ),
+        StripeCheckoutSession.expired_at.is_(None),
+    )
+
+
+def _paid_or_complete_checkout_filter() -> Any:
+    return _checkout_paid_filter()
 
 
 def _upload_has_paid_checkout_session(db: Any, upload_id: UUID) -> bool:
@@ -6280,6 +6433,8 @@ def _checkout_session_payload(
         "amountTotal": _optional_int(getattr(session, "amount_total", None)),
         "currency": _clean_text(getattr(session, "currency", None)),
         "checkoutUrl": _clean_text(getattr(session, "checkout_url", None)),
+        "expiresAt": _iso_datetime(getattr(session, "expires_at", None)),
+        "expiredAt": _iso_datetime(getattr(session, "expired_at", None)),
         "livemode": bool(getattr(session, "livemode", False)),
         "uploadId": legacy_upload_id,
         "uploadIds": upload_ids,
@@ -6540,6 +6695,10 @@ def _stripe_object_to_dict(value: Any) -> dict[str, Any]:
             "payment_status",
             "amount_total",
             "currency",
+            "customer",
+            "expires_at",
+            "expired_at",
+            "created",
         )
         if hasattr(value, key)
     }
@@ -6848,6 +7007,21 @@ def _optional_int(value: object) -> Optional[int]:
     return None
 
 
+def _stripe_timestamp_to_datetime(value: object) -> Optional[datetime]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if timestamp <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(timestamp, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _admin_access_payload_for_user(
     user: dict[str, Any],
     admin_user: Optional[AdminUser] = None,
@@ -7036,6 +7210,7 @@ def _empty_billing_summary() -> dict[str, Any]:
         "checkoutSessionCount": 0,
         "paidCheckoutSessionCount": 0,
         "openCheckoutSessionCount": 0,
+        "expiredCheckoutSessionCount": 0,
         "manualOverrideCount": 0,
         "latestPaymentStatus": None,
     }
