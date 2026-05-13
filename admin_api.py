@@ -3963,6 +3963,20 @@ async def expire_admin_checkout_session(request: Request, session_id: str) -> JS
             session_uuid,
         )
         return JSONResponse({"ok": True, "checkoutSession": _checkout_session_payload(local_session)})
+    except stripe.error.InvalidRequestError as exc:
+        db.rollback()
+        if _stripe_checkout_expire_error_is_not_expirable(exc):
+            logger.warning(
+                "[admin_api] Stripe checkout session expire rejected local_session_id=%s code=checkout_session_not_expirable",
+                session_uuid,
+            )
+            return _error_response(
+                409,
+                "checkout_session_not_expirable",
+                "This checkout session cannot be expired because it is no longer open.",
+            )
+        logger.exception("[admin_api] Stripe checkout session expire failed local_session_id=%s", session_uuid)
+        return _error_response(502, "stripe_checkout_expire_failed", "Unable to expire checkout session.")
     except stripe.error.StripeError:
         db.rollback()
         logger.exception("[admin_api] Stripe checkout session expire failed local_session_id=%s", session_uuid)
@@ -4398,6 +4412,39 @@ def _checkout_session_is_expired(session: StripeCheckoutSession) -> bool:
 
 def _checkout_session_is_open_or_unpaid(session: StripeCheckoutSession) -> bool:
     return not _checkout_session_is_paid_or_complete(session) and not _checkout_session_is_expired(session)
+
+
+def _stripe_checkout_expire_error_is_not_expirable(error: Exception) -> bool:
+    text_parts = [
+        str(error),
+        _clean_text(getattr(error, "user_message", None)) or "",
+        _clean_text(getattr(error, "code", None)) or "",
+        _clean_text(getattr(error, "param", None)) or "",
+    ]
+    json_body = getattr(error, "json_body", None)
+    if isinstance(json_body, dict):
+        error_body = json_body.get("error")
+        if isinstance(error_body, dict):
+            text_parts.extend(
+                [
+                    _clean_text(error_body.get("message")) or "",
+                    _clean_text(error_body.get("code")) or "",
+                    _clean_text(error_body.get("param")) or "",
+                ]
+            )
+
+    error_text = " ".join(part for part in text_parts if part).lower()
+    if not error_text:
+        return False
+
+    return (
+        ("expire" in error_text or "expired" in error_text)
+        and ("open" in error_text or "not_expirable" in error_text or "not expirable" in error_text)
+        and any(
+            marker in error_text
+            for marker in ("complete", "completed", "paid", "expired", "not open", "no longer open", "status")
+        )
+    )
 
 
 def _apply_checkout_session_data(
