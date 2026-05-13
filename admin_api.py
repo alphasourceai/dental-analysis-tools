@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import json
 import mimetypes
@@ -9,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, unquote, urlparse
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import requests
 import stripe
@@ -39,6 +42,7 @@ from models import (
     AdminAnalysisJob,
     AdminAnalysisJobFile,
     AdminAnalysisPhiAcknowledgment,
+    AdminAuditEvent,
     AdminUser,
     BillingOverride,
     ClientSubmission,
@@ -94,6 +98,30 @@ ADMIN_ANALYSIS_PHI_ACK_TEXT = (
     "I confirm this file has been reviewed and is approved/sanitized for AI-assisted analysis, "
     "does not contain unsanitized PHI, and is appropriate to process through the Document Analysis workflow."
 )
+ADMIN_AUDIT_METADATA_MAX_STRING = 500
+ADMIN_AUDIT_METADATA_MAX_BYTES = 12000
+ADMIN_AUDIT_EXPORT_MAX_ROWS = 10000
+try:
+    ADMIN_AUDIT_MOUNTAIN_TZ = ZoneInfo("America/Denver")
+except Exception:
+    ADMIN_AUDIT_MOUNTAIN_TZ = timezone(timedelta(hours=-7))
+ADMIN_AUDIT_METADATA_DENY_KEYS = {
+    "apikey",
+    "checkouturl",
+    "documenttext",
+    "extractedtext",
+    "filename",
+    "gcsobject",
+    "gcspath",
+    "gspath",
+    "objectname",
+    "originalfilename",
+    "password",
+    "secret",
+    "signedurl",
+    "token",
+    "url",
+}
 PERMISSION_CLIENTS_READ = "clients_read"
 PERMISSION_CLIENTS_WRITE = "clients_write"
 PERMISSION_UPLOADS_WRITE = "uploads_write"
@@ -107,6 +135,7 @@ PERMISSION_SECURE_UPLOADS_READ = "secure_uploads_read"
 PERMISSION_SECURE_UPLOADS_WRITE = "secure_uploads_write"
 PERMISSION_ADMIN_MANAGEMENT_READ = "admin_management_read"
 PERMISSION_ADMIN_MANAGEMENT_WRITE = "admin_management_write"
+PERMISSION_AUDIT_READ = "audit_read"
 ADMIN_API_DASHBOARD_ROLES = {"super_admin", "admin", "analyst", "billing_admin", "viewer"}
 ADMIN_API_ALL_PERMISSIONS = {
     PERMISSION_CLIENTS_READ,
@@ -122,10 +151,11 @@ ADMIN_API_ALL_PERMISSIONS = {
     PERMISSION_SECURE_UPLOADS_WRITE,
     PERMISSION_ADMIN_MANAGEMENT_READ,
     PERMISSION_ADMIN_MANAGEMENT_WRITE,
+    PERMISSION_AUDIT_READ,
 }
 ADMIN_ROLE_PERMISSION_MAP = {
     "super_admin": ADMIN_API_ALL_PERMISSIONS,
-    "admin": ADMIN_API_ALL_PERMISSIONS - {PERMISSION_ADMIN_MANAGEMENT_WRITE},
+    "admin": ADMIN_API_ALL_PERMISSIONS - {PERMISSION_ADMIN_MANAGEMENT_WRITE, PERMISSION_AUDIT_READ},
     "analyst": {
         PERMISSION_CLIENTS_READ,
         PERMISSION_ANALYSIS_READ,
@@ -380,7 +410,12 @@ async def upload_portal_complete(request: Request) -> JSONResponse:
     if parse_error:
         return parse_error
     try:
-        result = complete_upload(_upload_portal_bearer_token(request), body.get("upload_id", ""))
+        result = complete_upload(
+            _upload_portal_bearer_token(request),
+            body.get("upload_id", ""),
+            request_ip=_request_client_ip(request),
+            user_agent=_request_user_agent(request),
+        )
     except PortalError as exc:
         return _upload_portal_error_response(request, exc)
     except Exception:
@@ -416,6 +451,144 @@ def get_admin_me(request: Request) -> JSONResponse:
     )
 
 
+@app.get("/api/admin/audit-events")
+def list_admin_audit_events(
+    request: Request,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    eventType: Optional[str] = None,
+    clientEmail: Optional[str] = None,
+    actorEmail: Optional[str] = None,
+    targetType: Optional[str] = None,
+    limit: int = Query(50, ge=1),
+    offset: int = Query(0, ge=0),
+) -> JSONResponse:
+    _, _, error_response = _require_admin_permission(request, PERMISSION_AUDIT_READ)
+    if error_response:
+        return error_response
+
+    start_dt, end_dt, validation_error = _audit_date_range(startDate, endDate)
+    if validation_error:
+        return validation_error
+
+    safe_limit = min(limit, 100)
+    db = SessionLocal()
+    try:
+        query = _audit_events_filtered_query(
+            db,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            event_type=eventType,
+            client_email=clientEmail,
+            actor_email=actorEmail,
+            target_type=targetType,
+        )
+        rows = (
+            query.order_by(AdminAuditEvent.occurred_at.desc(), AdminAuditEvent.created_at.desc())
+            .offset(offset)
+            .limit(safe_limit + 1)
+            .all()
+        )
+        has_more = len(rows) > safe_limit
+        rows = rows[:safe_limit]
+        return JSONResponse(
+            {
+                "ok": True,
+                "items": [_audit_event_payload(row) for row in rows],
+                "count": len(rows),
+                "hasMore": has_more,
+            }
+        )
+    except Exception:
+        logger.exception("[admin_audit] audit event lookup failed.")
+        return _error_response(500, "audit_events_lookup_failed", "Unable to load audit events.")
+    finally:
+        db.close()
+
+
+@app.get("/api/admin/audit-events/export.csv")
+def export_admin_audit_events_csv(
+    request: Request,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    eventType: Optional[str] = None,
+    clientEmail: Optional[str] = None,
+    actorEmail: Optional[str] = None,
+    targetType: Optional[str] = None,
+) -> Response:
+    _, _, error_response = _require_admin_permission(request, PERMISSION_AUDIT_READ)
+    if error_response:
+        return error_response
+
+    start_dt, end_dt, validation_error = _audit_date_range(startDate, endDate)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        rows = (
+            _audit_events_filtered_query(
+                db,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                event_type=eventType,
+                client_email=clientEmail,
+                actor_email=actorEmail,
+                target_type=targetType,
+            )
+            .order_by(AdminAuditEvent.occurred_at.desc(), AdminAuditEvent.created_at.desc())
+            .limit(ADMIN_AUDIT_EXPORT_MAX_ROWS)
+            .all()
+        )
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [
+                "occurred_at_utc",
+                "occurred_at_mst",
+                "source",
+                "event_type",
+                "actor_email",
+                "actor_role",
+                "client_email",
+                "target_type",
+                "target_id",
+                "ip_address",
+                "device_summary",
+                "location",
+                "metadata_json",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    _audit_csv_cell(_iso_datetime(getattr(row, "occurred_at", None))),
+                    _audit_csv_cell(_audit_mountain_datetime(getattr(row, "occurred_at", None))),
+                    _audit_csv_cell(getattr(row, "source", None)),
+                    _audit_csv_cell(getattr(row, "event_type", None)),
+                    _audit_csv_cell(getattr(row, "actor_admin_email", None)),
+                    _audit_csv_cell(getattr(row, "actor_role", None)),
+                    _audit_csv_cell(getattr(row, "client_email", None)),
+                    _audit_csv_cell(getattr(row, "target_type", None)),
+                    _audit_csv_cell(getattr(row, "target_id", None)),
+                    _audit_csv_cell(getattr(row, "ip_address", None)),
+                    _audit_csv_cell(getattr(row, "device_summary", None)),
+                    _audit_csv_cell(getattr(row, "location", None)),
+                    _audit_csv_cell(_audit_metadata_json(row)),
+                ]
+            )
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="admin-audit-events.csv"'},
+        )
+    except Exception:
+        logger.exception("[admin_audit] audit event CSV export failed.")
+        return _error_response(500, "audit_events_export_failed", "Unable to export audit events.")
+    finally:
+        db.close()
+
+
 @app.get("/api/admin/admin-users")
 def list_admin_users(request: Request) -> JSONResponse:
     _, _, error_response = _require_admin_permission(request, PERMISSION_ADMIN_MANAGEMENT_READ)
@@ -440,7 +613,7 @@ def list_admin_users(request: Request) -> JSONResponse:
 
 @app.post("/api/admin/admin-users")
 async def create_admin_user_access(request: Request) -> JSONResponse:
-    current_user, _, error_response = _require_admin_permission(request, PERMISSION_ADMIN_MANAGEMENT_WRITE)
+    current_user, current_admin_access, error_response = _require_admin_permission(request, PERMISSION_ADMIN_MANAGEMENT_WRITE)
     if error_response:
         return error_response
 
@@ -516,6 +689,21 @@ async def create_admin_user_access(request: Request) -> JSONResponse:
         db.add(admin_user)
         db.commit()
         db.refresh(admin_user)
+        _record_admin_audit_event(
+            db,
+            request,
+            "admin_access.created",
+            target_type="admin_user",
+            target_id=target_user_id,
+            metadata={
+                "targetEmail": email,
+                "role": role,
+                "existingUser": bool(auth_user.get("existing")),
+                "inviteSent": bool(auth_user.get("invited")),
+            },
+            admin_auth_user=current_user,
+            admin_access=current_admin_access,
+        )
         return JSONResponse(
             {
                 "ok": True,
@@ -543,7 +731,7 @@ async def create_admin_user_access(request: Request) -> JSONResponse:
 
 @app.patch("/api/admin/admin-users/{user_id}")
 async def update_admin_user_access(request: Request, user_id: str) -> JSONResponse:
-    current_user, _, error_response = _require_admin_permission(request, PERMISSION_ADMIN_MANAGEMENT_WRITE)
+    current_user, current_admin_access, error_response = _require_admin_permission(request, PERMISSION_ADMIN_MANAGEMENT_WRITE)
     if error_response:
         return error_response
 
@@ -595,6 +783,7 @@ async def update_admin_user_access(request: Request, user_id: str) -> JSONRespon
         is_self_update = current_user_id == target_user_id
         current_role = (_clean_text(getattr(admin_user, "role", None)) or "").lower()
         current_status = (_clean_text(getattr(admin_user, "status", None)) or "active").lower()
+        previous_display_name = _clean_text(getattr(admin_user, "display_name", None))
         currently_active_super_admin = (
             current_role == "super_admin"
             and current_status == "active"
@@ -630,6 +819,30 @@ async def update_admin_user_access(request: Request, user_id: str) -> JSONRespon
 
         db.commit()
         db.refresh(admin_user)
+        audit_metadata: dict[str, object] = {"changedFields": []}
+        changed_fields = audit_metadata["changedFields"]
+        if isinstance(changed_fields, list):
+            if has_role_update:
+                changed_fields.append("role")
+                audit_metadata["previousRole"] = current_role
+                audit_metadata["newRole"] = _clean_text(getattr(admin_user, "role", None))
+            if has_status_update:
+                changed_fields.append("status")
+                audit_metadata["previousStatus"] = current_status
+                audit_metadata["newStatus"] = _clean_text(getattr(admin_user, "status", None))
+            if has_name_update:
+                changed_fields.append("name")
+                audit_metadata["nameChanged"] = previous_display_name != _clean_text(getattr(admin_user, "display_name", None))
+        _record_admin_audit_event(
+            db,
+            request,
+            "admin_access.updated",
+            target_type="admin_user",
+            target_id=target_user_id,
+            metadata=audit_metadata,
+            admin_auth_user=current_user,
+            admin_access=current_admin_access,
+        )
         return JSONResponse(
             {
                 "ok": True,
@@ -882,7 +1095,7 @@ def list_admin_clients(
 
 @app.post("/api/admin/clients")
 async def create_admin_client(request: Request) -> JSONResponse:
-    admin_auth_user, _, error_response = _require_admin_permission(request, PERMISSION_CLIENTS_WRITE)
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_CLIENTS_WRITE)
     if error_response:
         return error_response
 
@@ -930,6 +1143,20 @@ async def create_admin_client(request: Request) -> JSONResponse:
             "[admin_api] manual client created client_email=%s admin_user_id=%s",
             client_email,
             str(admin_auth_user.get("id") or ""),
+        )
+        _record_admin_audit_event(
+            db,
+            request,
+            "client.created",
+            target_type="client",
+            target_id=getattr(user, "id", None),
+            client_email=client_email,
+            metadata={
+                "officeName": office_name,
+                "orgType": org_type,
+            },
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
         )
         return JSONResponse(
             {
@@ -1013,6 +1240,21 @@ async def void_admin_upload(request: Request, upload_id: str) -> JSONResponse:
             "[admin_api] upload voided upload_id=%s admin_user_id=%s",
             upload_uuid,
             _clean_text((admin_auth_user or {}).get("id")),
+        )
+        _record_admin_audit_event(
+            db,
+            request,
+            "upload.voided",
+            target_type="upload",
+            target_id=upload_uuid,
+            client_email=_clean_text(getattr(upload, "user_email", None)),
+            metadata={
+                "reason": reason,
+                "paid": False,
+                "toolName": _clean_text(getattr(upload, "tool_name", None)),
+            },
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
         )
         return JSONResponse({"ok": True, "upload": _upload_payload(upload)})
     except Exception:
@@ -3240,7 +3482,7 @@ def get_admin_pdf_generator_client(
 
 @app.post("/api/admin/pdf-generator/generate")
 async def generate_admin_pdf_report(request: Request) -> JSONResponse:
-    _, _, error_response = _require_admin_permission(request, PERMISSION_PDF_GENERATE)
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_PDF_GENERATE)
     if error_response:
         return error_response
 
@@ -3368,6 +3610,17 @@ async def generate_admin_pdf_report(request: Request) -> JSONResponse:
                     warnings.append(warning)
 
         logger.info("[admin_pdf_generator] generated upload_id=%s version=%s", upload_id, next_version)
+        _record_admin_audit_event(
+            db,
+            request,
+            "pdf_report.generated",
+            target_type="upload",
+            target_id=upload_id,
+            client_email=client_email,
+            metadata={"pdfVersion": next_version},
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
+        )
         return JSONResponse(
             {
                 "ok": True,
@@ -3463,7 +3716,7 @@ def list_admin_secure_upload_files(
 
 @app.post("/api/admin/secure-uploads/files/{file_id}/download-url")
 def create_admin_secure_upload_download_url(request: Request, file_id: str) -> JSONResponse:
-    admin_auth_user, _, error_response = _require_admin_permission(request, PERMISSION_SECURE_UPLOADS_READ)
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_SECURE_UPLOADS_READ)
     if error_response:
         return error_response
 
@@ -3618,6 +3871,20 @@ def create_admin_secure_upload_download_url(request: Request, file_id: str) -> J
         secure_upload_file_id,
         expires_in_seconds,
     )
+    _record_admin_audit_event(
+        None,
+        request,
+        "secure_upload.download_url_created",
+        target_type="secure_upload_file",
+        target_id=secure_upload_file_id,
+        client_email=_clean_text(getattr(upload_file, "user_email", None)),
+        metadata={
+            "contentType": content_type,
+            "byteSize": getattr(upload_file, "byte_size", None),
+        },
+        admin_auth_user=admin_auth_user,
+        admin_access=admin_access,
+    )
     return JSONResponse(
         {
             "ok": True,
@@ -3632,7 +3899,7 @@ def create_admin_secure_upload_download_url(request: Request, file_id: str) -> J
 
 @app.post("/api/admin/secure-uploads/requests")
 async def create_admin_secure_upload_request(request: Request) -> JSONResponse:
-    _, _, error_response = _require_admin_permission(request, PERMISSION_SECURE_UPLOADS_WRITE)
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_SECURE_UPLOADS_WRITE)
     if error_response:
         return error_response
 
@@ -3698,6 +3965,17 @@ async def create_admin_secure_upload_request(request: Request) -> JSONResponse:
             "Unable to create secure upload request.",
         )
 
+    _record_admin_audit_event(
+        None,
+        request,
+        "secure_upload.request_sent",
+        target_type="secure_upload_request",
+        target_id=_clean_text(result.get("request_id")),
+        client_email=client_email,
+        metadata={"expiresAt": _clean_text(result.get("expires_at"))},
+        admin_auth_user=admin_auth_user,
+        admin_access=admin_access,
+    )
     return JSONResponse(
         {
             "ok": True,
@@ -3714,7 +3992,7 @@ async def create_admin_secure_upload_request(request: Request) -> JSONResponse:
 
 @app.post("/api/admin/billing/checkout-sessions")
 async def create_admin_checkout_session(request: Request) -> JSONResponse:
-    admin_user, _, error_response = _require_admin_permission(request, PERMISSION_BILLING_WRITE)
+    admin_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_BILLING_WRITE)
     if error_response:
         return error_response
 
@@ -3856,6 +4134,23 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
             currency,
             str(admin_user.get("id") or ""),
         )
+        _record_admin_audit_event(
+            db,
+            request,
+            "checkout_session.created",
+            target_type="checkout_session",
+            target_id=getattr(local_session, "id", None),
+            client_email=client_email,
+            metadata={
+                "amount": amount,
+                "currency": currency,
+                "purpose": purpose,
+                "uploadCount": len(upload_ids),
+                "expiresAt": _iso_datetime(expires_at),
+            },
+            admin_auth_user=admin_user,
+            admin_access=admin_access,
+        )
         return JSONResponse(
             {
                 "ok": True,
@@ -3895,7 +4190,7 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
 
 @app.post("/api/admin/billing/checkout-sessions/{session_id}/expire")
 async def expire_admin_checkout_session(request: Request, session_id: str) -> JSONResponse:
-    _, _, error_response = _require_admin_permission(request, PERMISSION_BILLING_WRITE)
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_BILLING_WRITE)
     if error_response:
         return error_response
 
@@ -3961,6 +4256,22 @@ async def expire_admin_checkout_session(request: Request, session_id: str) -> JS
             "[admin_api] Stripe checkout session expired manually session_id=%s local_session_id=%s",
             stripe_checkout_session_id,
             session_uuid,
+        )
+        _record_admin_audit_event(
+            db,
+            request,
+            "checkout_session.expired",
+            target_type="checkout_session",
+            target_id=session_uuid,
+            client_email=_clean_text(getattr(local_session, "client_email", None)),
+            metadata={
+                "status": _clean_text(getattr(local_session, "status", None)),
+                "paymentStatus": _clean_text(getattr(local_session, "payment_status", None)),
+                "expiresAt": _iso_datetime(getattr(local_session, "expires_at", None)),
+                "expiredAt": _iso_datetime(getattr(local_session, "expired_at", None)),
+            },
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
         )
         return JSONResponse({"ok": True, "checkoutSession": _checkout_session_payload(local_session)})
     except stripe.error.InvalidRequestError as exc:
@@ -6607,6 +6918,155 @@ def _request_user_agent(request: Request) -> Optional[str]:
     return user_agent[:500]
 
 
+def _audit_device_summary(user_agent: object) -> str:
+    user_agent_text = _clean_text(user_agent)
+    if not user_agent_text:
+        return "Unknown"
+
+    lowered = user_agent_text.lower()
+    if "edg/" in lowered or "edge/" in lowered:
+        browser = "Edge"
+    elif "firefox/" in lowered:
+        browser = "Firefox"
+    elif "chrome/" in lowered or "crios/" in lowered:
+        browser = "Chrome"
+    elif "safari/" in lowered:
+        browser = "Safari"
+    else:
+        browser = "Unknown browser"
+
+    if "iphone" in lowered or "ipad" in lowered:
+        platform = "iOS"
+    elif "android" in lowered:
+        platform = "Android"
+    elif "mac os x" in lowered or "macintosh" in lowered:
+        platform = "macOS"
+    elif "windows" in lowered:
+        platform = "Windows"
+    elif "linux" in lowered:
+        platform = "Linux"
+    else:
+        platform = "Unknown device"
+
+    if browser == "Unknown browser" and platform == "Unknown device":
+        return "Unknown"
+    if browser == "Unknown browser":
+        return platform
+    if platform == "Unknown device":
+        return browser
+    return f"{browser} on {platform}"
+
+
+def _audit_metadata_key_allowed(key: object) -> bool:
+    normalized = "".join(ch for ch in str(key).lower() if ch.isalnum())
+    if normalized in ADMIN_AUDIT_METADATA_DENY_KEYS:
+        return False
+    return not any(token in normalized for token in ("password", "secret", "apikey", "signedurl", "url"))
+
+
+def _sanitize_audit_metadata_value(value: object, depth: int = 0) -> object:
+    if depth > 4:
+        return None
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if value == value and value not in (float("inf"), float("-inf")) else None
+    if isinstance(value, (datetime, UUID)):
+        return str(value)
+    if isinstance(value, str):
+        cleaned = value.replace("\x00", "").strip()
+        return cleaned[:ADMIN_AUDIT_METADATA_MAX_STRING] if cleaned else ""
+    if isinstance(value, dict):
+        sanitized: dict[str, object] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 50:
+                sanitized["truncated"] = True
+                break
+            key_text = str(key)
+            if not _audit_metadata_key_allowed(key_text):
+                continue
+            sanitized[key_text[:100]] = _sanitize_audit_metadata_value(item, depth + 1)
+        return sanitized
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_audit_metadata_value(item, depth + 1) for item in list(value)[:50]]
+    return str(value)[:ADMIN_AUDIT_METADATA_MAX_STRING]
+
+
+def _sanitize_audit_metadata(metadata: object) -> dict[str, object]:
+    if not isinstance(metadata, dict):
+        metadata = {}
+    sanitized = _sanitize_audit_metadata_value(metadata)
+    if not isinstance(sanitized, dict):
+        sanitized = {}
+
+    try:
+        serialized = json.dumps(sanitized, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return {"metadataSanitized": True}
+    if len(serialized.encode("utf-8")) > ADMIN_AUDIT_METADATA_MAX_BYTES:
+        return {"metadataTruncated": True}
+    return sanitized
+
+
+def _record_admin_audit_event(
+    db: Any,
+    request: Optional[Request],
+    event_type: str,
+    target_type: Optional[str] = None,
+    target_id: Optional[object] = None,
+    client_email: Optional[str] = None,
+    metadata: Optional[dict[str, object]] = None,
+    admin_auth_user: Optional[dict[str, Any]] = None,
+    admin_access: Optional[AdminUser] = None,
+    source: str = "admin_api",
+    occurred_at: Optional[datetime] = None,
+) -> None:
+    del db
+    user_agent = _request_user_agent(request) if request else None
+    ip_address = _request_client_ip(request) if request else None
+    actor_admin_user_id = (
+        _clean_text((admin_auth_user or {}).get("id"))
+        or _id_text(getattr(admin_access, "user_id", None))
+    )
+    actor_admin_email = (
+        _clean_text(getattr(admin_access, "email", None))
+        or _clean_text((admin_auth_user or {}).get("email"))
+    )
+
+    audit_db = SessionLocal()
+    try:
+        audit_db.add(
+            AdminAuditEvent(
+                occurred_at=occurred_at or datetime.now(timezone.utc),
+                source=_clean_text(source) or "admin_api",
+                event_type=_clean_text(event_type) or "unknown",
+                actor_admin_user_id=actor_admin_user_id,
+                actor_admin_email=actor_admin_email,
+                actor_display_name=_clean_text(getattr(admin_access, "display_name", None)),
+                actor_role=_clean_text(getattr(admin_access, "role", None)),
+                client_email=(_clean_text(client_email) or "").lower() or None,
+                target_type=_clean_text(target_type),
+                target_id=_id_text(target_id),
+                ip_address=ip_address,
+                user_agent=user_agent,
+                device_summary=_audit_device_summary(user_agent),
+                location="Unknown" if ip_address else None,
+                metadata_json=_sanitize_audit_metadata(metadata or {}),
+            )
+        )
+        audit_db.commit()
+    except Exception:
+        audit_db.rollback()
+        logger.warning(
+            "[admin_audit] event write failed event_type=%s target_type=%s target_id=%s",
+            event_type,
+            target_type,
+            _id_text(target_id),
+        )
+    finally:
+        audit_db.close()
+
+
 def _validate_admin_analysis_phi_acknowledgment(
     body: Optional[dict[str, Any]],
 ) -> tuple[Optional[str], Optional[JSONResponse]]:
@@ -6678,6 +7138,22 @@ def _record_admin_analysis_phi_acknowledgment(
         )
     )
     db.flush()
+    _record_admin_audit_event(
+        db,
+        request,
+        "analysis.phi_acknowledged",
+        target_type="admin_analysis_job",
+        target_id=getattr(job, "id", None),
+        client_email=_clean_text(getattr(job, "client_email", None)),
+        metadata={
+            "jobFileId": _id_text(getattr(job_file, "id", None)),
+            "toolName": _clean_text(getattr(job_file, "tool_name", None)),
+            "initials": initials,
+            "acknowledgmentVersion": ADMIN_ANALYSIS_PHI_ACK_VERSION,
+        },
+        admin_auth_user=admin_auth_user,
+        admin_access=admin_access,
+    )
     logger.info(
         "[admin_analysis] PHI acknowledgment accepted job_id=%s job_file_id=%s admin_user_id=%s",
         getattr(job, "id", None),
@@ -7158,6 +7634,7 @@ def _admin_permissions_payload(admin_user: Optional[AdminUser]) -> dict[str, boo
         "canWriteSecureUploads": _admin_has_permission(admin_user, PERMISSION_SECURE_UPLOADS_WRITE),
         "canReadAdminManagement": _admin_has_permission(admin_user, PERMISSION_ADMIN_MANAGEMENT_READ),
         "canManageAdminAccess": _admin_has_permission(admin_user, PERMISSION_ADMIN_MANAGEMENT_WRITE),
+        "canReadAudit": _admin_has_permission(admin_user, PERMISSION_AUDIT_READ),
     }
 
 
@@ -7313,3 +7790,109 @@ def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
             },
         },
     )
+
+
+def _audit_parse_datetime(value: object, field_name: str) -> tuple[Optional[datetime], bool, Optional[JSONResponse]]:
+    text = _clean_text(value)
+    if not text:
+        return None, False, None
+    try:
+        if len(text) == 10:
+            return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc), True, None
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc), False, None
+    except ValueError:
+        return None, False, _error_response(400, f"invalid_{field_name}", f"{field_name} must be an ISO datetime or YYYY-MM-DD.")
+
+
+def _audit_date_range(
+    start_date: object,
+    end_date: object,
+) -> tuple[Optional[datetime], Optional[datetime], Optional[JSONResponse]]:
+    start_dt, _, start_error = _audit_parse_datetime(start_date, "startDate")
+    if start_error:
+        return None, None, start_error
+    end_dt, end_is_date_only, end_error = _audit_parse_datetime(end_date, "endDate")
+    if end_error:
+        return None, None, end_error
+    if end_dt and end_is_date_only:
+        end_dt = end_dt + timedelta(days=1)
+    if start_dt and end_dt and end_dt < start_dt:
+        return None, None, _error_response(400, "invalid_date_range", "endDate must be on or after startDate.")
+    return start_dt, end_dt, None
+
+
+def _audit_events_filtered_query(
+    db: Any,
+    *,
+    start_dt: Optional[datetime],
+    end_dt: Optional[datetime],
+    event_type: Optional[str],
+    client_email: Optional[str],
+    actor_email: Optional[str],
+    target_type: Optional[str],
+) -> Any:
+    query = db.query(AdminAuditEvent)
+    if start_dt:
+        query = query.filter(AdminAuditEvent.occurred_at >= start_dt)
+    if end_dt:
+        query = query.filter(AdminAuditEvent.occurred_at < end_dt)
+    normalized_event_type = _clean_text(event_type)
+    if normalized_event_type:
+        query = query.filter(AdminAuditEvent.event_type == normalized_event_type)
+    normalized_client_email = (_clean_text(client_email) or "").lower()
+    if normalized_client_email:
+        query = query.filter(func.lower(AdminAuditEvent.client_email).ilike(f"%{normalized_client_email}%"))
+    normalized_actor_email = (_clean_text(actor_email) or "").lower()
+    if normalized_actor_email:
+        query = query.filter(func.lower(AdminAuditEvent.actor_admin_email).ilike(f"%{normalized_actor_email}%"))
+    normalized_target_type = _clean_text(target_type)
+    if normalized_target_type:
+        query = query.filter(AdminAuditEvent.target_type == normalized_target_type)
+    return query
+
+
+def _audit_metadata_json(row: AdminAuditEvent) -> str:
+    metadata = getattr(row, "metadata_json", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return json.dumps(metadata, sort_keys=True, default=str)
+
+
+def _audit_mountain_datetime(value: object) -> Optional[str]:
+    if not isinstance(value, datetime):
+        return None
+    date_value = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return date_value.astimezone(ADMIN_AUDIT_MOUNTAIN_TZ).strftime("%Y-%m-%d %I:%M %p %Z")
+
+
+def _audit_event_payload(row: AdminAuditEvent) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(row, "id", None)),
+        "occurredAt": _iso_datetime(getattr(row, "occurred_at", None)),
+        "occurredAtMst": _audit_mountain_datetime(getattr(row, "occurred_at", None)),
+        "source": _clean_text(getattr(row, "source", None)),
+        "eventType": _clean_text(getattr(row, "event_type", None)),
+        "actorAdminUserId": _clean_text(getattr(row, "actor_admin_user_id", None)),
+        "actorAdminEmail": _clean_text(getattr(row, "actor_admin_email", None)),
+        "actorDisplayName": _clean_text(getattr(row, "actor_display_name", None)),
+        "actorRole": _clean_text(getattr(row, "actor_role", None)),
+        "clientEmail": _clean_text(getattr(row, "client_email", None)),
+        "targetType": _clean_text(getattr(row, "target_type", None)),
+        "targetId": _clean_text(getattr(row, "target_id", None)),
+        "ipAddress": _clean_text(getattr(row, "ip_address", None)),
+        "userAgent": _clean_text(getattr(row, "user_agent", None)),
+        "deviceSummary": _clean_text(getattr(row, "device_summary", None)),
+        "location": _clean_text(getattr(row, "location", None)),
+        "metadata": getattr(row, "metadata_json", None) if isinstance(getattr(row, "metadata_json", None), dict) else {},
+        "createdAt": _iso_datetime(getattr(row, "created_at", None)),
+    }
+
+
+def _audit_csv_cell(value: object) -> str:
+    text = _clean_text(value) or ""
+    if text.startswith(("=", "+", "-", "@")):
+        return f"'{text}"
+    return text
