@@ -263,6 +263,24 @@ class AdminAnalysisJobFile(Base):
     errored_at = Column(DateTime(timezone=True), nullable=True)
     processed_at = Column(DateTime(timezone=True), nullable=True)
 
+# Admin Document Analysis PHI/HIPAA processing acknowledgment audit model
+class AdminAnalysisPhiAcknowledgment(Base):
+    __tablename__ = "admin_analysis_phi_acknowledgments"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    job_id = Column(PGUUID(as_uuid=True), ForeignKey("admin_analysis_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_file_id = Column(PGUUID(as_uuid=True), ForeignKey("admin_analysis_job_files.id", ondelete="SET NULL"), nullable=True, index=True)
+    tool_name = Column(Text, nullable=True)
+    admin_user_id = Column(Text, nullable=True, index=True)
+    admin_email = Column(Text, nullable=True)
+    initials = Column(Text, nullable=False)
+    confirmed_no_phi = Column(Boolean, nullable=False)
+    acknowledgment_text = Column(Text, nullable=False)
+    acknowledgment_version = Column(String(100), nullable=False)
+    ip_address = Column(Text, nullable=True)
+    user_agent = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+
 # Admin access mapping (Supabase Auth)
 class AdminUser(Base):
     __tablename__ = "admin_users"
