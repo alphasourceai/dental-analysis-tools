@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import requests
 import stripe
-from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile as FastAPIUploadFile
+from fastapi import Body, FastAPI, File, Form, Query, Request, Response, UploadFile as FastAPIUploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import IntegrityError
@@ -38,6 +38,7 @@ from database import SessionLocal
 from models import (
     AdminAnalysisJob,
     AdminAnalysisJobFile,
+    AdminAnalysisPhiAcknowledgment,
     AdminUser,
     BillingOverride,
     ClientSubmission,
@@ -88,6 +89,11 @@ ADMIN_ANALYSIS_CLAIMS_TOOL_NAME = "Insurance Claim Analyzer"
 ADMIN_ANALYSIS_CLAIMS_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".pdf"}
 ADMIN_ANALYSIS_READ_CHUNK_SIZE = 1024 * 1024
 DEFAULT_ADMIN_ANALYSIS_MAX_FILE_MB = 15
+ADMIN_ANALYSIS_PHI_ACK_VERSION = "admin_document_analysis_phi_ack_v1"
+ADMIN_ANALYSIS_PHI_ACK_TEXT = (
+    "I confirm this file has been reviewed and is approved/sanitized for AI-assisted analysis, "
+    "does not contain unsanitized PHI, and is appropriate to process through the Document Analysis workflow."
+)
 PERMISSION_CLIENTS_READ = "clients_read"
 PERMISSION_CLIENTS_WRITE = "clients_write"
 PERMISSION_BILLING_READ = "billing_read"
@@ -1706,8 +1712,12 @@ def cancel_admin_analysis_job(request: Request, job_id: str) -> JSONResponse:
 
 
 @app.post("/api/admin/analysis-jobs/{job_id}/process-financial")
-def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
+def process_admin_financial_analysis_job(
+    request: Request,
+    job_id: str,
+    body: Optional[dict[str, Any]] = Body(default=None),
+) -> JSONResponse:
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -1815,6 +1825,18 @@ def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
                 "unsupported_file_type",
                 "Unsupported financial file type.",
             )
+
+        acknowledgment_error = _record_admin_analysis_phi_acknowledgment(
+            db,
+            request=request,
+            body=body,
+            job=job,
+            job_file=job_file,
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
+        )
+        if acknowledgment_error:
+            return acknowledgment_error
 
         bucket = _clean_text(getattr(upload_file, "bucket", None))
         object_path = _clean_text(getattr(upload_file, "object_path", None))
@@ -2010,8 +2032,12 @@ def process_admin_financial_analysis_job(request: Request, job_id: str) -> JSONR
 
 
 @app.post("/api/admin/analysis-jobs/{job_id}/process-ar")
-def process_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
+def process_admin_ar_analysis_job(
+    request: Request,
+    job_id: str,
+    body: Optional[dict[str, Any]] = Body(default=None),
+) -> JSONResponse:
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -2113,6 +2139,18 @@ def process_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse
                 "unsupported_file_type",
                 "Unsupported AR file type.",
             )
+
+        acknowledgment_error = _record_admin_analysis_phi_acknowledgment(
+            db,
+            request=request,
+            body=body,
+            job=job,
+            job_file=job_file,
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
+        )
+        if acknowledgment_error:
+            return acknowledgment_error
 
         bucket = _clean_text(getattr(upload_file, "bucket", None))
         object_path = _clean_text(getattr(upload_file, "object_path", None))
@@ -2327,8 +2365,12 @@ def process_admin_ar_analysis_job(request: Request, job_id: str) -> JSONResponse
 
 
 @app.post("/api/admin/analysis-jobs/{job_id}/process-claims")
-def process_admin_claims_analysis_job(request: Request, job_id: str) -> JSONResponse:
-    _, _, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
+def process_admin_claims_analysis_job(
+    request: Request,
+    job_id: str,
+    body: Optional[dict[str, Any]] = Body(default=None),
+) -> JSONResponse:
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_ANALYSIS_WRITE)
     if error_response:
         return error_response
 
@@ -2430,6 +2472,18 @@ def process_admin_claims_analysis_job(request: Request, job_id: str) -> JSONResp
                 "unsupported_file_type",
                 "Unsupported Claims file type.",
             )
+
+        acknowledgment_error = _record_admin_analysis_phi_acknowledgment(
+            db,
+            request=request,
+            body=body,
+            job=job,
+            job_file=job_file,
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
+        )
+        if acknowledgment_error:
+            return acknowledgment_error
 
         bucket = _clean_text(getattr(upload_file, "bucket", None))
         object_path = _clean_text(getattr(upload_file, "object_path", None))
@@ -6202,6 +6256,93 @@ def _request_client_ip(request: Request) -> Optional[str]:
         return forwarded_for
     if request.client and request.client.host:
         return request.client.host
+    return None
+
+
+def _request_user_agent(request: Request) -> Optional[str]:
+    user_agent = _clean_text(request.headers.get("user-agent"))
+    if not user_agent:
+        return None
+    return user_agent[:500]
+
+
+def _validate_admin_analysis_phi_acknowledgment(
+    body: Optional[dict[str, Any]],
+) -> tuple[Optional[str], Optional[JSONResponse]]:
+    if not isinstance(body, dict):
+        return None, _error_response(
+            400,
+            "missing_phi_acknowledgment",
+            "PHI acknowledgment is required before processing.",
+        )
+
+    acknowledgment = body.get("phiAcknowledgment")
+    if not isinstance(acknowledgment, dict):
+        return None, _error_response(
+            400,
+            "missing_phi_acknowledgment",
+            "PHI acknowledgment is required before processing.",
+        )
+
+    if acknowledgment.get("confirmedNoPhi") is not True:
+        return None, _error_response(
+            400,
+            "phi_acknowledgment_required",
+            "Confirm the file is approved/sanitized and does not contain unsanitized PHI before processing.",
+        )
+
+    initials = _clean_text(acknowledgment.get("initials"))
+    if not initials or len(initials) > 12:
+        return None, _error_response(
+            400,
+            "invalid_phi_acknowledgment_initials",
+            "Acknowledgment initials are required and must be 12 characters or fewer.",
+        )
+
+    return initials, None
+
+
+def _record_admin_analysis_phi_acknowledgment(
+    db: Any,
+    *,
+    request: Request,
+    body: Optional[dict[str, Any]],
+    job: AdminAnalysisJob,
+    job_file: AdminAnalysisJobFile,
+    admin_auth_user: dict[str, Any],
+    admin_access: Optional[AdminUser],
+) -> Optional[JSONResponse]:
+    initials, validation_error = _validate_admin_analysis_phi_acknowledgment(body)
+    if validation_error:
+        return validation_error
+
+    admin_user_id = _clean_text((admin_auth_user or {}).get("id"))
+    admin_email = (
+        _clean_text(getattr(admin_access, "email", None))
+        or _clean_text((admin_auth_user or {}).get("email"))
+    )
+    db.add(
+        AdminAnalysisPhiAcknowledgment(
+            job_id=getattr(job, "id", None),
+            job_file_id=getattr(job_file, "id", None),
+            tool_name=_clean_text(getattr(job_file, "tool_name", None)),
+            admin_user_id=admin_user_id,
+            admin_email=admin_email,
+            initials=initials or "",
+            confirmed_no_phi=True,
+            acknowledgment_text=ADMIN_ANALYSIS_PHI_ACK_TEXT,
+            acknowledgment_version=ADMIN_ANALYSIS_PHI_ACK_VERSION,
+            ip_address=_request_client_ip(request),
+            user_agent=_request_user_agent(request),
+        )
+    )
+    db.flush()
+    logger.info(
+        "[admin_analysis] PHI acknowledgment accepted job_id=%s job_file_id=%s admin_user_id=%s",
+        getattr(job, "id", None),
+        getattr(job_file, "id", None),
+        admin_user_id,
+    )
     return None
 
 
