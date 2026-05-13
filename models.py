@@ -101,6 +101,10 @@ class Upload(Base):
     pdf_version = Column(Integer, nullable=False, server_default=text("0"))
     pdf_url = Column(Text, nullable=True)
     pdf_generated_at = Column(DateTime(timezone=True), nullable=True)
+    voided_at = Column(DateTime(timezone=True), nullable=True)
+    voided_by_admin_user_id = Column(Text, nullable=True)
+    voided_by_admin_email = Column(Text, nullable=True)
+    void_reason = Column(Text, nullable=True)
 
 # Stripe webhook/event audit model
 class StripeEvent(Base):

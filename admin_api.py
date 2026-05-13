@@ -16,7 +16,7 @@ from fastapi import Body, FastAPI, File, Form, Query, Request, Response, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 
 from admin_financial_processing_service import (
     AdminFinancialProcessingCanceled,
@@ -96,6 +96,7 @@ ADMIN_ANALYSIS_PHI_ACK_TEXT = (
 )
 PERMISSION_CLIENTS_READ = "clients_read"
 PERMISSION_CLIENTS_WRITE = "clients_write"
+PERMISSION_UPLOADS_WRITE = "uploads_write"
 PERMISSION_BILLING_READ = "billing_read"
 PERMISSION_BILLING_WRITE = "billing_write"
 PERMISSION_ANALYSIS_READ = "analysis_read"
@@ -110,6 +111,7 @@ ADMIN_API_DASHBOARD_ROLES = {"super_admin", "admin", "analyst", "billing_admin",
 ADMIN_API_ALL_PERMISSIONS = {
     PERMISSION_CLIENTS_READ,
     PERMISSION_CLIENTS_WRITE,
+    PERMISSION_UPLOADS_WRITE,
     PERMISSION_BILLING_READ,
     PERMISSION_BILLING_WRITE,
     PERMISSION_ANALYSIS_READ,
@@ -761,7 +763,13 @@ def list_admin_clients(
                     func.lower(ClientSubmission.user_email).label("email"),
                     func.count(Upload.id).label("upload_count"),
                 )
-                .outerjoin(Upload, Upload.submission_id == ClientSubmission.id)
+                .outerjoin(
+                    Upload,
+                    and_(
+                        Upload.submission_id == ClientSubmission.id,
+                        Upload.voided_at.is_(None),
+                    ),
+                )
                 .filter(func.lower(ClientSubmission.user_email).in_(normalized_client_emails))
                 .group_by(func.lower(ClientSubmission.user_email))
                 .all()
@@ -946,6 +954,71 @@ async def create_admin_client(request: Request) -> JSONResponse:
         db.rollback()
         logger.exception("[admin_api] manual client create failed client_email=%s", client_email)
         return _error_response(500, "client_create_failed", "Unable to create client.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/uploads/{upload_id}/void")
+async def void_admin_upload(request: Request, upload_id: str) -> JSONResponse:
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_UPLOADS_WRITE)
+    if error_response:
+        return error_response
+
+    upload_uuid, validation_error = _required_uuid(upload_id, "upload_id")
+    if validation_error:
+        return validation_error
+
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    reason, validation_error = _required_limited_text(body.get("reason"), "reason", 500)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        upload = db.query(Upload).filter(Upload.id == upload_uuid).first()
+        if not upload:
+            return _error_response(404, "upload_not_found", "Upload was not found.")
+
+        if _upload_is_voided(upload):
+            return JSONResponse({"ok": True, "upload": _upload_payload(upload)})
+
+        if bool(getattr(upload, "paid", False)):
+            return _error_response(
+                409,
+                "paid_upload_cannot_be_voided",
+                "Paid uploads cannot be voided.",
+            )
+
+        if _upload_has_paid_checkout_session(db, upload_uuid):
+            return _error_response(
+                409,
+                "paid_checkout_upload_cannot_be_voided",
+                "Uploads linked to paid checkout sessions cannot be voided.",
+            )
+
+        now = datetime.now(timezone.utc)
+        upload.voided_at = now
+        upload.voided_by_admin_user_id = _clean_text((admin_auth_user or {}).get("id"))
+        upload.voided_by_admin_email = (
+            _clean_text(getattr(admin_access, "email", None))
+            or _clean_text((admin_auth_user or {}).get("email"))
+        )
+        upload.void_reason = reason
+        db.commit()
+        db.refresh(upload)
+        logger.info(
+            "[admin_api] upload voided upload_id=%s admin_user_id=%s",
+            upload_uuid,
+            _clean_text((admin_auth_user or {}).get("id")),
+        )
+        return JSONResponse({"ok": True, "upload": _upload_payload(upload)})
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] upload void failed upload_id=%s", upload_uuid)
+        return _error_response(500, "upload_void_failed", "Unable to void upload.")
     finally:
         db.close()
 
@@ -3066,6 +3139,7 @@ def get_admin_pdf_generator_options(request: Request) -> JSONResponse:
                 db.query(Upload)
                 .filter(func.lower(Upload.user_email).in_(list(candidate_emails.keys())))
                 .filter(Upload.analysis_data.isnot(None))
+                .filter(Upload.voided_at.is_(None))
                 .all()
             )
             for upload in uploads:
@@ -3134,6 +3208,7 @@ def get_admin_pdf_generator_client(
             db.query(Upload)
             .filter(func.lower(Upload.user_email) == client_email)
             .filter(Upload.analysis_data.isnot(None))
+            .filter(Upload.voided_at.is_(None))
             .order_by(Upload.upload_time.desc())
             .all()
         )
@@ -3189,6 +3264,12 @@ async def generate_admin_pdf_report(request: Request) -> JSONResponse:
         upload = db.query(Upload).filter(Upload.id == upload_id).first()
         if not upload:
             return _error_response(404, "upload_not_found", "Upload was not found.")
+        if _upload_is_voided(upload):
+            return _error_response(
+                409,
+                "voided_upload_cannot_be_used",
+                "Voided uploads cannot be used for PDF generation.",
+            )
 
         analysis_payload = _pdf_generator_analysis_payload(getattr(upload, "analysis_data", None))
         if analysis_payload is None:
@@ -3812,6 +3893,7 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
 def get_admin_billing_client(
     request: Request,
     email: Optional[str] = None,
+    uploadStatus: str = Query("active"),
 ) -> JSONResponse:
     _, _, error_response = _require_admin_permission(request, PERMISSION_BILLING_READ)
     if error_response:
@@ -3820,6 +3902,9 @@ def get_admin_billing_client(
     client_email, validation_error = _required_email(email)
     if validation_error:
         return validation_error
+    normalized_upload_status = (uploadStatus or "active").strip().lower()
+    if normalized_upload_status not in {"active", "voided", "all"}:
+        return _error_response(400, "invalid_upload_status", "uploadStatus must be active, voided, or all.")
 
     db = SessionLocal()
     try:
@@ -3835,13 +3920,9 @@ def get_admin_billing_client(
             .order_by(StripeCheckoutSession.created_at.desc())
             .all()
         )
-        uploads = (
-            db.query(Upload)
-            .filter(func.lower(Upload.user_email) == client_email)
-            .order_by(Upload.id.desc())
-            .limit(25)
-            .all()
-        )
+        uploads_query = db.query(Upload).filter(func.lower(Upload.user_email) == client_email)
+        uploads_query = _filter_uploads_by_void_status(uploads_query, normalized_upload_status)
+        uploads = uploads_query.order_by(Upload.id.desc()).limit(25).all()
         billing_overrides = (
             db.query(BillingOverride)
             .filter(func.lower(BillingOverride.client_email) == client_email)
@@ -3863,7 +3944,11 @@ def get_admin_billing_client(
         ]
         latest_session = checkout_sessions[0] if checkout_sessions else None
         latest_paid_session = paid_sessions[0] if paid_sessions else None
-        checkout_related_uploads = _checkout_related_uploads_by_session(db, checkout_sessions)
+        checkout_related_uploads = _checkout_related_uploads_by_session(
+            db,
+            checkout_sessions,
+            upload_status=normalized_upload_status,
+        )
 
         return JSONResponse(
             {
@@ -5727,6 +5812,10 @@ def _pdf_generator_upload_payload(upload: Upload) -> dict[str, Any]:
         "clientEmail": _clean_text(getattr(upload, "user_email", None)),
         "submissionId": _id_text(getattr(upload, "submission_id", None)),
         "paid": bool(getattr(upload, "paid", False)),
+        "voided": _upload_is_voided(upload),
+        "voidedAt": _iso_datetime(getattr(upload, "voided_at", None)),
+        "voidReason": _clean_text(getattr(upload, "void_reason", None)),
+        "voidedByAdminEmail": _clean_text(getattr(upload, "voided_by_admin_email", None)),
         "analysis": {
             "hasAnalysisData": analysis_payload is not None,
             "opportunities": _pdf_generator_opportunities(analysis_payload or {}),
@@ -6057,9 +6146,53 @@ def _pdf_generation_text(
     return text, None
 
 
+def _upload_is_voided(upload: Upload) -> bool:
+    return bool(getattr(upload, "voided_at", None))
+
+
+def _filter_uploads_by_void_status(query: Any, upload_status: str) -> Any:
+    normalized_status = (upload_status or "active").strip().lower()
+    if normalized_status == "voided":
+        return query.filter(Upload.voided_at.isnot(None))
+    if normalized_status == "all":
+        return query
+    return query.filter(Upload.voided_at.is_(None))
+
+
+def _paid_or_complete_checkout_filter() -> Any:
+    return or_(
+        func.lower(StripeCheckoutSession.payment_status) == "paid",
+        func.lower(StripeCheckoutSession.status).in_(["complete", "completed"]),
+    )
+
+
+def _upload_has_paid_checkout_session(db: Any, upload_id: UUID) -> bool:
+    legacy_session = (
+        db.query(StripeCheckoutSession.id)
+        .filter(StripeCheckoutSession.upload_id == upload_id)
+        .filter(_paid_or_complete_checkout_filter())
+        .first()
+    )
+    if legacy_session:
+        return True
+
+    linked_session = (
+        db.query(StripeCheckoutSession.id)
+        .join(
+            StripeCheckoutSessionUpload,
+            StripeCheckoutSessionUpload.checkout_session_id == StripeCheckoutSession.id,
+        )
+        .filter(StripeCheckoutSessionUpload.upload_id == upload_id)
+        .filter(_paid_or_complete_checkout_filter())
+        .first()
+    )
+    return bool(linked_session)
+
+
 def _checkout_related_uploads_by_session(
     db: Any,
     sessions: list[StripeCheckoutSession],
+    upload_status: str = "active",
 ) -> dict[str, list[Upload]]:
     session_ids = [
         getattr(session, "id")
@@ -6073,13 +6206,13 @@ def _checkout_related_uploads_by_session(
     if not session_ids:
         return related_uploads_by_session_id
 
-    link_rows = (
+    link_query = (
         db.query(StripeCheckoutSessionUpload, Upload)
         .join(Upload, Upload.id == StripeCheckoutSessionUpload.upload_id)
         .filter(StripeCheckoutSessionUpload.checkout_session_id.in_(session_ids))
-        .order_by(StripeCheckoutSessionUpload.created_at.asc())
-        .all()
     )
+    link_query = _filter_uploads_by_void_status(link_query, upload_status)
+    link_rows = link_query.order_by(StripeCheckoutSessionUpload.created_at.asc()).all()
     for link, upload in link_rows:
         session_id = _id_text(getattr(link, "checkout_session_id", None))
         if session_id:
@@ -6094,7 +6227,9 @@ def _checkout_related_uploads_by_session(
     if not legacy_upload_ids:
         return related_uploads_by_session_id
 
-    legacy_upload_rows = db.query(Upload).filter(Upload.id.in_(legacy_upload_ids)).all()
+    legacy_upload_query = db.query(Upload).filter(Upload.id.in_(legacy_upload_ids))
+    legacy_upload_query = _filter_uploads_by_void_status(legacy_upload_query, upload_status)
+    legacy_upload_rows = legacy_upload_query.all()
     legacy_uploads_by_id = {
         str(getattr(upload, "id")): upload
         for upload in legacy_upload_rows
@@ -6162,6 +6297,10 @@ def _upload_payload(upload: Upload) -> dict[str, Any]:
         "toolName": _clean_text(getattr(upload, "tool_name", None)),
         "paid": bool(getattr(upload, "paid", False)),
         "uploadTime": _clean_text(getattr(upload, "upload_time", None)),
+        "voided": _upload_is_voided(upload),
+        "voidedAt": _iso_datetime(getattr(upload, "voided_at", None)),
+        "voidReason": _clean_text(getattr(upload, "void_reason", None)),
+        "voidedByAdminEmail": _clean_text(getattr(upload, "voided_by_admin_email", None)),
     }
 
 
@@ -6624,6 +6763,14 @@ def _validate_checkout_uploads(
     if mismatched_upload_ids:
         return [], _error_response(400, "upload_client_mismatch", "Selected uploads must belong to clientEmail.")
 
+    voided_upload_ids = [
+        str(selected_upload_id)
+        for selected_upload_id in upload_ids
+        if _upload_is_voided(uploads_by_id[str(selected_upload_id)])
+    ]
+    if voided_upload_ids:
+        return [], _error_response(409, "voided_upload_cannot_be_used", "Voided uploads cannot be used.")
+
     return [uploads_by_id[str(selected_upload_id)] for selected_upload_id in upload_ids], None
 
 
@@ -6779,6 +6926,7 @@ def _admin_permissions_payload(admin_user: Optional[AdminUser]) -> dict[str, boo
     return {
         "canReadClients": _admin_has_permission(admin_user, PERMISSION_CLIENTS_READ),
         "canWriteClients": _admin_has_permission(admin_user, PERMISSION_CLIENTS_WRITE),
+        "canWriteUploads": _admin_has_permission(admin_user, PERMISSION_UPLOADS_WRITE),
         "canReadBilling": _admin_has_permission(admin_user, PERMISSION_BILLING_READ),
         "canWriteBilling": _admin_has_permission(admin_user, PERMISSION_BILLING_WRITE),
         "canReadAnalysis": _admin_has_permission(admin_user, PERMISSION_ANALYSIS_READ),
