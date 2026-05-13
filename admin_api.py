@@ -89,6 +89,7 @@ ADMIN_ANALYSIS_CLAIMS_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".pdf"}
 ADMIN_ANALYSIS_READ_CHUNK_SIZE = 1024 * 1024
 DEFAULT_ADMIN_ANALYSIS_MAX_FILE_MB = 15
 PERMISSION_CLIENTS_READ = "clients_read"
+PERMISSION_CLIENTS_WRITE = "clients_write"
 PERMISSION_BILLING_READ = "billing_read"
 PERMISSION_BILLING_WRITE = "billing_write"
 PERMISSION_ANALYSIS_READ = "analysis_read"
@@ -102,6 +103,7 @@ PERMISSION_ADMIN_MANAGEMENT_WRITE = "admin_management_write"
 ADMIN_API_DASHBOARD_ROLES = {"super_admin", "admin", "analyst", "billing_admin", "viewer"}
 ADMIN_API_ALL_PERMISSIONS = {
     PERMISSION_CLIENTS_READ,
+    PERMISSION_CLIENTS_WRITE,
     PERMISSION_BILLING_READ,
     PERMISSION_BILLING_WRITE,
     PERMISSION_ANALYSIS_READ,
@@ -682,7 +684,7 @@ def list_admin_clients(
                 .all()
             )
             matching_emails = {
-                str(row[0]).strip()
+                str(row[0]).strip().lower()
                 for row in [*matching_submission_rows, *matching_user_rows]
                 if row[0]
             }
@@ -695,17 +697,48 @@ def list_admin_clients(
             func.max(ClientSubmission.submitted_at).label("last_submitted_at"),
         )
         if matching_emails is not None:
-            clients_query = clients_query.filter(ClientSubmission.user_email.in_(matching_emails))
-        client_rows = (
+            clients_query = clients_query.filter(func.lower(ClientSubmission.user_email).in_(matching_emails))
+        submission_client_rows = (
             clients_query.group_by(ClientSubmission.user_email)
             .order_by(func.max(ClientSubmission.submitted_at).desc())
-            .offset(offset)
-            .limit(safe_limit + 1)
             .all()
         )
-        has_more = len(client_rows) > safe_limit
-        client_rows = client_rows[:safe_limit]
-        client_emails = [row.email for row in client_rows if row.email]
+        submission_client_emails = {
+            (_clean_text(row.email) or "").lower()
+            for row in submission_client_rows
+            if _clean_text(row.email)
+        }
+
+        user_query = db.query(User)
+        if matching_emails is not None:
+            user_query = user_query.filter(func.lower(User.email).in_(matching_emails))
+        user_rows = user_query.order_by(func.lower(User.email).asc()).all()
+
+        combined_client_rows: list[dict[str, Any]] = [
+            {
+                "email": _clean_text(row.email) or "",
+                "submission_count": int(row.submission_count or 0),
+                "last_submitted_at": row.last_submitted_at,
+            }
+            for row in submission_client_rows
+            if _clean_text(row.email)
+        ]
+        for user in user_rows:
+            user_email = _clean_text(getattr(user, "email", None)) or ""
+            normalized_user_email = user_email.lower()
+            if not user_email or normalized_user_email in submission_client_emails:
+                continue
+            combined_client_rows.append(
+                {
+                    "email": user_email,
+                    "submission_count": 0,
+                    "last_submitted_at": None,
+                }
+            )
+
+        has_more = len(combined_client_rows) > offset + safe_limit
+        client_rows = combined_client_rows[offset:offset + safe_limit]
+        client_emails = [row["email"] for row in client_rows if row.get("email")]
 
         upload_counts: dict[str, int] = {}
         latest_submissions: dict[str, ClientSubmission] = {}
@@ -719,15 +752,15 @@ def list_admin_clients(
             ]
             upload_count_rows = (
                 db.query(
-                    ClientSubmission.user_email,
+                    func.lower(ClientSubmission.user_email).label("email"),
                     func.count(Upload.id).label("upload_count"),
                 )
                 .outerjoin(Upload, Upload.submission_id == ClientSubmission.id)
-                .filter(ClientSubmission.user_email.in_(client_emails))
-                .group_by(ClientSubmission.user_email)
+                .filter(func.lower(ClientSubmission.user_email).in_(normalized_client_emails))
+                .group_by(func.lower(ClientSubmission.user_email))
                 .all()
             )
-            upload_counts = {row[0]: int(row[1] or 0) for row in upload_count_rows if row[0]}
+            upload_counts = {row.email: int(row.upload_count or 0) for row in upload_count_rows if row.email}
 
             billing_summaries = {
                 email: _empty_billing_summary()
@@ -772,25 +805,39 @@ def list_admin_clients(
 
             latest_rows = (
                 db.query(ClientSubmission)
-                .filter(ClientSubmission.user_email.in_(client_emails))
+                .filter(func.lower(ClientSubmission.user_email).in_(normalized_client_emails))
                 .order_by(
-                    ClientSubmission.user_email.asc(),
+                    func.lower(ClientSubmission.user_email).asc(),
                     ClientSubmission.submitted_at.desc(),
                 )
                 .all()
             )
             for submission in latest_rows:
-                if submission.user_email not in latest_submissions:
-                    latest_submissions[submission.user_email] = submission
+                submission_email = (_clean_text(getattr(submission, "user_email", None)) or "").lower()
+                if submission_email and submission_email not in latest_submissions:
+                    latest_submissions[submission_email] = submission
 
-            users = db.query(User).filter(User.email.in_(client_emails)).all()
-            users_by_email = {user.email: user for user in users if user.email}
+            users = db.query(User).filter(func.lower(User.email).in_(normalized_client_emails)).all()
+            users_by_email = {
+                (_clean_text(getattr(user, "email", None)) or "").lower(): user
+                for user in users
+                if _clean_text(getattr(user, "email", None))
+            }
 
         items = []
         for row in client_rows:
-            email = row.email or ""
-            latest_submission = latest_submissions.get(email)
-            user_record = users_by_email.get(email)
+            email = row["email"] or ""
+            normalized_email = email.lower()
+            latest_submission = latest_submissions.get(normalized_email)
+            user_record = users_by_email.get(normalized_email)
+            if latest_submission:
+                latest_name = _full_name(latest_submission)
+                latest_office_name = _clean_text(getattr(latest_submission, "office_name", None))
+                latest_org_type = _clean_text(getattr(latest_submission, "org_type", None))
+            else:
+                latest_name = _user_full_name(user_record)
+                latest_office_name = _clean_text(getattr(user_record, "office_name", None))
+                latest_org_type = _clean_text(getattr(user_record, "org_type", None))
             latest_phone = (
                 _clean_text(getattr(latest_submission, "phone", None))
                 or _clean_text(getattr(user_record, "phone", None))
@@ -799,15 +846,15 @@ def list_admin_clients(
             items.append(
                 {
                     "email": email,
-                    "latestName": _full_name(latest_submission),
-                    "latestOfficeName": _clean_text(getattr(latest_submission, "office_name", None)),
-                    "latestOrgType": _clean_text(getattr(latest_submission, "org_type", None)),
+                    "latestName": latest_name,
+                    "latestOfficeName": latest_office_name,
+                    "latestOrgType": latest_org_type,
                     "latestPhone": latest_phone,
-                    "submissionCount": int(row.submission_count or 0),
-                    "uploadCount": upload_counts.get(email, 0),
-                    "latestSubmittedAt": _iso_datetime(row.last_submitted_at),
+                    "submissionCount": int(row["submission_count"] or 0),
+                    "uploadCount": upload_counts.get(normalized_email, 0),
+                    "latestSubmittedAt": _iso_datetime(row["last_submitted_at"]),
                     "latestStatus": _clean_text(getattr(latest_submission, "status", None)),
-                    "billing": billing_summaries.get(email.lower(), _empty_billing_summary()),
+                    "billing": billing_summaries.get(normalized_email, _empty_billing_summary()),
                 }
             )
 
@@ -815,6 +862,84 @@ def list_admin_clients(
     except Exception:
         logger.exception("[admin_api] client list query failed.")
         return _error_response(500, "internal_error", "Unable to load clients.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/clients")
+async def create_admin_client(request: Request) -> JSONResponse:
+    admin_auth_user, _, error_response = _require_admin_permission(request, PERMISSION_CLIENTS_WRITE)
+    if error_response:
+        return error_response
+
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    client_email, validation_error = _required_admin_access_email(body.get("email"))
+    if validation_error:
+        return validation_error
+    first_name, validation_error = _required_limited_text(body.get("firstName"), "firstName", 255)
+    if validation_error:
+        return validation_error
+    last_name, validation_error = _required_limited_text(body.get("lastName"), "lastName", 255)
+    if validation_error:
+        return validation_error
+    office_name, validation_error = _required_limited_text(body.get("officeName"), "officeName", 255)
+    if validation_error:
+        return validation_error
+    org_type, validation_error = _required_limited_text(body.get("orgType"), "orgType", 50)
+    if validation_error:
+        return validation_error
+    phone, validation_error = _optional_limited_text(body.get("phone"), "phone", 50)
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        existing_user = db.query(User.id).filter(func.lower(User.email) == client_email).first()
+        if existing_user:
+            return _error_response(409, "client_already_exists", "A client already exists for this email.")
+
+        user = User(
+            email=client_email,
+            first_name=first_name,
+            last_name=last_name,
+            office_name=office_name,
+            org_type=org_type,
+            phone=phone,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        logger.info(
+            "[admin_api] manual client created client_email=%s admin_user_id=%s",
+            client_email,
+            str(admin_auth_user.get("id") or ""),
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "client": {
+                    "id": _id_text(getattr(user, "id", None)),
+                    "email": _clean_text(getattr(user, "email", None)),
+                    "firstName": _clean_text(getattr(user, "first_name", None)),
+                    "lastName": _clean_text(getattr(user, "last_name", None)),
+                    "officeName": _clean_text(getattr(user, "office_name", None)),
+                    "orgType": _clean_text(getattr(user, "org_type", None)),
+                    "phone": _clean_text(getattr(user, "phone", None)),
+                    "submissionCount": 0,
+                    "uploadCount": 0,
+                },
+            }
+        )
+    except IntegrityError:
+        db.rollback()
+        return _error_response(409, "client_already_exists", "A client already exists for this email.")
+    except Exception:
+        db.rollback()
+        logger.exception("[admin_api] manual client create failed client_email=%s", client_email)
+        return _error_response(500, "client_create_failed", "Unable to create client.")
     finally:
         db.close()
 
@@ -6195,6 +6320,40 @@ def _required_text(value: object, field_name: str) -> tuple[str, Optional[JSONRe
     return text, None
 
 
+def _required_limited_text(
+    value: object,
+    field_name: str,
+    max_length: int,
+) -> tuple[str, Optional[JSONResponse]]:
+    text, validation_error = _required_text(value, field_name)
+    if validation_error:
+        return "", validation_error
+    if len(text) > max_length:
+        return "", _error_response(
+            400,
+            f"invalid_{field_name}",
+            f"{field_name} must be {max_length} characters or fewer.",
+        )
+    return text, None
+
+
+def _optional_limited_text(
+    value: object,
+    field_name: str,
+    max_length: int,
+) -> tuple[Optional[str], Optional[JSONResponse]]:
+    text = _clean_text(value)
+    if not text:
+        return None, None
+    if len(text) > max_length:
+        return None, _error_response(
+            400,
+            f"invalid_{field_name}",
+            f"{field_name} must be {max_length} characters or fewer.",
+        )
+    return text, None
+
+
 def _required_amount(value: object) -> tuple[int, Optional[JSONResponse]]:
     if isinstance(value, bool) or not isinstance(value, int):
         return 0, _error_response(400, "invalid_amount", "amount must be an integer number of cents.")
@@ -6478,6 +6637,7 @@ def _admin_has_permission(admin_user: Optional[AdminUser], permission: str) -> b
 def _admin_permissions_payload(admin_user: Optional[AdminUser]) -> dict[str, bool]:
     return {
         "canReadClients": _admin_has_permission(admin_user, PERMISSION_CLIENTS_READ),
+        "canWriteClients": _admin_has_permission(admin_user, PERMISSION_CLIENTS_WRITE),
         "canReadBilling": _admin_has_permission(admin_user, PERMISSION_BILLING_READ),
         "canWriteBilling": _admin_has_permission(admin_user, PERMISSION_BILLING_WRITE),
         "canReadAnalysis": _admin_has_permission(admin_user, PERMISSION_ANALYSIS_READ),
@@ -6604,6 +6764,15 @@ def _full_name(submission: Optional[ClientSubmission]) -> Optional[str]:
         return None
     first_name = _clean_text(getattr(submission, "first_name", None)) or ""
     last_name = _clean_text(getattr(submission, "last_name", None)) or ""
+    full_name = f"{first_name} {last_name}".strip()
+    return full_name or None
+
+
+def _user_full_name(user: Optional[User]) -> Optional[str]:
+    if not user:
+        return None
+    first_name = _clean_text(getattr(user, "first_name", None)) or ""
+    last_name = _clean_text(getattr(user, "last_name", None)) or ""
     full_name = f"{first_name} {last_name}".strip()
     return full_name or None
 
