@@ -29,7 +29,10 @@ body {
   inset: 0;
   pointer-events: none;
   z-index: 0;
-  background: linear-gradient(180deg, #ffffff 0%, #f8f9fd 100%);
+  background:
+    radial-gradient(circle at 18% 10%, rgba(163, 128, 246, 0.16), transparent 30%),
+    radial-gradient(circle at 86% 18%, rgba(2, 217, 157, 0.12), transparent 28%),
+    linear-gradient(180deg, #ffffff 0%, #f8f9fd 100%);
 }
 
 .glow {
@@ -57,7 +60,7 @@ body {
   z-index: 1;
   max-width: 760px;
   margin: 0 auto;
-  padding: 56px 20px 30px;
+  padding: 64px 20px 32px;
   display: flex;
   flex-direction: column;
   gap: 22px;
@@ -70,7 +73,7 @@ body {
 .portal-header h1 {
   margin: 12px 0 8px;
   color: var(--text);
-  font-size: 2.35rem;
+  font-size: 2.4rem;
   line-height: 1.12;
   font-weight: 800;
 }
@@ -79,6 +82,7 @@ body {
   margin: 0;
   color: var(--muted);
   line-height: 1.6;
+  font-size: 1rem;
 }
 
 .pill {
@@ -102,7 +106,12 @@ body {
   box-shadow: 0 16px 34px rgba(10, 21, 71, 0.08);
 }
 
+.status-card {
+  border-left: 4px solid var(--teal);
+}
+
 .status {
+  color: var(--text);
   font-weight: 600;
 }
 
@@ -130,6 +139,8 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid rgba(10, 21, 71, 0.08);
 }
 
 .upload-header h2 {
@@ -145,10 +156,13 @@ body {
 
 .file-picker {
   margin-top: 18px;
-  display: inline-flex;
+  display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
-  padding: 12px 16px;
+  width: 100%;
+  min-height: 58px;
+  padding: 14px 18px;
   border-radius: 14px;
   border: 1px dashed rgba(10, 21, 71, 0.22);
   background: #f8f9fd;
@@ -188,14 +202,20 @@ body {
   display: flex;
   justify-content: space-between;
   gap: 12px;
+  align-items: flex-start;
 }
 
 .file-name {
+  min-width: 0;
   font-weight: 600;
   word-break: break-word;
 }
 
 .file-status {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(10, 21, 71, 0.06);
   font-size: 0.85rem;
   color: var(--muted);
 }
@@ -247,6 +267,14 @@ body {
   color: var(--text);
   cursor: pointer;
   font-weight: 700;
+  white-space: nowrap;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+
+.ghost-button:hover {
+  border-color: rgba(163, 128, 246, 0.38);
+  background: rgba(163, 128, 246, 0.08);
+  color: var(--accent-dark);
 }
 
 .portal-footer {
@@ -270,5 +298,9 @@ body {
   .upload-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .ghost-button {
+    width: 100%;
   }
 }
