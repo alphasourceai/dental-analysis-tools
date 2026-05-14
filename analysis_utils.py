@@ -493,7 +493,8 @@ def send_followup_email(user_info, tool_name, results):
     
     insights = extract_compelling_insights(results, max_insights=5)
     
-    subject = "alphaSource AI Analysis Results - Key Insights"
+    subject = "AlphaSource Consulting Analysis Results - Key Insights"
+    support_email = "hello@alphasourceconsulting.com"
     
     if insights:
         insights_html = ""
@@ -508,9 +509,9 @@ def send_followup_email(user_info, tool_name, results):
     
     plain_text = f"""Hi {user_info['first_name']},
 
-Thank you for submitting your financial documents to our AI analysis platform.
+Thank you for submitting your practice financial documents to AlphaSource Consulting.
 
-Our multi-model AI analysis has completed its review. Here are the key insights we identified:
+Our analysis has completed its review. Here are the key insights we identified:
 
 {chr(10).join(['- ' + i for i in insights]) if insights else '- Multiple areas of operational improvement identified'}
 
@@ -522,7 +523,7 @@ Or reply to this email for a personalized review.
 
 - Destinee
 alphaSource Consulting
-info@alphasourceai.com"""
+{support_email}"""
 
     html_content = f'''<!doctype html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
@@ -530,8 +531,8 @@ info@alphasourceai.com"""
     <meta http-equiv="x-ua-compatible" content="ie=edge">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="format-detection" content="telephone=no,address=no,email=no,date=no,url=no">
-    <meta name="color-scheme" content="dark only">
-    <meta name="supported-color-schemes" content="dark">
+    <meta name="color-scheme" content="light only">
+    <meta name="supported-color-schemes" content="light">
     <title>Your Financial Analysis Results</title>
     <!--[if mso]>
       <xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml>
@@ -543,20 +544,20 @@ info@alphasourceai.com"""
       }}
     </style>
   </head>
-  <body style="margin:0;padding:0;background:#0A1547;">
+  <body style="margin:0;padding:0;background:#F8F9FD;">
     <div style="display:none!important;max-height:0;overflow:hidden;opacity:0;visibility:hidden;">
-      Your AI-powered financial analysis is ready. Key insights identified for your practice.
+      Your AlphaSource Consulting financial analysis is ready. Key insights identified for your practice.
     </div>
 
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%!important;min-width:100%!important;background:#0A1547;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%!important;min-width:100%!important;background:#F8F9FD;">
       <tr>
         <td align="center">
           <table role="presentation" cellpadding="0" cellspacing="0" width="640" class="container" style="width:640px;max-width:640px;">
             <tr>
               <td class="px-24" style="padding:32px 24px 16px 24px;">
-                <a href="https://www.alphasourceai.com" target="_blank" style="text-decoration:none;border:0;outline:0;display:inline-block;">
+                <a href="https://www.alphasourceconsulting.com" target="_blank" style="text-decoration:none;border:0;outline:0;display:inline-block;">
                   <img src="https://rytlclkkcvvnkoncfaid.supabase.co/storage/v1/object/public/email-assets/Color%20logo%20-%20no%20background.png"
-                    alt="alphaSource AI" width="300"
+                    alt="AlphaSource Consulting" width="300"
                     style="display:block;max-width:300px;width:300px;height:auto;border:0;outline:none;text-decoration:none;">
                 </a>
               </td>
@@ -564,49 +565,49 @@ info@alphasourceai.com"""
 
             <tr>
               <td class="px-24" style="padding:8px 24px 24px 24px;">
-                <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border-radius:16px;background:#0F1E5D;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 24px rgba(0,0,0,0.25);">
+                <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border-radius:18px;background:#FFFFFF;border:1px solid rgba(10,21,71,0.10);box-shadow:0 14px 34px rgba(10,21,71,0.08);">
                   <tr>
-                    <td style="padding:28px 28px 8px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#E6EBFF;font-size:22px;line-height:28px;font-weight:800;">
+                    <td style="padding:28px 28px 8px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#0A1547;font-size:22px;line-height:28px;font-weight:800;">
                       Your Financial Analysis Results
                     </td>
                   </tr>
 
                   <tr>
-                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#C9D3FF;font-size:14px;line-height:22px;">
+                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.68);font-size:14px;line-height:22px;">
                       Hi {user_info['first_name']},<br><br>
-                      Thank you for submitting your financial documents to our AI analysis platform. Our multi-model analysis has completed its review.
+                      Thank you for submitting your practice financial documents to AlphaSource Consulting. Our analysis has completed its review.
                     </td>
                   </tr>
 
                   <tr>
-                    <td style="padding:0 28px 10px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#E6EBFF;font-size:16px;line-height:22px;font-weight:800;">
+                    <td style="padding:0 28px 10px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#0A1547;font-size:16px;line-height:22px;font-weight:800;">
                       Key Insights Identified
                     </td>
                   </tr>
                   <tr>
-                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#C9D3FF;font-size:14px;line-height:22px;">
-                      <ul style="margin:10px 0 0 18px;padding:0;color:#C9D3FF;">
+                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.68);font-size:14px;line-height:22px;">
+                      <ul style="margin:10px 0 0 18px;padding:0;color:rgba(10,21,71,0.68);">
                         {insights_html}
                       </ul>
                     </td>
                   </tr>
 
                   <tr>
-                    <td style="padding:0 28px 10px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#E6EBFF;font-size:16px;line-height:22px;font-weight:800;">
+                    <td style="padding:0 28px 10px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#0A1547;font-size:16px;line-height:22px;font-weight:800;">
                       What's Next?
                     </td>
                   </tr>
                   <tr>
-                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#C9D3FF;font-size:14px;line-height:22px;">
+                    <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.68);font-size:14px;line-height:22px;">
                       These findings represent just a preview of the detailed analysis we've prepared. The complete report includes specific recommendations, benchmarking insights, and prioritized action items tailored to your practice.
                     </td>
                   </tr>
 
                   <tr>
-                    <td style="padding:6px 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#C9D3FF;font-size:14px;line-height:22px;">
+                    <td style="padding:6px 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.68);font-size:14px;line-height:22px;">
                       Ready to dive into the full details? Book a complimentary consultation or simply reply to this email.<br><br>
                       Destinee<br>
-                      <span style="color:#6B77C9;">alphaSource Consulting</span>
+                      <span style="color:#0A1547;font-weight:700;">AlphaSource Consulting</span>
                     </td>
                   </tr>
 
@@ -615,26 +616,26 @@ info@alphasourceai.com"""
                       <!--[if mso]>
                       <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="https://calendar.app.google/QWQor8w5MqDqGXHv7" arcsize="12%" strokecolor="#AD8BF7" strokeweight="1px" fillcolor="#AD8BF7" style="height:44px;v-text-anchor:middle;width:280px;">
                         <w:anchorlock/>
-                        <center style="color:#0A1547;font-family:Segoe UI, Arial, sans-serif;font-size:14px;font-weight:700;">
-                          Book Free Consultation
+                        <center style="color:#FFFFFF;font-family:Segoe UI, Arial, sans-serif;font-size:14px;font-weight:700;">
+                          Book a Consultation
                         </center>
                       </v:roundrect>
                       <![endif]-->
                       <!--[if !mso]><!-- -->
                       <a href="https://calendar.app.google/QWQor8w5MqDqGXHv7" target="_blank"
-                         style="display:inline-block;background:#AD8BF7;color:#0A1547;text-decoration:none;
+                         style="display:inline-block;background:#A380F6;color:#FFFFFF;text-decoration:none;
                                 font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;font-weight:700;
                                 font-size:14px;line-height:14px;padding:15px 22px;border-radius:10px;
-                                border:1px solid rgba(255,255,255,0.12);min-width:260px;text-align:center;">
-                        Book Free Consultation
+                                border:1px solid rgba(163,128,246,0.22);min-width:260px;text-align:center;">
+                        Book a Consultation
                       </a>
                       <!--<![endif]-->
                     </td>
                   </tr>
 
                   <tr>
-                    <td style="padding:0 28px 28px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#6B77C9;font-size:12px;line-height:18px;">
-                      Need help? Email <a href="mailto:info@alphasourceai.com" style="color:#C9D3FF;text-decoration:none;">info@alphasourceai.com</a>
+                    <td style="padding:0 28px 28px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.50);font-size:12px;line-height:18px;">
+                      Need help? Email <a href="mailto:{support_email}" style="color:#A380F6;text-decoration:none;">{support_email}</a>
                     </td>
                   </tr>
 
@@ -643,8 +644,8 @@ info@alphasourceai.com"""
             </tr>
 
             <tr>
-              <td class="px-24" style="padding:8px 24px 40px 24px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#6B77C9;font-size:11px;line-height:16px;text-align:left;">
-                &copy; alphaSource AI - All rights reserved.
+              <td class="px-24" style="padding:8px 24px 40px 24px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.46);font-size:11px;line-height:16px;text-align:left;">
+                &copy; AlphaSource Consulting · All rights reserved.
               </td>
             </tr>
 
@@ -656,7 +657,7 @@ info@alphasourceai.com"""
 </html>'''
     
     message = Mail(
-        from_email="info@alphasourceai.com",
+        from_email=support_email,
         to_emails=user_info['email'],
         subject=subject,
         plain_text_content=plain_text,
