@@ -4341,6 +4341,12 @@ def get_admin_billing_client(
             .limit(25)
             .all()
         )
+        latest_submission = (
+            db.query(ClientSubmission)
+            .filter(func.lower(ClientSubmission.user_email) == client_email)
+            .order_by(ClientSubmission.submitted_at.desc())
+            .first()
+        )
 
         paid_sessions = [
             session
@@ -4369,6 +4375,7 @@ def get_admin_billing_client(
             {
                 "ok": True,
                 "clientEmail": client_email,
+                "latestGhlCid": _clean_text(getattr(latest_submission, "ghl_cid", None)),
                 "customer": _stripe_customer_payload(customers[0]) if customers else None,
                 "customers": [_stripe_customer_payload(customer) for customer in customers],
                 "summary": {
