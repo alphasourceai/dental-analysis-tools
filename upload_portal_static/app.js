@@ -166,7 +166,7 @@ async function handleUpload() {
     }
     if (!ALLOWED_TYPES.has((file.type || "").toLowerCase())) {
       updateFileStatus(file, "Unsupported type", 0);
-      setError("Unsupported file type. Please upload a PDF, CSV, or Excel file.");
+      setError("Unsupported file type. Please upload a PDF, CSV, XLS, or XLSX file.");
       hadFailure = true;
       continue;
     }

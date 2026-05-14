@@ -9,7 +9,7 @@ import base64
 import textwrap
 import logging
 import sendgrid
-from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition, TrackingSettings, ClickTracking
+from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition, ContentId, TrackingSettings, ClickTracking
 from PIL import Image
 from io import BytesIO
 import pymupdf as fitz
@@ -495,6 +495,24 @@ def send_followup_email(user_info, tool_name, results):
     
     subject = "AlphaSource Consulting Analysis Results - Key Insights"
     support_email = "hello@alphasourceconsulting.com"
+    logo_attachment = None
+    signature_html = '<span style="color:#0A1547;font-weight:700;">alphaSource Consulting</span>'
+    logo_path = os.path.join(os.path.dirname(__file__), "public", "logo-dark-text.png")
+    if os.path.exists(logo_path):
+        with open(logo_path, "rb") as logo_file:
+            logo_encoded = base64.b64encode(logo_file.read()).decode()
+        logo_cid = "alphasource-consulting-logo"
+        logo_attachment = Attachment(
+            FileContent(logo_encoded),
+            FileName("logo-dark-text.png"),
+            FileType("image/png"),
+            Disposition("inline"),
+            ContentId(logo_cid),
+        )
+        signature_html = (
+            f'<img src="cid:{logo_cid}" alt="alphaSource Consulting" width="220" '
+            'style="display:block;max-width:220px;width:220px;height:auto;border:0;outline:none;text-decoration:none;">'
+        )
     
     if insights:
         insights_html = ""
@@ -521,7 +539,6 @@ Book a complimentary consultation: https://calendar.app.google/QWQor8w5MqDqGXHv7
 
 Or reply to this email for a personalized review.
 
-- Destinee
 alphaSource Consulting
 {support_email}"""
 
@@ -606,8 +623,7 @@ alphaSource Consulting
                   <tr>
                     <td style="padding:6px 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.68);font-size:14px;line-height:22px;">
                       Ready to dive into the full details? Book a complimentary consultation or simply reply to this email.<br><br>
-                      Destinee<br>
-                      <span style="color:#0A1547;font-weight:700;">AlphaSource Consulting</span>
+                      {signature_html}
                     </td>
                   </tr>
 
@@ -663,6 +679,8 @@ alphaSource Consulting
         plain_text_content=plain_text,
         html_content=html_content
     )
+    if logo_attachment is not None:
+        message.add_attachment(logo_attachment)
     
     message.tracking_settings = TrackingSettings()
     message.tracking_settings.click_tracking = ClickTracking(enable=False, enable_text=False)
