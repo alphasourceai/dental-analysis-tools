@@ -265,42 +265,60 @@ def _send_magic_link_email(
 
     template_id = _get_env("UPLOAD_PORTAL_SENDGRID_TEMPLATE_ID").strip()
     expires_in_minutes = max(1, _token_ttl_minutes())
+    support_email = "hello@alphasourceconsulting.com"
 
     portal_url = _portal_base_url().rstrip("/")
     link = f"{portal_url}/?upload_token={quote(token)}"
-    subject = "Secure upload link"
+    subject = "AlphaSource Consulting Secure Upload Link"
     plain_text = (
-        "Your secure upload link is ready.\n\n"
+        "Secure Document Upload\n\n"
+        "Use the secure link below to upload the requested documents.\n\n"
         f"Link: {link}\n"
         f"Expires in {expires_in_minutes} minutes.\n\n"
-        "If you did not request this link, you can ignore this email."
+        f"Questions? Contact {support_email}.\n\n"
+        "If you did not request this link, you can ignore this email.\n\n"
+        "AlphaSource Consulting · All rights reserved."
     )
     html_content = f"""
     <html>
-      <body style="margin:0;padding:0;background:#252a34;font-family:Raleway,Arial,sans-serif;color:#f5f7ff;">
-        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#252a34;padding:24px;">
+      <body style="margin:0;padding:0;background:#F8F9FD;font-family:Raleway,Arial,sans-serif;color:#0A1547;">
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#F8F9FD;padding:28px 16px;">
           <tr>
             <td align="center">
-              <table width="560" cellpadding="0" cellspacing="0" role="presentation" style="background:#2c323e;border-radius:16px;padding:28px;border:1px solid rgba(255,255,255,0.08);">
+              <table width="560" cellpadding="0" cellspacing="0" role="presentation" style="background:#ffffff;border-radius:18px;padding:0;border:1px solid rgba(10,21,71,0.10);box-shadow:0 14px 34px rgba(10,21,71,0.08);">
                 <tr>
-                  <td style="font-size:18px;font-weight:600;">Secure Upload Link</td>
-                </tr>
-                <tr>
-                  <td style="padding-top:12px;font-size:14px;line-height:1.6;color:#c8cfdd;">
-                    Use the secure link below to upload your documents. This link expires in
-                    <strong>{expires_in_minutes} minutes</strong>.
+                  <td style="padding:26px 28px 8px 28px;font-size:13px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#A380F6;">
+                    AlphaSource Consulting
                   </td>
                 </tr>
                 <tr>
-                  <td style="padding-top:18px;">
-                    <a href="{link}" style="background:#00cfc8;color:#102a2f;text-decoration:none;padding:12px 18px;border-radius:999px;font-weight:600;display:inline-block;">
+                  <td style="padding:0 28px 8px 28px;font-size:24px;line-height:1.25;font-weight:800;color:#0A1547;">
+                    Secure Document Upload
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:4px 28px 18px 28px;font-size:15px;line-height:1.65;color:rgba(10,21,71,0.68);">
+                    Use the secure link below to upload the requested documents. This link expires in
+                    <strong style="color:#0A1547;">{expires_in_minutes} minutes</strong>.
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:2px 28px 24px 28px;">
+                    <a href="{link}" style="background:#A380F6;color:#ffffff;text-decoration:none;padding:13px 20px;border-radius:12px;font-weight:700;display:inline-block;">
                       Upload Documents
                     </a>
                   </td>
                 </tr>
                 <tr>
-                  <td style="padding-top:16px;font-size:12px;color:#9aa4b6;">
+                  <td style="padding:0 28px 24px 28px;font-size:13px;line-height:1.55;color:rgba(10,21,71,0.56);">
+                    Questions? Email <a href="mailto:{support_email}" style="color:#A380F6;text-decoration:none;">{support_email}</a>.
+                    <br><br>
                     If you did not request this link, you can ignore this email.
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:16px 28px 24px 28px;border-top:1px solid rgba(10,21,71,0.08);font-size:12px;color:rgba(10,21,71,0.46);">
+                    AlphaSource Consulting · All rights reserved.
                   </td>
                 </tr>
               </table>
@@ -324,6 +342,13 @@ def _send_magic_link_email(
         message.dynamic_template_data = {
             "upload_link": link,
             "expires_in_minutes": expires_in_minutes,
+            "subject": subject,
+            "brand_name": "AlphaSource Consulting",
+            "headline": "Secure Document Upload",
+            "body": "Use the secure link below to upload the requested documents.",
+            "cta_label": "Upload Documents",
+            "support_email": support_email,
+            "footer": "AlphaSource Consulting · All rights reserved.",
         }
         template_mode = "dynamic"
     else:
