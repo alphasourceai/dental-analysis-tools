@@ -741,7 +741,7 @@ def send_email(user_info, file_content, file_name, file_type, results, tool_name
     
     message = Mail(
         from_email="info@alphasourceai.com",
-        to_emails="consulting@alphasourceai.com",
+        to_emails="analyzer@alphasourceconsulting.com",
         subject=subject,
         plain_text_content=body
     )
