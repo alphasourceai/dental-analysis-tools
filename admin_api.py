@@ -4347,6 +4347,16 @@ def get_admin_billing_client(
             .order_by(ClientSubmission.submitted_at.desc())
             .first()
         )
+        user_record = (
+            db.query(User)
+            .filter(func.lower(User.email) == client_email)
+            .first()
+        )
+        client_profile = _client_billing_profile_payload(
+            client_email,
+            user_record,
+            latest_submission,
+        )
 
         paid_sessions = [
             session
@@ -4375,7 +4385,8 @@ def get_admin_billing_client(
             {
                 "ok": True,
                 "clientEmail": client_email,
-                "latestGhlCid": _clean_text(getattr(latest_submission, "ghl_cid", None)),
+                "latestGhlCid": client_profile["latestGhlCid"],
+                "clientProfile": client_profile,
                 "customer": _stripe_customer_payload(customers[0]) if customers else None,
                 "customers": [_stripe_customer_payload(customer) for customer in customers],
                 "summary": {
@@ -7744,6 +7755,54 @@ def _empty_billing_summary() -> dict[str, Any]:
         "expiredCheckoutSessionCount": 0,
         "manualOverrideCount": 0,
         "latestPaymentStatus": None,
+    }
+
+
+def _first_present_text(*values: object) -> Optional[str]:
+    for value in values:
+        cleaned = _clean_text(value)
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _client_billing_profile_payload(
+    client_email: str,
+    user: Optional[User],
+    latest_submission: Optional[ClientSubmission],
+) -> dict[str, Optional[str]]:
+    first_name = _first_present_text(
+        getattr(user, "first_name", None),
+        getattr(latest_submission, "first_name", None),
+    )
+    last_name = _first_present_text(
+        getattr(user, "last_name", None),
+        getattr(latest_submission, "last_name", None),
+    )
+    full_name = " ".join(part for part in (first_name, last_name) if part).strip() or None
+
+    return {
+        "name": full_name,
+        "firstName": first_name,
+        "lastName": last_name,
+        "email": _first_present_text(
+            getattr(user, "email", None),
+            getattr(latest_submission, "user_email", None),
+            client_email,
+        ),
+        "officeName": _first_present_text(
+            getattr(user, "office_name", None),
+            getattr(latest_submission, "office_name", None),
+        ),
+        "orgType": _first_present_text(
+            getattr(user, "org_type", None),
+            getattr(latest_submission, "org_type", None),
+        ),
+        "phone": _first_present_text(
+            getattr(user, "phone", None),
+            getattr(latest_submission, "phone", None),
+        ),
+        "latestGhlCid": _clean_text(getattr(latest_submission, "ghl_cid", None)),
     }
 
 
