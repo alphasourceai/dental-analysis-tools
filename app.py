@@ -384,7 +384,7 @@ SHOW_DEBUG_CID = os.getenv("SHOW_DEBUG_CID", "").strip().lower() in ("1", "true"
 SHOW_DEBUG_ADMIN_ROUTE = os.getenv("SHOW_DEBUG_ADMIN_ROUTE", "").strip().lower() in ("1", "true", "yes", "on")
 
 # ---- Page Config ----
-st.set_page_config(page_title="AlphaSource Dental Analysis", page_icon="📊", layout="centered")
+st.set_page_config(page_title="alphaSource Dental Analysis", page_icon="📊", layout="centered")
 
 # ---- Style ----
 st.markdown("""

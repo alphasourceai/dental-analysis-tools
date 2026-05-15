@@ -185,7 +185,7 @@ async function handleUpload() {
       await postJson("/api/upload-portal/complete", { upload_id: signed.upload_id }, sessionToken);
     } catch (error) {
       updateFileStatus(file, "Failed", 0);
-      setError("One or more uploads failed. Please retry or contact AlphaSource Consulting.");
+      setError("One or more uploads failed. Please retry or contact alphaSource Consulting.");
       hadFailure = true;
     }
   }
