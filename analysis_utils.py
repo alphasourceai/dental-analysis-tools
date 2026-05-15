@@ -493,7 +493,7 @@ def send_followup_email(user_info, tool_name, results):
     
     insights = extract_compelling_insights(results, max_insights=5)
     
-    subject = "AlphaSource Consulting Analysis Results - Key Insights"
+    subject = "alphaSource Consulting Analysis Results - Key Insights"
     support_email = "hello@alphasourceconsulting.com"
     logo_attachment = None
     signature_html = '<span style="color:#0A1547;font-weight:700;">alphaSource Consulting</span>'
@@ -527,7 +527,7 @@ def send_followup_email(user_info, tool_name, results):
     
     plain_text = f"""Hi {user_info['first_name']},
 
-Thank you for submitting your practice financial documents to AlphaSource Consulting.
+Thank you for submitting your practice financial documents to alphaSource Consulting.
 
 Our analysis has completed its review. Here are the key insights we identified:
 
@@ -563,7 +563,7 @@ alphaSource Consulting
   </head>
   <body style="margin:0;padding:0;background:#F8F9FD;">
     <div style="display:none!important;max-height:0;overflow:hidden;opacity:0;visibility:hidden;">
-      Your AlphaSource Consulting financial analysis is ready. Key insights identified for your practice.
+      Your alphaSource Consulting financial analysis is ready. Key insights identified for your practice.
     </div>
 
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%!important;min-width:100%!important;background:#F8F9FD;">
@@ -574,7 +574,7 @@ alphaSource Consulting
               <td class="px-24" style="padding:32px 24px 16px 24px;">
                 <a href="https://www.alphasourceconsulting.com" target="_blank" style="text-decoration:none;border:0;outline:0;display:inline-block;">
                   <img src="https://rytlclkkcvvnkoncfaid.supabase.co/storage/v1/object/public/email-assets/Color%20logo%20-%20no%20background.png"
-                    alt="AlphaSource Consulting" width="300"
+                    alt="alphaSource Consulting" width="300"
                     style="display:block;max-width:300px;width:300px;height:auto;border:0;outline:none;text-decoration:none;">
                 </a>
               </td>
@@ -592,7 +592,7 @@ alphaSource Consulting
                   <tr>
                     <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.68);font-size:14px;line-height:22px;">
                       Hi {user_info['first_name']},<br><br>
-                      Thank you for submitting your practice financial documents to AlphaSource Consulting. Our analysis has completed its review.
+                      Thank you for submitting your practice financial documents to alphaSource Consulting. Our analysis has completed its review.
                     </td>
                   </tr>
 
@@ -661,7 +661,7 @@ alphaSource Consulting
 
             <tr>
               <td class="px-24" style="padding:8px 24px 40px 24px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.46);font-size:11px;line-height:16px;text-align:left;">
-                &copy; AlphaSource Consulting · All rights reserved.
+                &copy; alphaSource Consulting · All rights reserved.
               </td>
             </tr>
 

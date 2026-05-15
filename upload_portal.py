@@ -269,7 +269,7 @@ def _send_magic_link_email(
 
     portal_url = _portal_base_url().rstrip("/")
     link = f"{portal_url}/?upload_token={quote(token)}"
-    subject = "AlphaSource Consulting Secure Upload Link"
+    subject = "alphaSource Consulting Secure Upload Link"
     plain_text = (
         "Secure Document Upload\n\n"
         "Use the secure link below to upload the requested documents.\n\n"
@@ -277,7 +277,7 @@ def _send_magic_link_email(
         f"Expires in {expires_in_minutes} minutes.\n\n"
         f"Questions? Contact {support_email}.\n\n"
         "If you did not request this link, you can ignore this email.\n\n"
-        "AlphaSource Consulting · All rights reserved."
+        "alphaSource Consulting · All rights reserved."
     )
     html_content = f"""
     <html>
@@ -288,7 +288,7 @@ def _send_magic_link_email(
               <table width="560" cellpadding="0" cellspacing="0" role="presentation" style="background:#ffffff;border-radius:18px;padding:0;border:1px solid rgba(10,21,71,0.10);box-shadow:0 14px 34px rgba(10,21,71,0.08);">
                 <tr>
                   <td style="padding:26px 28px 8px 28px;font-size:13px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#A380F6;">
-                    AlphaSource Consulting
+                    alphaSource Consulting
                   </td>
                 </tr>
                 <tr>
@@ -318,7 +318,7 @@ def _send_magic_link_email(
                 </tr>
                 <tr>
                   <td style="padding:16px 28px 24px 28px;border-top:1px solid rgba(10,21,71,0.08);font-size:12px;color:rgba(10,21,71,0.46);">
-                    AlphaSource Consulting · All rights reserved.
+                    alphaSource Consulting · All rights reserved.
                   </td>
                 </tr>
               </table>
@@ -343,12 +343,12 @@ def _send_magic_link_email(
             "upload_link": link,
             "expires_in_minutes": expires_in_minutes,
             "subject": subject,
-            "brand_name": "AlphaSource Consulting",
+            "brand_name": "alphaSource Consulting",
             "headline": "Secure Document Upload",
             "body": "Use the secure link below to upload the requested documents.",
             "cta_label": "Upload Documents",
             "support_email": support_email,
-            "footer": "AlphaSource Consulting · All rights reserved.",
+            "footer": "alphaSource Consulting · All rights reserved.",
         }
         template_mode = "dynamic"
     else:
