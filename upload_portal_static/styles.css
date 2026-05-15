@@ -85,17 +85,12 @@ body {
   font-size: 1rem;
 }
 
-.pill {
-  display: inline-flex;
-  padding: 6px 14px;
-  border-radius: 999px;
-  background: rgba(163, 128, 246, 0.12);
-  border: 1px solid rgba(163, 128, 246, 0.28);
-  color: var(--accent);
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+.portal-logo {
+  display: block;
+  width: 220px;
+  max-width: 70vw;
+  height: auto;
+  margin: 0 auto 18px;
 }
 
 .card {
