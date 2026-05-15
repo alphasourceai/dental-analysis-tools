@@ -4347,6 +4347,30 @@ def get_admin_billing_client(
             .order_by(ClientSubmission.submitted_at.desc())
             .first()
         )
+        recent_submissions = (
+            db.query(ClientSubmission)
+            .filter(func.lower(ClientSubmission.user_email) == client_email)
+            .order_by(ClientSubmission.submitted_at.desc())
+            .limit(10)
+            .all()
+        )
+        recent_submission_ids = [
+            getattr(submission, "id", None)
+            for submission in recent_submissions
+            if getattr(submission, "id", None)
+        ]
+        recent_uploads_by_submission_id: dict[str, Upload] = {}
+        if recent_submission_ids:
+            recent_uploads = (
+                db.query(Upload)
+                .filter(Upload.submission_id.in_(recent_submission_ids))
+                .order_by(Upload.id.desc())
+                .all()
+            )
+            for upload in recent_uploads:
+                submission_id = _id_text(getattr(upload, "submission_id", None))
+                if submission_id and submission_id not in recent_uploads_by_submission_id:
+                    recent_uploads_by_submission_id[submission_id] = upload
         user_record = (
             db.query(User)
             .filter(func.lower(User.email) == client_email)
@@ -4411,6 +4435,15 @@ def get_admin_billing_client(
                         checkout_related_uploads.get(_id_text(getattr(session, "id", None)) or "", []),
                     )
                     for session in checkout_sessions[:25]
+                ],
+                "recentSubmissions": [
+                    _client_recent_submission_payload(
+                        submission,
+                        recent_uploads_by_submission_id.get(
+                            _id_text(getattr(submission, "id", None)) or ""
+                        ),
+                    )
+                    for submission in recent_submissions
                 ],
                 "uploads": [_upload_payload(upload) for upload in uploads],
                 "billingOverrides": [
@@ -6832,6 +6865,35 @@ def _upload_payload(upload: Upload) -> dict[str, Any]:
         "voidedAt": _iso_datetime(getattr(upload, "voided_at", None)),
         "voidReason": _clean_text(getattr(upload, "void_reason", None)),
         "voidedByAdminEmail": _clean_text(getattr(upload, "voided_by_admin_email", None)),
+    }
+
+
+def _client_recent_submission_payload(
+    submission: ClientSubmission,
+    upload: Optional[Upload] = None,
+) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(submission, "id", None)),
+        "status": _clean_text(getattr(submission, "status", None)),
+        "source": _clean_text(getattr(submission, "source", None)),
+        "submittedAt": _iso_datetime(getattr(submission, "submitted_at", None)),
+        "completedAt": _iso_datetime(getattr(submission, "completed_at", None)),
+        "canceledAt": _iso_datetime(getattr(submission, "canceled_at", None)),
+        "erroredAt": _iso_datetime(getattr(submission, "errored_at", None)),
+        "errorMessage": _clean_text(getattr(submission, "error_message", None)),
+        "ghlCid": _clean_text(getattr(submission, "ghl_cid", None)),
+        "upload": _client_recent_submission_upload_payload(upload) if upload else None,
+    }
+
+
+def _client_recent_submission_upload_payload(upload: Upload) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(upload, "id", None)),
+        "fileName": _clean_text(getattr(upload, "file_name", None)),
+        "toolName": _clean_text(getattr(upload, "tool_name", None)),
+        "paid": bool(getattr(upload, "paid", False)),
+        "voided": _upload_is_voided(upload),
+        "uploadTime": _clean_text(getattr(upload, "upload_time", None)),
     }
 
 

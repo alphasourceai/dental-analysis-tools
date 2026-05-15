@@ -209,7 +209,25 @@ def cancel_public_analyzer_submission(job_id: str) -> JSONResponse:
             return _error_response(404, "not_found", "Analyzer submission job was not found.")
 
         status = str(job.get("status") or "")
-        if status in {"queued", "processing"}:
+        if status in {"completed", "error"}:
+            return _error_response(409, "job_already_finished", "This analyzer job has already finished.")
+
+        if status in {"cancel_requested", "canceled"}:
+            response_payload = {
+                "ok": True,
+                "job_id": job_id,
+                "status": status,
+                "message": job.get("error_message") or CANCELED_MESSAGE,
+            }
+
+        elif bool(job.get("finalization_started")):
+            return _error_response(
+                409,
+                "job_already_finalizing",
+                "This analysis is already finalizing and may not be stopped.",
+            )
+
+        elif status in {"queued", "processing"}:
             now = time.time()
             job.update(
                 {
@@ -225,14 +243,6 @@ def cancel_public_analyzer_submission(job_id: str) -> JSONResponse:
                 "job_id": job_id,
                 "status": "cancel_requested",
                 "message": "Cancel requested.",
-            }
-
-        elif status in {"cancel_requested", "canceled"}:
-            response_payload = {
-                "ok": True,
-                "job_id": job_id,
-                "status": status,
-                "message": job.get("error_message") or CANCELED_MESSAGE,
             }
 
         else:
@@ -295,6 +305,7 @@ def _process_submission_job(
                 job_id,
                 submission_id=submission_id,
             ),
+            finalization_started_callback=lambda: _mark_job_finalizing(job_id),
         )
 
         if result.get("status") == "canceled":
@@ -360,6 +371,7 @@ def _create_job(*, status: str) -> str:
         jobs[job_id] = {
             "status": status,
             "cancel_requested": False,
+            "finalization_started": False,
             "submission_id": None,
             "upload_id": None,
             "error_code": None,
@@ -395,6 +407,25 @@ def _job_field(job_id: str, field: str) -> Any:
         if not job:
             return None
         return job.get(field)
+
+
+def _mark_job_finalizing(job_id: str) -> bool:
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return False
+        status = str(job.get("status") or "")
+        if bool(job.get("cancel_requested")) or status in {"cancel_requested", "canceled"}:
+            return False
+        job.update(
+            {
+                "finalization_started": True,
+                "error_code": None,
+                "error_message": "Finalizing results.",
+                "updated_at": time.time(),
+            }
+        )
+        return True
 
 
 def _mark_job_canceled(

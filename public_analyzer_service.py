@@ -47,6 +47,7 @@ PROVIDER_UNAVAILABLE_MESSAGE = (
 CANCELED_MESSAGE = "Analysis canceled. No results were saved."
 CancelChecker = Callable[[], bool]
 SubmissionCreatedCallback = Callable[[str], None]
+FinalizationStartedCallback = Callable[[], bool]
 
 
 class PublicAnalyzerError(Exception):
@@ -90,6 +91,7 @@ def submit_public_analyzer_submission(
     require_public_api_metadata: bool = False,
     cancel_checker: Optional[CancelChecker] = None,
     submission_created_callback: Optional[SubmissionCreatedCallback] = None,
+    finalization_started_callback: Optional[FinalizationStartedCallback] = None,
 ) -> Dict[str, Any]:
     """Run the existing public analyzer workflow without Streamlit session state."""
     del source_path  # The current schema does not store the originating frontend path.
@@ -161,6 +163,8 @@ def submit_public_analyzer_submission(
         # After this point, external email side effects may begin. To avoid a
         # half-sent/half-saved result, cancellation is no longer observed.
         _raise_if_canceled(cancel_checker)
+        if not _notify_finalization_started(finalization_started_callback, run_id):
+            raise PublicAnalyzerCanceled(submission_id=submission_id, upload_id=upload_id)
         emails_sent = _send_public_emails(user_info, file_bytes, file_name, file_type, results)
 
         upload_id = _create_upload_record(
@@ -245,6 +249,19 @@ def _notify_submission_created(
         callback(submission_id)
     except Exception:
         logger.warning("[analysis] submission callback failed run_id=%s", run_id)
+
+
+def _notify_finalization_started(
+    callback: Optional[FinalizationStartedCallback],
+    run_id: str,
+) -> bool:
+    if not callback:
+        return True
+    try:
+        return bool(callback())
+    except Exception:
+        logger.warning("[analysis] finalization callback failed run_id=%s", run_id)
+        return True
 
 
 def _result(
