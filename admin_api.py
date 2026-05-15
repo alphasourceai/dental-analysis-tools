@@ -2546,7 +2546,7 @@ def process_admin_ar_analysis_job(
             data_input = extract_xlsx_text(file_bytes)
             source_format = "xlsx"
         elif file_extension == ".pdf":
-            data_input = extract_pdf_text(file_bytes)
+            data_input = extract_pdf_text(file_bytes, enable_ocr=True)
             source_format = "pdf"
         else:
             raise AdminFinancialProcessingError(
@@ -2879,7 +2879,7 @@ def process_admin_claims_analysis_job(
             data_input = extract_xlsx_text(file_bytes)
             source_format = "xlsx"
         elif file_extension == ".pdf":
-            data_input = extract_pdf_text(file_bytes)
+            data_input = extract_pdf_text(file_bytes, enable_ocr=True)
             source_format = "pdf"
         else:
             raise AdminFinancialProcessingError(

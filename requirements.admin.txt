@@ -11,5 +11,7 @@ openai
 anthropic
 openpyxl
 PyMuPDF
+pillow
+pytesseract
 fpdf2
 sendgrid
