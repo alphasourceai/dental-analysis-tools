@@ -28,6 +28,8 @@ MAX_XLSX_COLUMNS_PER_ROW = 50
 MAX_XLSX_CELL_CHARS = 500
 MAX_PDF_PAGES = 30
 MAX_PDF_CHARS = 60000
+MAX_PDF_OCR_PAGES = 12
+PDF_OCR_RENDER_SCALE = 2.0
 
 CancelChecker = Callable[[], bool]
 
@@ -177,7 +179,7 @@ def extract_xlsx_text(file_bytes: bytes) -> str:
     return data_input
 
 
-def extract_pdf_text(file_bytes: bytes) -> str:
+def extract_pdf_text(file_bytes: bytes, *, enable_ocr: bool = False) -> str:
     try:
         import fitz
     except ImportError as exc:
@@ -196,11 +198,19 @@ def extract_pdf_text(file_bytes: bytes) -> str:
 
             rendered_pages: list[str] = []
             extracted_chars = 0
+            ocr_pages = 0
+            ocr_dependencies: Optional[tuple[Any, Any]] = None
             for page_index, page in enumerate(document):
                 if page_index >= MAX_PDF_PAGES or extracted_chars >= MAX_PDF_CHARS:
                     break
 
                 page_text = _normalize_pdf_text(page.get_text("text") or "")
+                if not page_text and enable_ocr and ocr_pages < MAX_PDF_OCR_PAGES:
+                    if ocr_dependencies is None:
+                        ocr_dependencies = _load_pdf_ocr_dependencies()
+                    page_text = _extract_pdf_page_ocr_text(page, fitz, ocr_dependencies)
+                    ocr_pages += 1
+
                 if not page_text:
                     continue
 
@@ -220,6 +230,11 @@ def extract_pdf_text(file_bytes: bytes) -> str:
 
     data_input = "\n\n".join(rendered_pages).strip()
     if not data_input:
+        if enable_ocr:
+            raise AdminFinancialProcessingError(
+                "empty_pdf_text",
+                "PDF did not contain readable text after OCR. Upload a clearer PDF or a file with selectable text.",
+            )
         raise AdminFinancialProcessingError(
             "empty_pdf_text",
             "PDF did not contain selectable text. Scanned or image-only PDFs are not supported yet because OCR is not enabled.",
@@ -512,6 +527,41 @@ def _render_xlsx_cell(value: Any) -> str:
 def _normalize_pdf_text(value: str) -> str:
     lines = [" ".join(line.strip().split()) for line in value.splitlines()]
     return "\n".join(line for line in lines if line)
+
+
+def _load_pdf_ocr_dependencies() -> tuple[Any, Any]:
+    try:
+        from PIL import Image
+        import pytesseract
+    except ImportError as exc:
+        raise AdminFinancialProcessingError(
+            "pdf_ocr_dependency_missing",
+            "PDF OCR processing is not configured.",
+        ) from exc
+    return Image, pytesseract
+
+
+def _extract_pdf_page_ocr_text(
+    page: Any,
+    fitz_module: Any,
+    ocr_dependencies: tuple[Any, Any],
+) -> str:
+    Image, pytesseract = ocr_dependencies
+    try:
+        matrix = fitz_module.Matrix(PDF_OCR_RENDER_SCALE, PDF_OCR_RENDER_SCALE)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        with Image.open(BytesIO(pixmap.tobytes("png"))) as image:
+            return _normalize_pdf_text(pytesseract.image_to_string(image) or "")
+    except Exception as exc:
+        if type(exc).__name__ == "TesseractNotFoundError":
+            raise AdminFinancialProcessingError(
+                "pdf_ocr_dependency_missing",
+                "PDF OCR processing is not configured.",
+            ) from exc
+        raise AdminFinancialProcessingError(
+            "pdf_ocr_failed",
+            "PDF OCR text could not be extracted.",
+        ) from exc
 
 
 def _get_model_config() -> dict[str, str]:
