@@ -25,6 +25,7 @@ DEFAULT_RATE_LIMIT_MAX = 3
 DEFAULT_PREFILL_RATE_LIMIT_MAX = 30
 READ_CHUNK_SIZE = 1024 * 1024
 CID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{4,128}$")
+CANCELED_MESSAGE = "Analysis canceled. No results were saved."
 
 app = FastAPI(title="Public Analyzer API")
 
@@ -200,6 +201,46 @@ def get_public_analyzer_submission(job_id: str) -> JSONResponse:
     return JSONResponse(response)
 
 
+@app.post("/api/public-analyzer/submissions/{job_id}/cancel")
+def cancel_public_analyzer_submission(job_id: str) -> JSONResponse:
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return _error_response(404, "not_found", "Analyzer submission job was not found.")
+
+        status = str(job.get("status") or "")
+        if status in {"queued", "processing"}:
+            now = time.time()
+            job.update(
+                {
+                    "status": "cancel_requested",
+                    "cancel_requested": True,
+                    "error_code": None,
+                    "error_message": "Cancel requested.",
+                    "updated_at": now,
+                }
+            )
+            response_payload = {
+                "ok": True,
+                "job_id": job_id,
+                "status": "cancel_requested",
+                "message": "Cancel requested.",
+            }
+
+        elif status in {"cancel_requested", "canceled"}:
+            response_payload = {
+                "ok": True,
+                "job_id": job_id,
+                "status": status,
+                "message": job.get("error_message") or CANCELED_MESSAGE,
+            }
+
+        else:
+            return _error_response(409, "job_already_finished", "This analyzer job has already finished.")
+
+    return JSONResponse(response_payload)
+
+
 def _process_submission_job(
     *,
     job_id: str,
@@ -219,10 +260,18 @@ def _process_submission_job(
     cid: Optional[str],
     source_path: Optional[str],
 ) -> None:
+    if _job_cancel_requested(job_id):
+        _mark_job_canceled(job_id)
+        _log_job_status("canceled", job_id)
+        return
+
     _log_job_status("started", job_id)
     _update_job(job_id, status="processing")
+    canceled_exc_type = None
     try:
-        from public_analyzer_service import submit_public_analyzer_submission
+        from public_analyzer_service import PublicAnalyzerCanceled, submit_public_analyzer_submission
+
+        canceled_exc_type = PublicAnalyzerCanceled
 
         result = submit_public_analyzer_submission(
             first_name=first_name,
@@ -241,7 +290,21 @@ def _process_submission_job(
             content_type=content_type,
             cid=cid,
             source_path=source_path,
+            cancel_checker=lambda: _job_cancel_requested(job_id),
+            submission_created_callback=lambda submission_id: _update_job(
+                job_id,
+                submission_id=submission_id,
+            ),
         )
+
+        if result.get("status") == "canceled":
+            _mark_job_canceled(
+                job_id,
+                submission_id=result.get("submission_id"),
+                upload_id=result.get("upload_id"),
+            )
+            _log_job_status("canceled", job_id)
+            return
 
         completed_status = "completed" if result.get("ok") else "error"
         _update_job(
@@ -256,7 +319,13 @@ def _process_submission_job(
             _log_job_status("completed", job_id)
         else:
             _log_job_status("failed", job_id)
-    except Exception:
+    except Exception as exc:
+        if canceled_exc_type is not None and isinstance(exc, canceled_exc_type):
+            submission_id = getattr(exc, "submission_id", None) or _job_field(job_id, "submission_id")
+            upload_id = getattr(exc, "upload_id", None)
+            _mark_job_canceled(job_id, submission_id=submission_id, upload_id=upload_id)
+            _log_job_status("canceled", job_id)
+            return
         _log_job_status("failed", job_id)
         _update_job(
             job_id,
@@ -290,10 +359,12 @@ def _create_job(*, status: str) -> str:
     with jobs_lock:
         jobs[job_id] = {
             "status": status,
+            "cancel_requested": False,
             "submission_id": None,
             "upload_id": None,
             "error_code": None,
             "error_message": None,
+            "canceled_at": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -307,6 +378,43 @@ def _update_job(job_id: str, **updates: Any) -> None:
             return
         job.update(updates)
         job["updated_at"] = time.time()
+
+
+def _job_cancel_requested(job_id: str) -> bool:
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return False
+        status = str(job.get("status") or "")
+        return bool(job.get("cancel_requested")) or status in {"cancel_requested", "canceled"}
+
+
+def _job_field(job_id: str, field: str) -> Any:
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return None
+        return job.get(field)
+
+
+def _mark_job_canceled(
+    job_id: str,
+    *,
+    submission_id: Optional[Any] = None,
+    upload_id: Optional[Any] = None,
+) -> None:
+    updates: Dict[str, Any] = {
+        "status": "canceled",
+        "cancel_requested": True,
+        "canceled_at": time.time(),
+        "error_code": "analysis_canceled",
+        "error_message": CANCELED_MESSAGE,
+    }
+    if submission_id:
+        updates["submission_id"] = str(submission_id)
+    if upload_id:
+        updates["upload_id"] = str(upload_id)
+    _update_job(job_id, **updates)
 
 
 async def _read_upload_file(file: UploadFile) -> bytes:

@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import datetime
 from io import BytesIO
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import pandas as pd
 import requests
@@ -44,6 +44,9 @@ PROVIDER_UNAVAILABLE_MESSAGE = (
     "Analysis unavailable from this model due to temporary provider capacity. "
     "Other model results were processed."
 )
+CANCELED_MESSAGE = "Analysis canceled. No results were saved."
+CancelChecker = Callable[[], bool]
+SubmissionCreatedCallback = Callable[[str], None]
 
 
 class PublicAnalyzerError(Exception):
@@ -51,6 +54,20 @@ class PublicAnalyzerError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class PublicAnalyzerCanceled(Exception):
+    def __init__(
+        self,
+        submission_id: Optional[Any] = None,
+        upload_id: Optional[Any] = None,
+        message: str = CANCELED_MESSAGE,
+    ):
+        super().__init__(message)
+        self.code = "analysis_canceled"
+        self.message = message
+        self.submission_id = str(submission_id) if submission_id else None
+        self.upload_id = str(upload_id) if upload_id else None
 
 
 def submit_public_analyzer_submission(
@@ -71,6 +88,8 @@ def submit_public_analyzer_submission(
     acknowledgement_ip: Optional[str] = None,
     acknowledgement_version: Optional[str] = None,
     require_public_api_metadata: bool = False,
+    cancel_checker: Optional[CancelChecker] = None,
+    submission_created_callback: Optional[SubmissionCreatedCallback] = None,
 ) -> Dict[str, Any]:
     """Run the existing public analyzer workflow without Streamlit session state."""
     del source_path  # The current schema does not store the originating frontend path.
@@ -80,6 +99,7 @@ def submit_public_analyzer_submission(
     run_id = str(uuid.uuid4())
 
     try:
+        _raise_if_canceled(cancel_checker)
         validated = _validate_submission_input(
             first_name=first_name,
             last_name=last_name,
@@ -92,6 +112,7 @@ def submit_public_analyzer_submission(
             financial_only_acknowledgement=financial_only_acknowledgement,
             require_public_api_metadata=require_public_api_metadata,
         )
+        _raise_if_canceled(cancel_checker)
         normalized_email = validated["email"]
         file_name = validated["original_filename"]
         normalized_phone = validated["phone"]
@@ -115,9 +136,13 @@ def submit_public_analyzer_submission(
         logger.info("[analysis] start run_id=%s source=public_service", run_id)
         log_active_models(run_id)
 
+        _raise_if_canceled(cancel_checker)
         _upsert_user(user_info)
+        _raise_if_canceled(cancel_checker)
         submission_id = _create_client_submission(user_info, run_id)
+        _notify_submission_created(submission_created_callback, submission_id, run_id)
 
+        _raise_if_canceled(cancel_checker)
         upload_file_id = persist_upload_file(
             file_bytes=file_bytes,
             user_email=normalized_email,
@@ -128,8 +153,14 @@ def submit_public_analyzer_submission(
         if not upload_file_id:
             raise PublicAnalyzerError("storage_failed", "Unable to persist uploaded file.")
 
+        _raise_if_canceled(cancel_checker)
         data_input = _extract_data_input(file_bytes, file_name)
-        results = _run_public_analysis(data_input)
+        _raise_if_canceled(cancel_checker)
+        results = _run_public_analysis(data_input, cancel_checker=cancel_checker)
+
+        # After this point, external email side effects may begin. To avoid a
+        # half-sent/half-saved result, cancellation is no longer observed.
+        _raise_if_canceled(cancel_checker)
         emails_sent = _send_public_emails(user_info, file_bytes, file_name, file_type, results)
 
         upload_id = _create_upload_record(
@@ -159,6 +190,13 @@ def submit_public_analyzer_submission(
             error_code="email_failed",
             error_message="One or more analysis emails failed to send.",
         )
+    except PublicAnalyzerCanceled as exc:
+        if submission_id:
+            _mark_submission_canceled(submission_id)
+            exc.submission_id = str(submission_id)
+        if upload_id:
+            exc.upload_id = str(upload_id)
+        raise
     except PublicAnalyzerError as exc:
         if submission_id:
             _mark_submission_error(submission_id, exc.code, exc.message)
@@ -182,6 +220,31 @@ def submit_public_analyzer_submission(
             error_code="analysis_failed",
             error_message=str(exc)[:300],
         )
+
+
+def _raise_if_canceled(cancel_checker: Optional[CancelChecker]) -> None:
+    if not cancel_checker:
+        return
+    try:
+        if cancel_checker():
+            raise PublicAnalyzerCanceled()
+    except PublicAnalyzerCanceled:
+        raise
+    except Exception:
+        logger.warning("[analysis] cancel check failed")
+
+
+def _notify_submission_created(
+    callback: Optional[SubmissionCreatedCallback],
+    submission_id: str,
+    run_id: str,
+) -> None:
+    if not callback:
+        return
+    try:
+        callback(submission_id)
+    except Exception:
+        logger.warning("[analysis] submission callback failed run_id=%s", run_id)
 
 
 def _result(
@@ -316,7 +379,11 @@ def _extract_data_input(file_bytes: bytes, filename: str) -> str:
     return pd.read_excel(file_obj).to_string(index=False)
 
 
-def _run_public_analysis(data_input: str) -> Dict[str, Any]:
+def _run_public_analysis(
+    data_input: str,
+    *,
+    cancel_checker: Optional[CancelChecker] = None,
+) -> Dict[str, Any]:
     model_labels = get_model_labels()
     provider_specs = [
         ("openai", "OpenAI Analysis", "openai", openai_analysis),
@@ -329,11 +396,14 @@ def _run_public_analysis(data_input: str) -> Dict[str, Any]:
     successful_provider_count = 0
 
     for provider_name, result_key, label_key, analysis_func in provider_specs:
+        _raise_if_canceled(cancel_checker)
         analysis_text, succeeded = _run_provider_analysis_with_retry(
             provider_name=provider_name,
             analysis_func=analysis_func,
             data_input=data_input,
+            cancel_checker=cancel_checker,
         )
+        _raise_if_canceled(cancel_checker)
         raw_analyses[result_key] = analysis_text
         parsed_issues[label_key] = parse_issues_from_analysis(analysis_text, model_labels[label_key])
         parsed_trends[label_key] = parse_trends_from_analysis(analysis_text, model_labels[label_key])
@@ -365,8 +435,10 @@ def _run_provider_analysis_with_retry(
     provider_name: str,
     analysis_func: Any,
     data_input: str,
+    cancel_checker: Optional[CancelChecker] = None,
 ) -> tuple[str, bool]:
     for attempt in range(1, MAX_PROVIDER_RETRIES + 2):
+        _raise_if_canceled(cancel_checker)
         try:
             analysis_text = analysis_func(data_input)
             if not isinstance(analysis_text, str) or not analysis_text.strip():
@@ -389,6 +461,7 @@ def _run_provider_analysis_with_retry(
             )
             if not transient or attempt > MAX_PROVIDER_RETRIES:
                 break
+            _raise_if_canceled(cancel_checker)
             time.sleep(PROVIDER_RETRY_BACKOFF_SECONDS * attempt)
 
     logger.warning("[analysis] provider unavailable provider=%s", provider_name)
@@ -626,6 +699,27 @@ def _mark_submission_error(
         )
     except Exception as exc:
         logger.error("[analysis] submission error update failed: %s", str(exc))
+    finally:
+        db.close()
+
+
+def _mark_submission_canceled(
+    submission_id: str,
+    error_message: Optional[str] = None,
+) -> None:
+    db = SessionLocal()
+    try:
+        update_submission_status(
+            db,
+            submission_id,
+            status="canceled",
+            canceled_at=datetime.utcnow(),
+            completed_at=None,
+            errored_at=None,
+            error_message=error_message or CANCELED_MESSAGE,
+        )
+    except Exception as exc:
+        logger.error("[analysis] submission cancel update failed: %s", str(exc))
     finally:
         db.close()
 
