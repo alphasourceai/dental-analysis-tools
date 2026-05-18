@@ -2263,6 +2263,7 @@ def process_admin_financial_analysis_job(
             data_input,
             cancel_checker=lambda: _admin_analysis_job_cancel_requested(job_uuid),
             source_format=source_format,
+            tool_type="financial",
         )
     except AdminFinancialProcessingCanceled:
         return _cancel_admin_analysis_job_response(job_uuid)
@@ -2596,6 +2597,7 @@ def process_admin_ar_analysis_job(
             data_input,
             cancel_checker=lambda: _admin_analysis_job_cancel_requested(job_uuid),
             source_format=source_format,
+            tool_type="ar",
         )
     except AdminFinancialProcessingCanceled:
         return _cancel_admin_analysis_job_response(job_uuid)
@@ -2929,6 +2931,7 @@ def process_admin_claims_analysis_job(
             data_input,
             cancel_checker=lambda: _admin_analysis_job_cancel_requested(job_uuid),
             source_format=source_format,
+            tool_type="claims",
         )
     except AdminFinancialProcessingCanceled:
         return _cancel_admin_analysis_job_response(job_uuid)
@@ -5627,15 +5630,27 @@ def _admin_financial_analysis_data_object(
     return parsed, None
 
 
+def _legacy_analysis_payload_with_structured(analysis_data: dict[str, Any]) -> str:
+    payload = {
+        "raw_analyses": analysis_data["raw_analyses"],
+        "deduplicated_issues": analysis_data["deduplicated_issues"],
+        "total_issue_count": analysis_data["total_issue_count"],
+        "all_trends": analysis_data.get("all_trends", []),
+    }
+    structured_analysis = analysis_data.get("structured_analysis")
+    if isinstance(structured_analysis, dict):
+        payload["structured_analysis"] = structured_analysis
+    provider_structured_outputs = analysis_data.get("provider_structured_outputs")
+    if isinstance(provider_structured_outputs, dict):
+        payload["provider_structured_outputs"] = provider_structured_outputs
+    structured_provider_statuses = analysis_data.get("structured_provider_statuses")
+    if isinstance(structured_provider_statuses, dict):
+        payload["structured_provider_statuses"] = structured_provider_statuses
+    return json.dumps(payload)
+
+
 def _legacy_financial_analysis_payload(analysis_data: dict[str, Any]) -> str:
-    return json.dumps(
-        {
-            "raw_analyses": analysis_data["raw_analyses"],
-            "deduplicated_issues": analysis_data["deduplicated_issues"],
-            "total_issue_count": analysis_data["total_issue_count"],
-            "all_trends": analysis_data.get("all_trends", []),
-        }
-    )
+    return _legacy_analysis_payload_with_structured(analysis_data)
 
 
 def _admin_ar_analysis_data_object(
@@ -5675,14 +5690,7 @@ def _admin_ar_analysis_data_object(
 
 
 def _legacy_ar_analysis_payload(analysis_data: dict[str, Any]) -> str:
-    return json.dumps(
-        {
-            "raw_analyses": analysis_data["raw_analyses"],
-            "deduplicated_issues": analysis_data["deduplicated_issues"],
-            "total_issue_count": analysis_data["total_issue_count"],
-            "all_trends": analysis_data.get("all_trends", []),
-        }
-    )
+    return _legacy_analysis_payload_with_structured(analysis_data)
 
 
 def _admin_claims_analysis_data_object(
@@ -5722,14 +5730,7 @@ def _admin_claims_analysis_data_object(
 
 
 def _legacy_claims_analysis_payload(analysis_data: dict[str, Any]) -> str:
-    return json.dumps(
-        {
-            "raw_analyses": analysis_data["raw_analyses"],
-            "deduplicated_issues": analysis_data["deduplicated_issues"],
-            "total_issue_count": analysis_data["total_issue_count"],
-            "all_trends": analysis_data.get("all_trends", []),
-        }
-    )
+    return _legacy_analysis_payload_with_structured(analysis_data)
 
 
 def _promote_financial_admin_job_records(

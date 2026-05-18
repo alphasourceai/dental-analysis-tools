@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -30,6 +32,14 @@ MAX_PDF_PAGES = 30
 MAX_PDF_CHARS = 60000
 MAX_PDF_OCR_PAGES = 12
 PDF_OCR_RENDER_SCALE = 2.0
+STRUCTURED_ANALYSIS_SCHEMA_VERSION = "internal_analysis_v1"
+STRUCTURED_ANALYSIS_START = "STRUCTURED_ANALYSIS_JSON_START"
+STRUCTURED_ANALYSIS_END = "STRUCTURED_ANALYSIS_JSON_END"
+MAX_STRUCTURED_FINDINGS = 12
+MAX_STRUCTURED_LIST_ITEMS = 12
+MAX_STRUCTURED_EVIDENCE_ITEMS = 5
+MAX_STRUCTURED_TEXT_CHARS = 700
+MAX_STRUCTURED_SHORT_TEXT_CHARS = 180
 
 CancelChecker = Callable[[], bool]
 
@@ -247,8 +257,10 @@ def run_financial_csv_analysis(
     *,
     cancel_checker: Optional[CancelChecker] = None,
     source_format: str = "csv",
+    tool_type: str = "financial",
 ) -> dict[str, Any]:
     _raise_if_canceled(cancel_checker)
+    normalized_tool_type = _normalize_tool_type(tool_type)
     model_labels = _get_model_labels()
     provider_specs = [
         ("openai", "OpenAI Analysis", "openai", _openai_analysis),
@@ -258,6 +270,8 @@ def run_financial_csv_analysis(
 
     raw_analyses: dict[str, str] = {}
     provider_statuses: dict[str, dict[str, Any]] = {}
+    provider_structured_outputs: dict[str, Optional[dict[str, Any]]] = {}
+    structured_provider_statuses: dict[str, dict[str, str]] = {}
     parsed_issues: dict[str, list[dict[str, Any]]] = {}
     parsed_trends: dict[str, list[dict[str, Any]]] = {}
     successful_provider_count = 0
@@ -266,7 +280,10 @@ def run_financial_csv_analysis(
         _raise_if_canceled(cancel_checker)
         analysis_text, succeeded, error_type = _run_provider_analysis_with_retry(
             provider_name=provider_name,
-            analysis_func=analysis_func,
+            analysis_func=lambda input_text, func=analysis_func: func(
+                input_text,
+                tool_type=normalized_tool_type,
+            ),
             data_input=data_input,
         )
         _raise_if_canceled(cancel_checker)
@@ -284,6 +301,12 @@ def run_financial_csv_analysis(
             analysis_text,
             model_labels[label_key],
         )
+        structured_output, structured_status = _parse_provider_structured_output(
+            analysis_text,
+            normalized_tool_type,
+        )
+        provider_structured_outputs[label_key] = structured_output
+        structured_provider_statuses[label_key] = {"status": structured_status}
         if succeeded:
             successful_provider_count += 1
 
@@ -296,12 +319,20 @@ def run_financial_csv_analysis(
     all_issues = parsed_issues["openai"] + parsed_issues["xai"] + parsed_issues["anthropic"]
     all_trends = parsed_trends["openai"] + parsed_trends["xai"] + parsed_trends["anthropic"]
     deduplicated_issues = deduplicate_issues(all_issues)
+    structured_analysis = _merge_structured_outputs(
+        provider_structured_outputs,
+        normalized_tool_type,
+    )
 
     return {
         "sourceFormat": source_format,
+        "toolType": normalized_tool_type,
         "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "raw_analyses": raw_analyses,
         "provider_statuses": provider_statuses,
+        "provider_structured_outputs": provider_structured_outputs,
+        "structured_provider_statuses": structured_provider_statuses,
+        "structured_analysis": structured_analysis,
         "parsed_issues": parsed_issues,
         "parsed_trends": parsed_trends,
         "all_trends": all_trends,
@@ -421,6 +452,305 @@ def deduplicate_issues(all_issues: list[dict[str, Any]]) -> list[dict[str, Any]]
         used_indices.add(index)
 
     return deduplicated
+
+
+def _parse_provider_structured_output(
+    analysis_text: str,
+    tool_type: str,
+) -> tuple[Optional[dict[str, Any]], str]:
+    block = _extract_structured_json_block(analysis_text)
+    if not block:
+        return None, "missing"
+
+    try:
+        parsed = json.loads(block)
+    except json.JSONDecodeError:
+        return None, "invalid_json"
+
+    if not isinstance(parsed, dict):
+        return None, "validation_failed"
+
+    normalized = _normalize_structured_analysis(parsed, tool_type)
+    if not _structured_analysis_has_content(normalized):
+        return None, "validation_failed"
+    return normalized, "parsed"
+
+
+def _extract_structured_json_block(analysis_text: str) -> str:
+    if not isinstance(analysis_text, str) or not analysis_text:
+        return ""
+
+    start_index = analysis_text.find(STRUCTURED_ANALYSIS_START)
+    end_index = analysis_text.find(STRUCTURED_ANALYSIS_END)
+    if start_index < 0 or end_index < 0 or end_index <= start_index:
+        return ""
+
+    block = analysis_text[start_index + len(STRUCTURED_ANALYSIS_START) : end_index].strip()
+    return _strip_json_fence(block)
+
+
+def _strip_json_fence(value: str) -> str:
+    text = (value or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
+
+
+def _normalize_structured_analysis(value: dict[str, Any], tool_type: str) -> dict[str, Any]:
+    normalized_tool_type = _normalize_tool_type(value.get("toolType") or tool_type)
+    return {
+        "schemaVersion": STRUCTURED_ANALYSIS_SCHEMA_VERSION,
+        "toolType": normalized_tool_type,
+        "executiveSummary": _normalize_executive_summary(value.get("executiveSummary")),
+        "rankedFindings": _normalize_ranked_findings(value.get("rankedFindings")),
+        "dataQualityNotes": _normalize_structured_text_list(value.get("dataQualityNotes")),
+        "implementationPriorities": _normalize_structured_text_list(value.get("implementationPriorities")),
+        "consultantChecklist": _normalize_structured_text_list(value.get("consultantChecklist")),
+        "suggestedReportSections": _normalize_structured_text_list(value.get("suggestedReportSections")),
+    }
+
+
+def _normalize_executive_summary(value: Any) -> dict[str, str]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "summary": _structured_text(source.get("summary")),
+        "primaryConcern": _structured_text(source.get("primaryConcern")),
+        "recommendedFocus": _structured_text(source.get("recommendedFocus")),
+    }
+
+
+def _normalize_ranked_findings(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    findings: list[dict[str, Any]] = []
+    for index, item in enumerate(value[:MAX_STRUCTURED_FINDINGS], start=1):
+        if not isinstance(item, dict):
+            continue
+        title = _structured_text(item.get("title"), max_chars=MAX_STRUCTURED_SHORT_TEXT_CHARS)
+        operational_implication = _structured_text(item.get("operationalImplication"))
+        recommended_action = _structured_text(item.get("recommendedAction"))
+        client_summary = _structured_text(item.get("clientFacingSummary"))
+        if not any((title, operational_implication, recommended_action, client_summary)):
+            continue
+
+        findings.append(
+            {
+                "rank": _structured_rank(item.get("rank"), index),
+                "title": title,
+                "category": _structured_text(item.get("category"), max_chars=MAX_STRUCTURED_SHORT_TEXT_CHARS),
+                "severity": _structured_choice(
+                    item.get("severity"),
+                    {"low", "medium", "high", "critical"},
+                    "medium",
+                ),
+                "confidence": _structured_choice(
+                    item.get("confidence"),
+                    {"low", "medium", "high"},
+                    "medium",
+                ),
+                "evidence": _normalize_structured_evidence(item.get("evidence")),
+                "financialValue": _structured_text(item.get("financialValue"), max_chars=MAX_STRUCTURED_SHORT_TEXT_CHARS),
+                "operationalImplication": operational_implication,
+                "recommendedAction": recommended_action,
+                "followUpQuestion": _structured_text(item.get("followUpQuestion")),
+                "implementationDifficulty": _structured_choice(
+                    item.get("implementationDifficulty"),
+                    {"low", "medium", "high"},
+                    "medium",
+                ),
+                "estimatedImpactCategory": _structured_choice(
+                    item.get("estimatedImpactCategory"),
+                    {
+                        "cash_flow",
+                        "revenue_leakage",
+                        "workflow_efficiency",
+                        "growth",
+                        "compliance",
+                        "data_quality",
+                    },
+                    "workflow_efficiency",
+                ),
+                "clientFacingSummary": client_summary,
+                "internalReviewerNotes": _structured_text(item.get("internalReviewerNotes")),
+            }
+        )
+    return findings
+
+
+def _normalize_structured_evidence(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+
+    evidence_items: list[dict[str, str]] = []
+    for item in value[:MAX_STRUCTURED_EVIDENCE_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        evidence = {
+            "label": _structured_text(item.get("label"), max_chars=MAX_STRUCTURED_SHORT_TEXT_CHARS),
+            "value": _structured_text(item.get("value"), max_chars=MAX_STRUCTURED_SHORT_TEXT_CHARS),
+            "sourceHint": _structured_text(item.get("sourceHint"), max_chars=MAX_STRUCTURED_SHORT_TEXT_CHARS),
+        }
+        if any(evidence.values()):
+            evidence_items.append(evidence)
+    return evidence_items
+
+
+def _normalize_structured_text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = _structured_text(item)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(text)
+        if len(items) >= MAX_STRUCTURED_LIST_ITEMS:
+            break
+    return items
+
+
+def _structured_text(value: Any, *, max_chars: int = MAX_STRUCTURED_TEXT_CHARS) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return ""
+    text = " ".join(str(value).strip().split())
+    if not text:
+        return ""
+    if _structured_text_looks_sensitive(text):
+        return ""
+    if len(text) > max_chars:
+        return f"{text[:max_chars].rstrip()}..."
+    return text
+
+
+def _structured_text_looks_sensitive(text: str) -> bool:
+    lowered = text.lower()
+    sensitive_markers = (
+        "signed_url",
+        "signed url",
+        "token",
+        "secret",
+        "api key",
+        "apikey",
+        "password",
+        "gcs path",
+        "gs://",
+        "storage/v1/object",
+    )
+    if any(marker in lowered for marker in sensitive_markers):
+        return True
+    if re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, flags=re.IGNORECASE):
+        return True
+    if re.search(r"\b\d{3}[-.\s]\d{2}[-.\s]\d{4}\b", text):
+        return True
+    if re.search(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b", text):
+        return True
+    return False
+
+
+def _structured_rank(value: Any, fallback: int) -> int:
+    try:
+        rank = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return rank if rank > 0 else fallback
+
+
+def _structured_choice(value: Any, allowed: set[str], default: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in allowed else default
+
+
+def _structured_analysis_has_content(value: dict[str, Any]) -> bool:
+    summary = value.get("executiveSummary") or {}
+    return bool(
+        any(summary.get(key) for key in ("summary", "primaryConcern", "recommendedFocus"))
+        or value.get("rankedFindings")
+        or value.get("dataQualityNotes")
+        or value.get("implementationPriorities")
+        or value.get("consultantChecklist")
+        or value.get("suggestedReportSections")
+    )
+
+
+def _merge_structured_outputs(
+    provider_outputs: dict[str, Optional[dict[str, Any]]],
+    tool_type: str,
+) -> Optional[dict[str, Any]]:
+    valid_outputs = [output for output in provider_outputs.values() if isinstance(output, dict)]
+    if not valid_outputs:
+        return None
+
+    first_output = valid_outputs[0]
+    merged = {
+        "schemaVersion": STRUCTURED_ANALYSIS_SCHEMA_VERSION,
+        "toolType": _normalize_tool_type(tool_type),
+        "executiveSummary": first_output.get("executiveSummary")
+        or _normalize_executive_summary({}),
+        "rankedFindings": _merge_ranked_findings(valid_outputs),
+        "dataQualityNotes": _merge_structured_text_lists(valid_outputs, "dataQualityNotes"),
+        "implementationPriorities": _merge_structured_text_lists(valid_outputs, "implementationPriorities"),
+        "consultantChecklist": _merge_structured_text_lists(valid_outputs, "consultantChecklist"),
+        "suggestedReportSections": _merge_structured_text_lists(valid_outputs, "suggestedReportSections"),
+    }
+    return merged if _structured_analysis_has_content(merged) else None
+
+
+def _merge_ranked_findings(outputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for output in outputs:
+        findings = output.get("rankedFindings")
+        if not isinstance(findings, list):
+            continue
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            title = (finding.get("title") or "").strip()
+            key = title.lower() or json.dumps(finding, sort_keys=True, default=str)[:120]
+            if key in seen:
+                continue
+            seen.add(key)
+            copied = dict(finding)
+            copied["rank"] = len(merged) + 1
+            merged.append(copied)
+            if len(merged) >= MAX_STRUCTURED_FINDINGS:
+                return merged
+    return merged
+
+
+def _merge_structured_text_lists(outputs: list[dict[str, Any]], key: str) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for output in outputs:
+        items = output.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            text = _structured_text(item)
+            if not text:
+                continue
+            normalized = text.lower()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            merged.append(text)
+            if len(merged) >= MAX_STRUCTURED_LIST_ITEMS:
+                return merged
+    return merged
 
 
 def _response_to_bytes(response: Any) -> bytes:
@@ -585,8 +915,16 @@ def _get_model_labels() -> dict[str, str]:
     }
 
 
-def _get_analysis_prompt() -> str:
-    return """You are an expert dental operations consultant with deep knowledge of practice management, revenue cycle, and operational efficiency.
+def _normalize_tool_type(tool_type: object) -> str:
+    normalized = str(tool_type or "").strip().lower()
+    if normalized in {"ar", "claims"}:
+        return normalized
+    return "financial"
+
+
+def _get_analysis_prompt(tool_type: str = "financial") -> str:
+    normalized_tool_type = _normalize_tool_type(tool_type)
+    return f"""You are an expert dental operations consultant with deep knowledge of practice management, revenue cycle, and operational efficiency.
 
 IMPORTANT FORMATTING RULES:
 - Use PLAIN TEXT only - no LaTeX, no math formatting, no special markup
@@ -594,7 +932,10 @@ IMPORTANT FORMATTING RULES:
 - Do not use asterisks for emphasis or formatting
 - Keep all text on single lines without special characters
 
-Analyze the provided data and identify improvement opportunities AND key trends.
+Analyze the provided {normalized_tool_type.upper()} data and identify improvement opportunities AND key trends.
+
+TOOL-SPECIFIC REVIEW FOCUS:
+{_tool_specific_prompt_focus(normalized_tool_type)}
 
 SECTION 1 - IMPROVEMENT OPPORTUNITIES:
 Identify AT LEAST 3-5 high-level strategic areas for improvement. Format each as:
@@ -622,10 +963,88 @@ Examples of trends to look for:
 - Revenue patterns (e.g., "Collections rate dropped from 94% to 89% in Q3")
 - Expense patterns (e.g., "Lab costs up 15% year-over-year")
 
-Be specific with numbers, percentages, and timeframes when identifying trends."""
+Be specific with numbers, percentages, and timeframes when identifying trends.
+
+SECTION 3 - STRUCTURED INTERNAL REVIEW JSON:
+After the plain-text sections, include exactly one JSON object between these markers:
+{STRUCTURED_ANALYSIS_START}
+{{
+  "schemaVersion": "{STRUCTURED_ANALYSIS_SCHEMA_VERSION}",
+  "toolType": "{normalized_tool_type}",
+  "executiveSummary": {{
+    "summary": "",
+    "primaryConcern": "",
+    "recommendedFocus": ""
+  }},
+  "rankedFindings": [
+    {{
+      "rank": 1,
+      "title": "",
+      "category": "",
+      "severity": "low | medium | high | critical",
+      "confidence": "low | medium | high",
+      "evidence": [
+        {{
+          "label": "",
+          "value": "",
+          "sourceHint": ""
+        }}
+      ],
+      "financialValue": "",
+      "operationalImplication": "",
+      "recommendedAction": "",
+      "followUpQuestion": "",
+      "implementationDifficulty": "low | medium | high",
+      "estimatedImpactCategory": "cash_flow | revenue_leakage | workflow_efficiency | growth | compliance | data_quality",
+      "clientFacingSummary": "",
+      "internalReviewerNotes": ""
+    }}
+  ],
+  "dataQualityNotes": [],
+  "implementationPriorities": [],
+  "consultantChecklist": [],
+  "suggestedReportSections": []
+}}
+{STRUCTURED_ANALYSIS_END}
+
+Structured JSON rules:
+- The JSON must be valid JSON with double-quoted keys and strings.
+- Keep evidence metric-based and concise; do not include raw extracted rows, raw document text, PHI, filenames, storage paths, signed URLs, tokens, or secrets.
+- Separate client-facing wording from internal reviewer notes.
+- Rank findings by operational urgency and review value."""
 
 
-def _openai_analysis(data_input: str) -> str:
+def _tool_specific_prompt_focus(tool_type: str) -> str:
+    if tool_type == "ar":
+        return """- Aging bucket risk and high-risk balances
+- Payer vs patient split if available
+- Collection workflow bottlenecks
+- Claim follow-up priority
+- Cash-flow risk
+- Immediate action list
+- Data limitations and missing fields"""
+    if tool_type == "claims":
+        return """- Denial or rejection patterns
+- Payer-specific issues
+- Documentation or coding issues
+- Appeal opportunities
+- Follow-up priorities
+- Operational bottlenecks
+- High-risk claims
+- Data limitations and missing fields"""
+    return """- Production trends
+- Gross and net production
+- Collections
+- Writeoffs and adjustments
+- Expense and cost patterns
+- Profitability and cash-flow implications
+- Volatility or inconsistency
+- Revenue leakage
+- Growth, new-patient, or membership signals if present
+- Data limitations and missing fields"""
+
+
+def _openai_analysis(data_input: str, *, tool_type: str = "financial") -> str:
     from openai import OpenAI
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -636,16 +1055,16 @@ def _openai_analysis(data_input: str) -> str:
     response = client.chat.completions.create(
         model=_get_model_config()["openai"],
         messages=[
-            {"role": "system", "content": _get_analysis_prompt()},
+            {"role": "system", "content": _get_analysis_prompt(tool_type)},
             {"role": "user", "content": f"Analyze this dental practice data:\n\n{data_input[:6000]}"},
         ],
         temperature=0.3,
-        max_tokens=1500,
+        max_tokens=2500,
     )
     return response.choices[0].message.content
 
 
-def _xai_analysis(data_input: str) -> str:
+def _xai_analysis(data_input: str, *, tool_type: str = "financial") -> str:
     from openai import OpenAI
 
     api_key = os.getenv("XAI_API_KEY")
@@ -659,16 +1078,16 @@ def _xai_analysis(data_input: str) -> str:
     response = client.chat.completions.create(
         model=_get_model_config()["xai"],
         messages=[
-            {"role": "system", "content": _get_analysis_prompt()},
+            {"role": "system", "content": _get_analysis_prompt(tool_type)},
             {"role": "user", "content": f"Analyze this dental practice data:\n\n{data_input[:6000]}"},
         ],
         temperature=0.3,
-        max_tokens=1500,
+        max_tokens=2500,
     )
     return response.choices[0].message.content
 
 
-def _anthropic_analysis(data_input: str) -> str:
+def _anthropic_analysis(data_input: str, *, tool_type: str = "financial") -> str:
     import anthropic
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -678,9 +1097,9 @@ def _anthropic_analysis(data_input: str) -> str:
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
         model=_get_model_config()["anthropic"],
-        max_tokens=1500,
+        max_tokens=2500,
         temperature=0.3,
-        system=_get_analysis_prompt(),
+        system=_get_analysis_prompt(tool_type),
         messages=[
             {"role": "user", "content": f"Analyze this dental practice data:\n\n{data_input[:6000]}"}
         ],
