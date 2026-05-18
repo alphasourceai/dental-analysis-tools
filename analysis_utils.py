@@ -236,7 +236,15 @@ CLIENT-FACING NUMBER FORMATTING:
   - 3295272.15 -> $3,295,272
   - 901025.36 -> $901,025
 - Percentages should remain percentages, e.g. 27%, not $27.
-- Counts, dates, months, percentages, and ratios should not be converted to dollars."""
+- Counts, dates, months, percentages, and ratios should not be converted to dollars.
+
+PUBLIC EMAIL PREVIEW QUALITY:
+- Return 6-8 candidate client-facing insights so the email can select the strongest 5.
+- Each candidate insight should be one clear sentence.
+- Use concrete numbers from the uploaded file whenever possible.
+- Explain the operational implication and why it matters.
+- Include a useful mix when the data supports it: production trend, writeoffs or adjustments, net production or collections, volatility or consistency, hygiene or department-level trends, and cash flow or revenue leakage implications.
+- Do not return generic labels without explanation, such as "Revenue Cycle Optimization Needed" or "Cost Management"."""
 
     return base_prompt
 
@@ -677,6 +685,8 @@ def _looks_like_year(raw_number):
 
 def _looks_like_financial_amount(raw_number):
     normalized = raw_number.replace(",", "")
+    if normalized.isdigit() and len(normalized) in {10, 11} and "," not in raw_number:
+        return False
     if "." in normalized:
         try:
             return Decimal(normalized) >= Decimal("1000")
@@ -698,11 +708,257 @@ def _format_currency_without_cents(raw_number):
     return f"${rounded:,}"
 
 
+def _extract_client_email_insights(results, max_insights=5):
+    """Build specific public teaser email insights without affecting shared admin callers."""
+    candidates = []
+    candidates.extend(_extract_trend_candidate_texts(results.get("all_trends", [])))
+
+    parsed_trends = results.get("parsed_trends", {})
+    if isinstance(parsed_trends, dict):
+        for trends in parsed_trends.values():
+            candidates.extend(_extract_trend_candidate_texts(trends))
+
+    candidates.extend(_extract_issue_candidate_texts(results.get("deduplicated_issues", [])))
+
+    parsed_issues = results.get("parsed_issues", {})
+    if isinstance(parsed_issues, dict):
+        for issues in parsed_issues.values():
+            candidates.extend(_extract_issue_candidate_texts(issues))
+
+    candidates.extend(_extract_raw_analysis_candidate_texts(results.get("raw_analyses", {})))
+
+    selected = []
+    seen = set()
+
+    def add_candidate(raw_text, *, require_signal=True):
+        cleaned = _prepare_client_email_candidate(raw_text)
+        if not cleaned or _is_generic_client_insight(cleaned):
+            return
+        if require_signal and not _has_client_insight_signal(cleaned):
+            return
+        dedupe_key = _client_insight_dedupe_key(cleaned)
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        selected.append(cleaned)
+
+    for candidate in candidates:
+        add_candidate(candidate)
+        if len(selected) >= max_insights:
+            return selected[:max_insights]
+
+    for fallback in _client_email_category_fallbacks(candidates):
+        add_candidate(fallback, require_signal=False)
+        if len(selected) >= max_insights:
+            break
+
+    return selected[:max_insights]
+
+
+def _extract_trend_candidate_texts(trends):
+    candidates = []
+    if not isinstance(trends, list):
+        return candidates
+    for trend in trends:
+        if isinstance(trend, dict):
+            text = trend.get("text") or trend.get("trend") or ""
+        else:
+            text = str(trend)
+        if text and text.strip():
+            candidates.append(text.strip())
+    return candidates
+
+
+def _extract_issue_candidate_texts(issues):
+    candidates = []
+    if not isinstance(issues, list):
+        return candidates
+    for issue in issues:
+        if not isinstance(issue, dict):
+            text = str(issue).strip()
+            if text:
+                candidates.append(text)
+            continue
+
+        title = (issue.get("title") or "").strip()
+        impact = (issue.get("impact") or "").strip()
+        recommendation = (issue.get("recommendation") or "").strip()
+        use_title = bool(title and not _is_generic_client_insight(title))
+
+        if impact and use_title and impact.lower() != title.lower():
+            candidates.append(f"{title}: {impact}")
+        elif impact:
+            candidates.append(impact)
+        elif recommendation and use_title and recommendation.lower() != title.lower():
+            candidates.append(f"{title}: {recommendation}")
+        elif recommendation:
+            candidates.append(recommendation)
+        elif use_title:
+            candidates.append(title)
+    return candidates
+
+
+def _extract_raw_analysis_candidate_texts(raw_analyses):
+    import re
+
+    candidates = []
+    if not isinstance(raw_analyses, dict):
+        return candidates
+
+    for analysis in raw_analyses.values():
+        if not isinstance(analysis, str) or analysis.startswith("Not run for public analyzer preview"):
+            continue
+        for line in analysis.splitlines():
+            cleaned = line.strip()
+            if not cleaned:
+                continue
+            cleaned = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s*", "", cleaned)
+            cleaned = re.sub(
+                r"^(?:TREND|INSIGHT|FINDING|IMPACT|ISSUE|OBSERVATION):\s*",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            ).strip()
+            if cleaned:
+                candidates.append(cleaned)
+    return candidates
+
+
+def _prepare_client_email_candidate(text):
+    import re
+
+    if not text:
+        return ""
+    cleaned = normalize_client_email_insight_text(str(text))
+    cleaned = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s*", "", cleaned)
+    cleaned = re.sub(
+        r"^(?:TREND|INSIGHT|FINDING|IMPACT|ISSUE|OBSERVATION):\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    return cleaned
+
+
+def _is_generic_client_insight(text):
+    import re
+
+    if not text:
+        return True
+    lowered = text.strip().lower().rstrip(".:")
+    has_metric = bool(re.search(r"\$?\d[\d,]*(?:\.\d+)?|%", text))
+    words = re.findall(r"[a-zA-Z]+", lowered)
+    generic_titles = {
+        "revenue cycle optimization needed",
+        "revenue cycle optimization",
+        "cost management",
+        "cost management opportunities",
+        "production volatility across months",
+        "production volatility",
+        "high total writeoffs rate",
+        "operational efficiency gains",
+        "strategic growth opportunities",
+    }
+    if lowered in generic_titles:
+        return True
+    if not has_metric and len(words) <= 5 and any(
+        token in lowered
+        for token in (
+            "optimization",
+            "management",
+            "volatility",
+            "opportunities",
+            "needed",
+            "attention",
+            "efficiency",
+        )
+    ):
+        return True
+    return False
+
+
+def _has_client_insight_signal(text):
+    import re
+
+    words = re.findall(r"[a-zA-Z]+", text)
+    if len(words) < 8:
+        return False
+    if re.search(r"\$?\d[\d,]*(?:\.\d+)?|%", text):
+        return True
+    return bool(
+        re.search(
+            r"\b(production|revenue|collections?|write-?offs?|adjustments?|net|gross|profit|"
+            r"overhead|expenses?|costs?|payments?|accounts receivable|AR|claims?|cash flow|"
+            r"scheduling|hygiene|case acceptance|new-patient|conversion|leakage|workflow)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _client_insight_dedupe_key(text):
+    import re
+
+    return re.sub(r"[^a-z0-9$%]+", " ", text.lower()).strip()
+
+
+def _client_email_category_fallbacks(candidates):
+    import re
+
+    combined = " ".join(str(candidate) for candidate in candidates).lower()
+    fallbacks = []
+
+    def has(pattern):
+        return bool(re.search(pattern, combined, re.IGNORECASE))
+
+    if has(r"\b(write-?offs?|adjustments?)\b"):
+        fallbacks.append(
+            "Writeoffs and adjustments appear in the file and should be reviewed for possible revenue leakage, payer contract, or posting workflow issues."
+        )
+    if has(r"\b(production|revenue|collections?|net|gross)\b"):
+        fallbacks.append(
+            "Production and collection patterns in the file should be reviewed for consistency, cash-flow timing, and the operational causes behind month-to-month changes."
+        )
+    if has(r"\b(AR|accounts receivable|claims?|payments?)\b"):
+        fallbacks.append(
+            "AR, claims, or payment patterns appear to warrant closer review because collection friction can reduce predictable practice cash flow."
+        )
+    if has(r"\b(overhead|expenses?|costs?|profits?)\b"):
+        fallbacks.append(
+            "Expense and overhead patterns should be compared with production trends to understand whether profitability is being compressed."
+        )
+    if has(r"\b(volatility|range|months?|periods?|trends?)\b"):
+        fallbacks.append(
+            "The file shows enough period-to-period movement to justify a closer review of consistency, staffing assumptions, and leadership planning."
+        )
+    if has(r"\b(hygiene|department|schedule|scheduling|case acceptance|conversion)\b"):
+        fallbacks.append(
+            "Department, scheduling, or conversion patterns may point to operational opportunities that affect production consistency and patient flow."
+        )
+
+    if combined.strip():
+        fallbacks.extend(
+            [
+                "A consultant review can help separate one-time anomalies from recurring operating patterns that deserve a focused action plan.",
+                "The file contains enough signal to prioritize the highest-risk financial and workflow questions before the team commits time to fixes.",
+                "Your file contains enough financial detail to support a deeper consultant review of trends, leakage points, and operational priorities.",
+            ]
+        )
+    else:
+        fallbacks.append(
+            "Your file contains enough financial detail to support a deeper consultant review of trends, leakage points, and operational priorities."
+        )
+    return fallbacks
+
+
 def extract_compelling_insights(results, max_insights=5, format_financial_values=False):
     """
     Extract 3-5 compelling, specific insights from AI analysis results.
     Prioritizes quantitative trends and specific areas of concern.
     """
+    if format_financial_values:
+        return _extract_client_email_insights(results, max_insights=max_insights)
+
     insights = []
     
     all_trends = results.get('all_trends', [])
@@ -762,13 +1018,7 @@ def extract_compelling_insights(results, max_insights=5, format_financial_values
             if insight['text'] not in final_insights:
                 final_insights.append(insight['text'])
     
-    normalized_insights = []
-    for text in final_insights[:max_insights]:
-        if format_financial_values:
-            normalized_insights.append(normalize_client_email_insight_text(text))
-        else:
-            normalized_insights.append(normalize_insight_text(text))
-    return normalized_insights
+    return [normalize_insight_text(text) for text in final_insights[:max_insights]]
 
 
 def send_followup_email(user_info, tool_name, results):
