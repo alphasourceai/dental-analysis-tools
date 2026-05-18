@@ -9,6 +9,7 @@ import textwrap
 import logging
 import sendgrid
 from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition, ContentId, TrackingSettings, ClickTracking
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from io import BytesIO
 from typing import Callable, Optional
 import pymupdf as fitz
@@ -188,7 +189,7 @@ def get_analysis_prompt(doc_type="general"):
 
 IMPORTANT FORMATTING RULES:
 - Use PLAIN TEXT only - no LaTeX, no math formatting, no special markup
-- Write dollar amounts as plain text: $10,000 not $10,000$ or \$10,000
+- Write dollar amounts as plain text: $10,000 not $10,000$ or \\$10,000
 - Do not use asterisks for emphasis or formatting
 - Keep all text on single lines without special characters
 
@@ -221,7 +222,22 @@ Examples of trends to look for:
 - Expense patterns (e.g., "Lab costs up 15% year-over-year")
 
 Be specific with numbers, percentages, and timeframes when identifying trends."""
-    
+
+    if doc_type == "public_financial_preview":
+        base_prompt += """
+
+CLIENT-FACING NUMBER FORMATTING:
+- Use concise, client-friendly language.
+- All dollar amounts must use $ and comma separators.
+- Dollar amounts must not include cents.
+- Format raw financial values like this:
+  - 240060.77 -> $240,061
+  - 314170.43 -> $314,170
+  - 3295272.15 -> $3,295,272
+  - 901025.36 -> $901,025
+- Percentages should remain percentages, e.g. 27%, not $27.
+- Counts, dates, months, percentages, and ratios should not be converted to dollars."""
+
     return base_prompt
 
 
@@ -557,7 +573,132 @@ def normalize_insight_text(text):
     return text.strip()
 
 
-def extract_compelling_insights(results, max_insights=5):
+def normalize_client_email_insight_text(text):
+    """Normalize client email insight copy while preserving currency formatting."""
+    import re
+    if not text:
+        return text
+
+    text = text.replace('\\$', '$')
+    text = re.sub(r'\*\*', '', text)
+    text = re.sub(r'(?<!\*)\*(?!\*)', '', text)
+    text = re.sub(r'\\text\{([^}]+)\}', r'\1', text)
+    text = re.sub(r'\\mathbf\{([^}]+)\}', r'\1', text)
+    text = re.sub(r'\\mathrm\{([^}]+)\}', r'\1', text)
+    text = re.sub(r',([a-zA-Z])', r', \1', text)
+    text = re.sub(r'(?<!\d)\.(\d)', r'. \1', text)
+    text = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', text)
+    text = re.sub(r'([a-zA-Z])(\$\d)', r'\1 \2', text)
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return format_client_financial_values(text)
+
+
+FINANCIAL_CONTEXT_PATTERN = None
+FINANCIAL_NUMBER_PATTERN = None
+
+
+def format_client_financial_values(text):
+    """Format likely financial values in client-facing preview insight text."""
+    import re
+
+    if not text:
+        return text
+
+    global FINANCIAL_CONTEXT_PATTERN, FINANCIAL_NUMBER_PATTERN
+    if FINANCIAL_CONTEXT_PATTERN is None:
+        financial_keywords = [
+            "production",
+            "revenue",
+            "income",
+            "collections?",
+            "write-?offs?",
+            "adjustments?",
+            "costs?",
+            "profits?",
+            "gross",
+            "net",
+            "ebitda",
+            "overhead",
+            "expenses?",
+            "fees?",
+            "payments?",
+            "accounts receivable",
+        ]
+        FINANCIAL_CONTEXT_PATTERN = re.compile(
+            r"\b(?:" + "|".join(financial_keywords) + r")\b|\bAR\b",
+            re.IGNORECASE,
+        )
+    if FINANCIAL_NUMBER_PATTERN is None:
+        FINANCIAL_NUMBER_PATTERN = re.compile(
+            r"(?<![$\w])(?P<number>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+        )
+
+    def format_segment(segment):
+        if not FINANCIAL_CONTEXT_PATTERN.search(segment):
+            return segment
+
+        def replace_match(match):
+            raw_number = match.group("number")
+            start, end = match.span("number")
+            previous_char = segment[start - 1] if start > 0 else ""
+            next_char = segment[end] if end < len(segment) else ""
+            following_text = segment[end : end + 12].lower()
+
+            if previous_char == "$":
+                return raw_number
+            if next_char in {"%", "/", "-"} or previous_char in {"/", "-"}:
+                return raw_number
+            if following_text.startswith(" percent") or following_text.startswith(" percentage"):
+                return raw_number
+            if _looks_like_year(raw_number):
+                return raw_number
+            if not _looks_like_financial_amount(raw_number):
+                return raw_number
+
+            formatted = _format_currency_without_cents(raw_number)
+            return formatted or raw_number
+
+        return FINANCIAL_NUMBER_PATTERN.sub(replace_match, segment)
+
+    segments = re.split(r"([.!?]\s+|\n+)", text)
+    return "".join(format_segment(segment) if index % 2 == 0 else segment for index, segment in enumerate(segments))
+
+
+def _looks_like_year(raw_number):
+    normalized = raw_number.replace(",", "")
+    if "." in normalized:
+        return False
+    if not normalized.isdigit():
+        return False
+    year = int(normalized)
+    return 1900 <= year <= 2099
+
+
+def _looks_like_financial_amount(raw_number):
+    normalized = raw_number.replace(",", "")
+    if "." in normalized:
+        try:
+            return Decimal(normalized) >= Decimal("1000")
+        except InvalidOperation:
+            return False
+    if "," in raw_number:
+        return True
+    if not normalized.isdigit():
+        return False
+    return int(normalized) >= 1000
+
+
+def _format_currency_without_cents(raw_number):
+    try:
+        amount = Decimal(raw_number.replace(",", ""))
+    except InvalidOperation:
+        return None
+    rounded = int(amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return f"${rounded:,}"
+
+
+def extract_compelling_insights(results, max_insights=5, format_financial_values=False):
     """
     Extract 3-5 compelling, specific insights from AI analysis results.
     Prioritizes quantitative trends and specific areas of concern.
@@ -621,7 +762,12 @@ def extract_compelling_insights(results, max_insights=5):
             if insight['text'] not in final_insights:
                 final_insights.append(insight['text'])
     
-    normalized_insights = [normalize_insight_text(text) for text in final_insights[:max_insights]]
+    normalized_insights = []
+    for text in final_insights[:max_insights]:
+        if format_financial_values:
+            normalized_insights.append(normalize_client_email_insight_text(text))
+        else:
+            normalized_insights.append(normalize_insight_text(text))
     return normalized_insights
 
 
@@ -629,7 +775,7 @@ def send_followup_email(user_info, tool_name, results):
     """Send follow-up email to user with detailed insights in branded HTML format"""
     sg = sendgrid.SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
     
-    insights = extract_compelling_insights(results, max_insights=5)
+    insights = extract_compelling_insights(results, max_insights=5, format_financial_values=True)
     
     subject = "alphaSource Consulting Analysis Results - Key Insights"
     support_email = "hello@alphasourceconsulting.com"
@@ -671,11 +817,15 @@ Our analysis has completed its review. Here are the key insights we identified:
 
 {chr(10).join(['- ' + i for i in insights]) if insights else '- Multiple areas of operational improvement identified'}
 
-These findings represent just a preview of the detailed analysis we've prepared.
+What's Next?
 
-Book a complimentary consultation: https://calendar.app.google/QWQor8w5MqDqGXHv7
+These findings are an initial preview of what your practice files may be telling us. If you would like a deeper review, our team can prepare a consultant-reviewed Practice Opportunity Review with prioritized findings, recommended next steps, and a 30-day action plan.
 
-Or reply to this email for a personalized review.
+We can also support implementation through focused projects or ongoing advisory support for revenue leakage, AR/claims, workflow efficiency, and growth opportunities.
+
+To discuss the best next step, book a consultation or reply to this email.
+
+Book a consultation: https://calendar.app.google/QWQor8w5MqDqGXHv7
 
 alphaSource Consulting
 {support_email}"""
@@ -754,13 +904,14 @@ alphaSource Consulting
                   </tr>
                   <tr>
                     <td style="padding:0 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.68);font-size:14px;line-height:22px;">
-                      These findings represent just a preview of the detailed analysis we've prepared. The complete report includes specific recommendations, benchmarking insights, and prioritized action items tailored to your practice.
+                      These findings are an initial preview of what your practice files may be telling us. If you would like a deeper review, our team can prepare a consultant-reviewed Practice Opportunity Review with prioritized findings, recommended next steps, and a 30-day action plan.<br><br>
+                      We can also support implementation through focused projects or ongoing advisory support for revenue leakage, AR/claims, workflow efficiency, and growth opportunities.<br><br>
+                      To discuss the best next step, book a consultation or reply to this email.
                     </td>
                   </tr>
 
                   <tr>
                     <td style="padding:6px 28px 18px 28px;font-family:-apple-system, Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.68);font-size:14px;line-height:22px;">
-                      Ready to dive into the full details? Book a complimentary consultation or simply reply to this email.<br><br>
                       {signature_html}
                     </td>
                   </tr>

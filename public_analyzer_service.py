@@ -428,7 +428,7 @@ def _run_public_analysis(
     _raise_if_canceled(cancel_checker)
     analysis_text, succeeded = _run_provider_analysis_with_retry(
         provider_name="xai",
-        analysis_func=xai_analysis,
+        analysis_func=lambda input_text: xai_analysis(input_text, doc_type="public_financial_preview"),
         data_input=data_input,
         cancel_checker=cancel_checker,
     )
