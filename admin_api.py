@@ -4337,6 +4337,7 @@ def get_admin_billing_client(
         uploads_query = db.query(Upload).filter(func.lower(Upload.user_email) == client_email)
         uploads_query = _filter_uploads_by_void_status(uploads_query, normalized_upload_status)
         uploads = uploads_query.order_by(Upload.id.desc()).limit(25).all()
+        consultant_reviews = _client_consultant_reviews(db, client_email)
         billing_overrides = (
             db.query(BillingOverride)
             .filter(func.lower(BillingOverride.client_email) == client_email)
@@ -4448,6 +4449,7 @@ def get_admin_billing_client(
                     )
                     for submission in recent_submissions
                 ],
+                "consultantReviews": consultant_reviews,
                 "uploads": [_upload_payload(upload) for upload in uploads],
                 "billingOverrides": [
                     _billing_override_payload(override)
@@ -6895,6 +6897,58 @@ def _client_recent_submission_upload_payload(upload: Upload) -> dict[str, Any]:
         "paid": bool(getattr(upload, "paid", False)),
         "voided": _upload_is_voided(upload),
         "uploadTime": _clean_text(getattr(upload, "upload_time", None)),
+    }
+
+
+def _client_consultant_reviews(db: Any, client_email: str) -> list[dict[str, Any]]:
+    uploads = (
+        db.query(Upload)
+        .filter(func.lower(Upload.user_email) == client_email)
+        .filter(Upload.analysis_data.isnot(None))
+        .filter(Upload.voided_at.is_(None))
+        .order_by(Upload.pdf_generated_at.desc(), Upload.upload_time.desc(), Upload.id.desc())
+        .limit(50)
+        .all()
+    )
+
+    reviews: list[dict[str, Any]] = []
+    for upload in uploads:
+        payload = _client_consultant_review_payload(upload)
+        if payload:
+            reviews.append(payload)
+        if len(reviews) >= 10:
+            break
+    return reviews
+
+
+def _client_consultant_review_payload(upload: Upload) -> Optional[dict[str, Any]]:
+    analysis_payload = _pdf_generator_analysis_payload(getattr(upload, "analysis_data", None))
+    if not isinstance(analysis_payload, dict):
+        return None
+
+    structured_analysis = analysis_payload.get("structured_analysis")
+    if not isinstance(structured_analysis, dict):
+        return None
+
+    provider_structured_statuses = analysis_payload.get("structured_provider_statuses")
+    raw_analyses = analysis_payload.get("raw_analyses")
+
+    return {
+        "id": _id_text(getattr(upload, "id", None)),
+        "uploadId": _id_text(getattr(upload, "id", None)),
+        "fileName": _clean_text(getattr(upload, "file_name", None)),
+        "toolName": _clean_text(getattr(upload, "tool_name", None)),
+        "uploadTime": _clean_text(getattr(upload, "upload_time", None)),
+        "paid": bool(getattr(upload, "paid", False)),
+        "voided": _upload_is_voided(upload),
+        "pdfGeneratedAt": _iso_datetime(getattr(upload, "pdf_generated_at", None)),
+        "structuredAnalysis": structured_analysis,
+        "providerStructuredStatuses": (
+            provider_structured_statuses if isinstance(provider_structured_statuses, dict) else {}
+        ),
+        "rawAnalyses": raw_analyses if isinstance(raw_analyses, dict) else {},
+        "generatedAt": _clean_text(analysis_payload.get("generatedAt")),
+        "sourceFormat": _clean_text(analysis_payload.get("sourceFormat")),
     }
 
 
