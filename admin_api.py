@@ -6361,6 +6361,7 @@ def _pdf_generator_upload_payload(upload: Upload) -> dict[str, Any]:
             "opportunities": _pdf_generator_opportunities(analysis_payload or {}),
             "trends": _pdf_generator_trends(analysis_payload or {}),
             "keyTrends": _pdf_generator_key_trends(analysis_payload or {}),
+            "structured": _pdf_generator_structured_draft(analysis_payload or {}),
         },
         "pdf": {
             "pdfVersion": _optional_int(getattr(upload, "pdf_version", None)) or 0,
@@ -6388,6 +6389,249 @@ def _pdf_generator_analysis_payload(value: object) -> Optional[dict[str, Any]]:
             return None
         return parsed if isinstance(parsed, dict) else None
     return None
+
+
+PDF_GENERATOR_STRUCTURED_MAX_FINDINGS = 10
+PDF_GENERATOR_STRUCTURED_MAX_EVIDENCE = 3
+PDF_GENERATOR_STRUCTURED_MAX_LIST_ITEMS = 10
+PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS = 240
+PDF_GENERATOR_STRUCTURED_TEXT_CHARS = 1600
+PDF_GENERATOR_STRUCTURED_SENSITIVE_MARKERS = (
+    "signed_url",
+    "signed url",
+    "signedurl",
+    "checkout_url",
+    "checkout url",
+    "token",
+    "secret",
+    "api_key",
+    "api key",
+    "password",
+    "storage/v1/object",
+    "object_name",
+    "object name",
+    "gcs_path",
+    "gcs path",
+    "gs://",
+    "http://",
+    "https://",
+)
+
+
+def _pdf_generator_structured_draft(payload: dict[str, Any]) -> Optional[dict[str, Any]]:
+    structured = payload.get("structured_analysis")
+    if not isinstance(structured, dict):
+        return None
+
+    executive_summary = _pdf_generator_structured_executive_summary(
+        structured.get("executiveSummary")
+    )
+    ranked_findings = _pdf_generator_structured_findings(
+        structured.get("rankedFindings")
+    )
+    data_quality_notes = _pdf_generator_structured_text_list(
+        structured.get("dataQualityNotes")
+    )
+    implementation_priorities = _pdf_generator_structured_text_list(
+        structured.get("implementationPriorities")
+    )
+    suggested_report_sections = _pdf_generator_structured_text_list(
+        structured.get("suggestedReportSections")
+    )
+
+    has_content = bool(
+        any(executive_summary.values())
+        or ranked_findings
+        or data_quality_notes
+        or implementation_priorities
+        or suggested_report_sections
+    )
+    if not has_content:
+        return None
+
+    return {
+        "available": True,
+        "schemaVersion": _pdf_generator_structured_text(
+            structured.get("schemaVersion"),
+            max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+        ),
+        "toolType": _pdf_generator_structured_text(
+            structured.get("toolType"),
+            max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+        ),
+        "generatedAt": _pdf_generator_structured_text(
+            payload.get("generatedAt"),
+            max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+        ),
+        "sourceFormat": _pdf_generator_structured_text(
+            payload.get("sourceFormat"),
+            max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+        ),
+        "executiveSummary": executive_summary,
+        "rankedFindings": ranked_findings,
+        "dataQualityNotes": data_quality_notes,
+        "implementationPriorities": implementation_priorities,
+        "suggestedReportSections": suggested_report_sections,
+    }
+
+
+def _pdf_generator_structured_executive_summary(value: object) -> dict[str, str]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "summary": _pdf_generator_structured_text(source.get("summary")),
+        "primaryConcern": _pdf_generator_structured_text(source.get("primaryConcern")),
+        "recommendedFocus": _pdf_generator_structured_text(source.get("recommendedFocus")),
+    }
+
+
+def _pdf_generator_structured_findings(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    findings: list[dict[str, Any]] = []
+    for index, item in enumerate(value[:PDF_GENERATOR_STRUCTURED_MAX_FINDINGS], start=1):
+        if not isinstance(item, dict):
+            continue
+
+        rank = _pdf_generator_structured_rank(item.get("rank"), index)
+        evidence = _pdf_generator_structured_evidence(item.get("evidence"))
+        finding = {
+            "id": f"finding-{index}",
+            "rank": rank,
+            "title": _pdf_generator_structured_text(
+                item.get("title"),
+                max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+            ),
+            "category": _pdf_generator_structured_text(
+                item.get("category"),
+                max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+            ),
+            "severity": _pdf_generator_structured_text(
+                item.get("severity"),
+                max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+            ),
+            "confidence": _pdf_generator_structured_text(
+                item.get("confidence"),
+                max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+            ),
+            "financialValue": _pdf_generator_structured_text(
+                item.get("financialValue"),
+                max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+            ),
+            "evidence": evidence,
+            "operationalImplication": _pdf_generator_structured_text(
+                item.get("operationalImplication")
+            ),
+            "recommendedAction": _pdf_generator_structured_text(
+                item.get("recommendedAction")
+            ),
+            "followUpQuestion": _pdf_generator_structured_text(
+                item.get("followUpQuestion")
+            ),
+            "estimatedImpactCategory": _pdf_generator_structured_text(
+                item.get("estimatedImpactCategory"),
+                max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+            ),
+            "implementationDifficulty": _pdf_generator_structured_text(
+                item.get("implementationDifficulty"),
+                max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+            ),
+            "clientFacingSummary": _pdf_generator_structured_text(
+                item.get("clientFacingSummary")
+            ),
+        }
+        if any(
+            (
+                finding["title"],
+                finding["financialValue"],
+                finding["operationalImplication"],
+                finding["recommendedAction"],
+                finding["clientFacingSummary"],
+                evidence,
+            )
+        ):
+            findings.append(finding)
+    return findings
+
+
+def _pdf_generator_structured_evidence(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+
+    evidence_items: list[dict[str, str]] = []
+    for item in value[:PDF_GENERATOR_STRUCTURED_MAX_EVIDENCE]:
+        if not isinstance(item, dict):
+            continue
+        evidence = {
+            "label": _pdf_generator_structured_text(
+                item.get("label"),
+                max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+            ),
+            "value": _pdf_generator_structured_text(
+                item.get("value"),
+                max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+            ),
+            "sourceHint": _pdf_generator_structured_text(
+                item.get("sourceHint"),
+                max_chars=PDF_GENERATOR_STRUCTURED_SHORT_TEXT_CHARS,
+            ),
+        }
+        if any(evidence.values()):
+            evidence_items.append(evidence)
+    return evidence_items
+
+
+def _pdf_generator_structured_text_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = _pdf_generator_structured_text(item)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(text)
+        if len(items) >= PDF_GENERATOR_STRUCTURED_MAX_LIST_ITEMS:
+            break
+    return items
+
+
+def _pdf_generator_structured_rank(value: object, fallback: int) -> int:
+    if isinstance(value, bool):
+        return fallback
+    if isinstance(value, int) and value > 0:
+        return value
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _pdf_generator_structured_text(
+    value: object,
+    *,
+    max_chars: int = PDF_GENERATOR_STRUCTURED_TEXT_CHARS,
+) -> str:
+    if value is None or isinstance(value, bool) or isinstance(value, (dict, list, tuple, set)):
+        return ""
+
+    text = _clean_text(value) or ""
+    if not text:
+        return ""
+
+    lowered = text.lower()
+    if any(marker in lowered for marker in PDF_GENERATOR_STRUCTURED_SENSITIVE_MARKERS):
+        return ""
+
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip() + "..."
+    return text
 
 
 def _pdf_generator_opportunities(payload: dict[str, Any]) -> list[dict[str, str]]:
