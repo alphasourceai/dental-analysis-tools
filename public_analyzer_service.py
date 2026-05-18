@@ -16,12 +16,12 @@ import requests
 from sqlalchemy import text
 
 from analysis_utils import (
-    anthropic_analysis,
+    PdfTextExtractionCanceled,
+    PdfTextExtractionError,
     deduplicate_issues,
     extract_text_from_pdf,
     get_model_labels,
     log_active_models,
-    openai_analysis,
     parse_issues_from_analysis,
     parse_trends_from_analysis,
     send_email,
@@ -45,6 +45,10 @@ PROVIDER_UNAVAILABLE_MESSAGE = (
     "Other model results were processed."
 )
 CANCELED_MESSAGE = "Analysis canceled. No results were saved."
+PUBLIC_PDF_MAX_PAGES = 20
+PUBLIC_PDF_MAX_OCR_PAGES = 8
+PUBLIC_PDF_MAX_CHARS = 30000
+PUBLIC_PDF_OCR_RENDER_SCALE = 1.5
 CancelChecker = Callable[[], bool]
 SubmissionCreatedCallback = Callable[[str], None]
 FinalizationStartedCallback = Callable[[], bool]
@@ -156,7 +160,7 @@ def submit_public_analyzer_submission(
             raise PublicAnalyzerError("storage_failed", "Unable to persist uploaded file.")
 
         _raise_if_canceled(cancel_checker)
-        data_input = _extract_data_input(file_bytes, file_name)
+        data_input = _extract_data_input(file_bytes, file_name, cancel_checker=cancel_checker)
         _raise_if_canceled(cancel_checker)
         results = _run_public_analysis(data_input, cancel_checker=cancel_checker)
 
@@ -386,11 +390,30 @@ def _bytes_file(file_bytes: bytes, filename: str) -> BytesIO:
     return file_obj
 
 
-def _extract_data_input(file_bytes: bytes, filename: str) -> str:
+def _extract_data_input(
+    file_bytes: bytes,
+    filename: str,
+    *,
+    cancel_checker: Optional[CancelChecker] = None,
+) -> str:
     extension = _file_extension(filename)
     file_obj = _bytes_file(file_bytes, filename)
     if extension == ".pdf":
-        return extract_text_from_pdf(file_obj)
+        try:
+            return extract_text_from_pdf(
+                file_obj,
+                enable_ocr=True,
+                max_pages=PUBLIC_PDF_MAX_PAGES,
+                max_ocr_pages=PUBLIC_PDF_MAX_OCR_PAGES,
+                max_chars=PUBLIC_PDF_MAX_CHARS,
+                ocr_render_scale=PUBLIC_PDF_OCR_RENDER_SCALE,
+                cancel_checker=lambda: _raise_if_canceled(cancel_checker) or False,
+                raise_on_empty=True,
+            )
+        except PdfTextExtractionCanceled as exc:
+            raise PublicAnalyzerCanceled() from exc
+        except PdfTextExtractionError as exc:
+            raise PublicAnalyzerError(exc.code, exc.message) from exc
     if extension == ".csv":
         return pd.read_csv(file_obj).to_string(index=False)
     return pd.read_excel(file_obj).to_string(index=False)
@@ -402,39 +425,40 @@ def _run_public_analysis(
     cancel_checker: Optional[CancelChecker] = None,
 ) -> Dict[str, Any]:
     model_labels = get_model_labels()
-    provider_specs = [
-        ("openai", "OpenAI Analysis", "openai", openai_analysis),
-        ("xai", "xAI Analysis", "xai", xai_analysis),
-        ("anthropic", "AnthropicAI Analysis", "anthropic", anthropic_analysis),
-    ]
-    raw_analyses: Dict[str, str] = {}
-    parsed_issues: Dict[str, Any] = {}
-    parsed_trends: Dict[str, Any] = {}
-    successful_provider_count = 0
+    _raise_if_canceled(cancel_checker)
+    analysis_text, succeeded = _run_provider_analysis_with_retry(
+        provider_name="xai",
+        analysis_func=xai_analysis,
+        data_input=data_input,
+        cancel_checker=cancel_checker,
+    )
+    _raise_if_canceled(cancel_checker)
 
-    for provider_name, result_key, label_key, analysis_func in provider_specs:
-        _raise_if_canceled(cancel_checker)
-        analysis_text, succeeded = _run_provider_analysis_with_retry(
-            provider_name=provider_name,
-            analysis_func=analysis_func,
-            data_input=data_input,
-            cancel_checker=cancel_checker,
-        )
-        _raise_if_canceled(cancel_checker)
-        raw_analyses[result_key] = analysis_text
-        parsed_issues[label_key] = parse_issues_from_analysis(analysis_text, model_labels[label_key])
-        parsed_trends[label_key] = parse_trends_from_analysis(analysis_text, model_labels[label_key])
-        if succeeded:
-            successful_provider_count += 1
-
-    if successful_provider_count == 0:
+    if not succeeded:
         raise PublicAnalyzerError(
             "provider_unavailable",
             "The analyzer providers are temporarily unavailable. Please try again later.",
         )
 
-    all_issues = parsed_issues["openai"] + parsed_issues["xai"] + parsed_issues["anthropic"]
-    all_trends = parsed_trends["openai"] + parsed_trends["xai"] + parsed_trends["anthropic"]
+    xai_issues = parse_issues_from_analysis(analysis_text, model_labels["xai"])
+    xai_trends = parse_trends_from_analysis(analysis_text, model_labels["xai"])
+    raw_analyses: Dict[str, str] = {
+        "OpenAI Analysis": "Not run for public analyzer preview.",
+        "xAI Analysis": analysis_text,
+        "AnthropicAI Analysis": "Not run for public analyzer preview.",
+    }
+    parsed_issues: Dict[str, Any] = {
+        "openai": [],
+        "xai": xai_issues,
+        "anthropic": [],
+    }
+    parsed_trends: Dict[str, Any] = {
+        "openai": [],
+        "xai": xai_trends,
+        "anthropic": [],
+    }
+    all_issues = xai_issues
+    all_trends = xai_trends
     deduplicated_issues = deduplicate_issues(all_issues)
 
     return {
