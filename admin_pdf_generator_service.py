@@ -459,6 +459,143 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
         safe_pdf_multi_cell(pdf, safe_text, field_label, height=5.6, width=content_width - 5)
         pdf.ln(1.2)
 
+    def normalize_badge_value(value: object) -> str:
+        text = format_client_report_text(value)
+        if not text:
+            return ""
+        normalized_key = re.sub(r"[^a-z0-9]", "", text.lower())
+        known_labels = {
+            "high": "High",
+            "medium": "Medium",
+            "low": "Low",
+            "critical": "Critical",
+            "revenueleakage": "Revenue Leakage",
+            "cashflow": "Cash Flow",
+            "workflowefficiency": "Workflow Efficiency",
+            "costmanagement": "Cost Management",
+            "revenuecycle": "Revenue Cycle",
+        }
+        if normalized_key in known_labels:
+            return known_labels[normalized_key]
+
+        spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text)
+        spaced = re.sub(r"[_-]+", " ", spaced)
+        spaced = re.sub(r"\s{2,}", " ", spaced).strip()
+        if not spaced:
+            return ""
+        words = [
+            word if word.isupper() and len(word) <= 4 else word[:1].upper() + word[1:].lower()
+            for word in spaced.split()
+        ]
+        return " ".join(words)
+
+    def badge_style(
+        label: str,
+        value: str,
+    ) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]:
+        label_key = label.lower()
+        value_key = re.sub(r"[^a-z0-9]", "", value.lower())
+        if label_key == "severity":
+            if value_key in {"high", "critical"}:
+                return (255, 243, 232), (245, 168, 113), navy
+            if value_key == "medium":
+                return (244, 239, 255), (196, 177, 255), navy
+            return (236, 253, 246), (134, 239, 207), navy
+        if label_key == "confidence":
+            return (231, 252, 246), (118, 232, 203), navy
+        if label_key == "impact":
+            return (246, 241, 255), (205, 190, 255), navy
+        if label_key == "difficulty":
+            return (242, 246, 252), (205, 214, 229), navy
+        return (242, 240, 255), (212, 202, 252), navy
+
+    def badge_text_for(label: str, value: str) -> str:
+        return f"{label}: {value}"
+
+    def badge_width(text: str) -> float:
+        set_bold(7, navy)
+        return min(max(pdf.get_string_width(sanitize_pdf_text(text)) + 7.5, 24), content_width - 12)
+
+    def estimate_badge_row_height(badges: list[tuple[str, str]], max_width: float) -> float:
+        if not badges:
+            return 0
+        x_offset = 0.0
+        rows = 1
+        gap = 2.0
+        for label, value in badges:
+            width = min(badge_width(badge_text_for(label, value)), max_width)
+            if x_offset and x_offset + width > max_width:
+                rows += 1
+                x_offset = 0.0
+            x_offset += width + gap
+        return rows * 6.0 + (rows - 1) * 2.0
+
+    def draw_badge_shape(
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        fill: tuple[int, int, int],
+        border_color: tuple[int, int, int],
+    ) -> None:
+        pdf.set_fill_color(*fill)
+        pdf.set_draw_color(*border_color)
+        radius = min(2.2, width / 2, height / 2)
+        try:
+            k = pdf.k
+            page_height = pdf.h
+            curve = 0.5522847498
+
+            def point(px: float, py: float) -> str:
+                return f"{px * k:.2f} {(page_height - py) * k:.2f}"
+
+            x1, y1 = x, y
+            x2, y2 = x + width, y + height
+            c = curve * radius
+            commands = [
+                f"{point(x1 + radius, y1)} m",
+                f"{point(x2 - radius, y1)} l",
+                f"{point(x2 - radius + c, y1)} {point(x2, y1 + radius - c)} {point(x2, y1 + radius)} c",
+                f"{point(x2, y2 - radius)} l",
+                f"{point(x2, y2 - radius + c)} {point(x2 - radius + c, y2)} {point(x2 - radius, y2)} c",
+                f"{point(x1 + radius, y2)} l",
+                f"{point(x1 + radius - c, y2)} {point(x1, y2 - radius + c)} {point(x1, y2 - radius)} c",
+                f"{point(x1, y1 + radius)} l",
+                f"{point(x1, y1 + radius - c)} {point(x1 + radius - c, y1)} {point(x1 + radius, y1)} c",
+                "h B",
+            ]
+            pdf._out(" ".join(commands))
+        except Exception:
+            pdf.rect(x, y, width, height, "FD")
+
+    def render_badge_row(
+        badges: list[tuple[str, str]],
+        start_x: float,
+        max_width: float,
+    ) -> None:
+        if not badges:
+            return
+        gap = 2.0
+        badge_height = 6.0
+        x = start_x
+        y = pdf.get_y()
+        for label, value in badges:
+            text = badge_text_for(label, value)
+            width = min(badge_width(text), max_width)
+            if x > start_x and x + width > start_x + max_width:
+                x = start_x
+                y += badge_height + 2.0
+
+            fill, border_color, text_color = badge_style(label, value)
+            draw_badge_shape(x, y, width, badge_height, fill, border_color)
+            pdf.set_xy(x + 3.5, y + 1.35)
+            set_bold(7, text_color)
+            pdf.cell(width - 7.0, 3.6, sanitize_pdf_text(text), ln=0)
+            x += width + gap
+
+        pdf.set_y(y + badge_height + 2.0)
+        pdf.set_x(start_x)
+
     def render_opportunity(item: object, idx: int, *, format_financial: bool = False) -> None:
         if isinstance(item, dict):
             title_text = (item.get("title") or "").strip()
@@ -551,26 +688,25 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
     def render_ranked_finding(item: dict[str, Any], idx: int) -> None:
         title = format_client_report_text(item.get("title")) or f"Finding {idx}"
         rank = item.get("rank") or idx
-        category = format_client_report_text(item.get("category"))
-        severity = format_client_report_text(item.get("severity"))
-        confidence = format_client_report_text(item.get("confidence"))
-        impact_category = format_client_report_text(item.get("estimatedImpactCategory"))
-        difficulty = format_client_report_text(item.get("implementationDifficulty"))
+        category = normalize_badge_value(item.get("category"))
+        severity = normalize_badge_value(item.get("severity"))
+        confidence = normalize_badge_value(item.get("confidence"))
+        impact_category = normalize_badge_value(item.get("estimatedImpactCategory"))
+        difficulty = normalize_badge_value(item.get("implementationDifficulty"))
         financial_value = format_client_report_text(item.get("financialValue"), force_currency=True)
         client_summary = format_client_report_text(item.get("clientFacingSummary"))
         operational_implication = format_client_report_text(item.get("operationalImplication"))
         recommended_action = format_client_report_text(item.get("recommendedAction"))
         evidence_items = item.get("evidence") if isinstance(item.get("evidence"), list) else []
 
-        meta_values = [
+        metadata_badges = [
             ("Category", category),
             ("Severity", severity),
             ("Confidence", confidence),
             ("Impact", impact_category),
             ("Difficulty", difficulty),
-            ("Financial Value", financial_value),
         ]
-        meta_values = [(label, value) for label, value in meta_values if value]
+        metadata_badges = [(label, value) for label, value in metadata_badges if value]
         content_blocks = [
             ("Client Summary", client_summary),
             ("Operational Implication", operational_implication),
@@ -580,8 +716,10 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
 
         card_inner_width = content_width - 12
         card_height = 18 + estimate_text_height(title, card_inner_width, 6, 11)
-        if meta_values:
-            card_height += sum(estimate_text_height(f"{label}: {value}", card_inner_width, 4.8, 8) + 1 for label, value in meta_values)
+        if metadata_badges:
+            card_height += estimate_badge_row_height(metadata_badges, card_inner_width) + 3
+        if financial_value:
+            card_height += estimate_text_height(f"Financial Value: {financial_value}", card_inner_width, 4.8, 8) + 2
         for _, value in content_blocks:
             card_height += estimate_text_height(value, card_inner_width, 5.2, 9) + 9
         if evidence_items:
@@ -605,19 +743,23 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
         set_bold(11, navy)
         safe_pdf_multi_cell(pdf, f"{rank}. {title}", f"structured:finding:{idx}:title", height=6, width=card_inner_width)
 
-        if meta_values:
-            pdf.ln(1)
+        if metadata_badges:
+            pdf.ln(1.5)
+            pdf.set_x(pdf.l_margin + 6)
+            render_badge_row(metadata_badges, pdf.l_margin + 6, card_inner_width)
+
+        if financial_value:
+            pdf.ln(0.5)
             pdf.set_x(pdf.l_margin + 6)
             set_regular(8, muted)
-            for label, value in meta_values:
-                safe_pdf_multi_cell(
-                    pdf,
-                    f"{label}: {value}",
-                    f"structured:finding:{idx}:meta:{label}",
-                    height=4.8,
-                    width=card_inner_width,
-                )
-                pdf.set_x(pdf.l_margin + 6)
+            safe_pdf_multi_cell(
+                pdf,
+                f"Financial Value: {financial_value}",
+                f"structured:finding:{idx}:meta:Financial Value",
+                height=4.8,
+                width=card_inner_width,
+            )
+            pdf.set_x(pdf.l_margin + 6)
 
         for label, value in content_blocks:
             pdf.ln(1)
