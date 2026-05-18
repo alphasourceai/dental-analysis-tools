@@ -30,6 +30,12 @@ FINANCIAL_CONTEXT_KEYWORDS = (
     "net",
     "ebitda",
     "overhead",
+    "labor",
+    "payroll",
+    "salary",
+    "salaries",
+    "wage",
+    "wages",
     "expense",
     "expenses",
     "fee",
@@ -42,6 +48,7 @@ FINANCIAL_CONTEXT_KEYWORDS = (
     "cash flow",
     "value",
 )
+MARKDOWN_ARTIFACT_PATTERN = re.compile(r"[*_`]+")
 FINANCIAL_NUMBER_PATTERN = re.compile(
     r"(?<![\w$,\d])(?:\d{1,3}(?:,\d{3})+|\d{4,})(?:\.\d+)?(?![\w%])"
 )
@@ -56,7 +63,7 @@ def _wrap_long_tokens(text: str, max_token_length: int = 28) -> str:
         if not part or part.isspace():
             wrapped.append(part)
             continue
-        if len(part) <= max_token_length:
+        if "@" in part or len(part) <= max_token_length:
             wrapped.append(part)
             continue
         chunks = [part[i:i + max_token_length] for i in range(0, len(part), max_token_length)]
@@ -101,7 +108,22 @@ def format_client_report_text(value: object, *, force_currency: bool = False) ->
     text = "" if value is None else str(value)
     if not text.strip():
         return ""
+    text = clean_client_report_text(text)
     return format_client_report_financial_values(text, force_currency=force_currency)
+
+
+def clean_client_report_text(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"^\s*[-*•]\s+", "", cleaned)
+    cleaned = re.sub(
+        r"^\s*(trend|key trend|data note|implementation priority|report section to consider)\s*:\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = MARKDOWN_ARTIFACT_PATTERN.sub("", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip(" -")
 
 
 def format_client_report_financial_values(text: str, *, force_currency: bool = False) -> str:
@@ -635,17 +657,51 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
         for idx, item in enumerate(findings, start=1):
             render_ranked_finding(item, idx)
 
+    def has_ranked_findings() -> bool:
+        return any(isinstance(item, dict) for item in structured_list("ranked_findings"))
+
+    def trend_topic_key(text: str) -> str:
+        normalized = re.sub(r"[^a-z0-9\s]", " ", text.lower())
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        topic_markers = (
+            ("gross production", ("gross", "production")),
+            ("net production", ("net", "production")),
+            ("writeoffs", ("writeoff",)),
+            ("adjustments", ("adjustment",)),
+            ("collections", ("collection",)),
+            ("labor", ("labor",)),
+            ("payroll", ("payroll",)),
+            ("hygiene", ("hygiene",)),
+        )
+        for label, markers in topic_markers:
+            if all(marker in normalized for marker in markers):
+                return label
+        return normalized[:90]
+
+    def cleaned_structured_list(key: str, *, max_items: int = 20) -> list[str]:
+        items: list[str] = []
+        seen: set[str] = set()
+        for raw_item in structured_list(key):
+            item = format_client_report_text(raw_item)
+            if not item:
+                continue
+            dedupe_key = trend_topic_key(item) if key == "structured_trends" else item.lower()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            items.append(item)
+            if len(items) >= max_items:
+                break
+        return items
+
     def render_structured_bullet_section(
         title: str,
         key: str,
         field_label: str,
         accent: tuple[int, int, int],
+        max_items: int = 20,
     ) -> None:
-        items = [
-            format_client_report_text(item)
-            for item in structured_list(key)
-            if format_client_report_text(item)
-        ]
+        items = cleaned_structured_list(key, max_items=max_items)
         if not items:
             return
         section_title(title, accent=accent)
@@ -721,6 +777,8 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
     structured_sections = sections.get("structured") if isinstance(sections.get("structured"), dict) else None
     if structured_sections:
         render_executive_summary()
+        if has_ranked_findings():
+            pdf.add_page()
         render_ranked_findings()
 
         opportunities = sections.get("opportunities") or []
@@ -729,7 +787,7 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
             for idx, item in enumerate(opportunities, start=1):
                 render_opportunity(item, idx, format_financial=True)
 
-        render_structured_bullet_section("Key Trends", "structured_trends", "structured:trends", teal)
+        render_structured_bullet_section("Key Trends", "structured_trends", "structured:trends", teal, max_items=7)
         render_structured_bullet_section("30-Day Action Plan", "action_plan_items", "structured:action_plan", green)
         render_structured_bullet_section("Data Notes / Limitations", "data_notes", "structured:data_notes", lilac)
     else:
