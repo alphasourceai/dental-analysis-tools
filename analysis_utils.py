@@ -653,7 +653,9 @@ def format_client_financial_values(text):
             next_char = segment[end] if end < len(segment) else ""
             following_text = segment[end : end + 12].lower()
 
-            if previous_char == "$":
+            if previous_char in {"$", ","} or previous_char.isdigit():
+                return raw_number
+            if _is_inside_existing_currency_amount(segment, start):
                 return raw_number
             if next_char in {"%", "/", "-"} or previous_char in {"/", "-"}:
                 return raw_number
@@ -671,6 +673,18 @@ def format_client_financial_values(text):
 
     segments = re.split(r"([.!?]\s+|\n+)", text)
     return "".join(format_segment(segment) if index % 2 == 0 else segment for index, segment in enumerate(segments))
+
+
+def _is_inside_existing_currency_amount(segment, start):
+    cursor = start - 1
+    while cursor >= 0:
+        char = segment[cursor]
+        if char == "$":
+            return True
+        if char.isspace() or char in ".!?;:()[]{}":
+            return False
+        cursor -= 1
+    return False
 
 
 def _looks_like_year(raw_number):
