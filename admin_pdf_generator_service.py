@@ -510,25 +510,31 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
         return (242, 240, 255), (212, 202, 252), navy
 
     def badge_text_for(label: str, value: str) -> str:
-        return f"{label}: {value}"
+        compact_labels = {
+            "Category": "Cat",
+            "Severity": "Sev",
+            "Confidence": "Conf",
+            "Difficulty": "Diff",
+        }
+        return f"{compact_labels.get(label, label)}: {value}"
 
     def badge_width(text: str) -> float:
-        set_bold(7, navy)
-        return min(max(pdf.get_string_width(sanitize_pdf_text(text)) + 7.5, 24), content_width - 12)
+        set_bold(6, navy)
+        return min(max(pdf.get_string_width(sanitize_pdf_text(text)) + 5.0, 16), content_width - 12)
 
     def estimate_badge_row_height(badges: list[tuple[str, str]], max_width: float) -> float:
         if not badges:
             return 0
         x_offset = 0.0
         rows = 1
-        gap = 2.0
+        gap = 1.5
         for label, value in badges:
             width = min(badge_width(badge_text_for(label, value)), max_width)
             if x_offset and x_offset + width > max_width:
                 rows += 1
                 x_offset = 0.0
             x_offset += width + gap
-        return rows * 6.0 + (rows - 1) * 2.0
+        return rows * 5.4 + (rows - 1) * 1.6
 
     def draw_badge_shape(
         x: float,
@@ -540,7 +546,7 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
     ) -> None:
         pdf.set_fill_color(*fill)
         pdf.set_draw_color(*border_color)
-        radius = min(2.2, width / 2, height / 2)
+        radius = min(2.0, width / 2, height / 2)
         try:
             k = pdf.k
             page_height = pdf.h
@@ -575,8 +581,8 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
     ) -> None:
         if not badges:
             return
-        gap = 2.0
-        badge_height = 6.0
+        gap = 1.5
+        badge_height = 5.4
         x = start_x
         y = pdf.get_y()
         for label, value in badges:
@@ -584,16 +590,16 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
             width = min(badge_width(text), max_width)
             if x > start_x and x + width > start_x + max_width:
                 x = start_x
-                y += badge_height + 2.0
+                y += badge_height + 1.6
 
             fill, border_color, text_color = badge_style(label, value)
             draw_badge_shape(x, y, width, badge_height, fill, border_color)
-            pdf.set_xy(x + 3.5, y + 1.35)
-            set_bold(7, text_color)
-            pdf.cell(width - 7.0, 3.6, sanitize_pdf_text(text), ln=0)
+            pdf.set_xy(x + 2.5, y + 1.25)
+            set_bold(6, text_color)
+            pdf.cell(width - 5.0, 3.2, sanitize_pdf_text(text), ln=0)
             x += width + gap
 
-        pdf.set_y(y + badge_height + 2.0)
+        pdf.set_y(y + badge_height + 1.6)
         pdf.set_x(start_x)
 
     def render_opportunity(item: object, idx: int, *, format_financial: bool = False) -> None:
