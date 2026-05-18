@@ -4,44 +4,182 @@ Used by both app.py (public page) and admin_dashboard.py (admin page).
 """
 
 import os
-import tempfile
 import base64
 import textwrap
 import logging
 import sendgrid
 from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition, ContentId, TrackingSettings, ClickTracking
-from PIL import Image
 from io import BytesIO
+from typing import Callable, Optional
 import pymupdf as fitz
-import pytesseract
 
 
-def extract_text_from_pdf(uploaded_file):
-    """Extract text from PDF file, using OCR for image-based pages"""
-    text = ""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        tmp_pdf_path = tmp_file.name
+DEFAULT_PDF_OCR_RENDER_SCALE = 2.0
+
+
+class PdfTextExtractionError(Exception):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class PdfTextExtractionCanceled(Exception):
+    pass
+
+
+def extract_text_from_pdf(
+    uploaded_file,
+    *,
+    enable_ocr: bool = True,
+    max_pages: Optional[int] = None,
+    max_ocr_pages: Optional[int] = None,
+    max_chars: Optional[int] = None,
+    ocr_render_scale: float = DEFAULT_PDF_OCR_RENDER_SCALE,
+    cancel_checker: Optional[Callable[[], bool]] = None,
+    raise_on_empty: bool = False,
+):
+    """Extract text from PDF file, using bounded OCR fallback for image-based pages."""
+    _raise_if_pdf_extraction_canceled(cancel_checker)
     try:
-        with fitz.open(tmp_pdf_path) as doc:
-            for page in doc:
-                page_text = page.get_text()
-                
-                if not page_text.strip():
-                    image_list = page.get_images()
-                    for img_index, img in enumerate(image_list):
-                        xref = img[0]
-                        base_image = doc.extract_image(xref)
-                        image_bytes = base_image["image"]
-                        image = Image.open(BytesIO(image_bytes))
-                        page_text += pytesseract.image_to_string(image)
-                
-                text += page_text
-                if page_text.strip():
-                    text += "\n"
-    finally:
-        os.remove(tmp_pdf_path)
-    return text.strip()
+        pdf_bytes = uploaded_file.read()
+    except Exception as exc:
+        raise PdfTextExtractionError(
+            "pdf_read_failed",
+            "PDF file could not be read.",
+        ) from exc
+
+    if not pdf_bytes:
+        if raise_on_empty:
+            raise PdfTextExtractionError(
+                "empty_pdf_text",
+                "PDF did not contain readable text.",
+            )
+        return ""
+
+    _raise_if_pdf_extraction_canceled(cancel_checker)
+    rendered_pages = []
+    extracted_chars = 0
+    ocr_pages = 0
+    ocr_dependencies = None
+
+    try:
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            if getattr(doc, "needs_pass", False):
+                raise PdfTextExtractionError(
+                    "pdf_read_failed",
+                    "PDF file could not be read.",
+                )
+
+            for page_index, page in enumerate(doc):
+                _raise_if_pdf_extraction_canceled(cancel_checker)
+                if max_pages is not None and page_index >= max_pages:
+                    break
+                if max_chars is not None and extracted_chars >= max_chars:
+                    break
+
+                page_text = _normalize_pdf_text(page.get_text("text") or "")
+
+                if (
+                    not page_text
+                    and enable_ocr
+                    and (max_ocr_pages is None or ocr_pages < max_ocr_pages)
+                ):
+                    _raise_if_pdf_extraction_canceled(cancel_checker)
+                    if ocr_dependencies is None:
+                        ocr_dependencies = _load_pdf_ocr_dependencies()
+                    page_text = _extract_pdf_page_ocr_text(
+                        page,
+                        ocr_dependencies,
+                        ocr_render_scale=ocr_render_scale,
+                    )
+                    ocr_pages += 1
+                    _raise_if_pdf_extraction_canceled(cancel_checker)
+
+                if not page_text:
+                    continue
+
+                if max_chars is not None:
+                    remaining_chars = max_chars - extracted_chars
+                    if remaining_chars <= 0:
+                        break
+                    if len(page_text) > remaining_chars:
+                        page_text = page_text[:remaining_chars].rstrip()
+
+                if page_text:
+                    rendered_pages.append(page_text)
+                    extracted_chars += len(page_text)
+    except PdfTextExtractionCanceled:
+        raise
+    except PdfTextExtractionError:
+        raise
+    except Exception as exc:
+        raise PdfTextExtractionError(
+            "pdf_read_failed",
+            "PDF file could not be read.",
+        ) from exc
+
+    _raise_if_pdf_extraction_canceled(cancel_checker)
+    text = "\n\n".join(rendered_pages).strip()
+    if not text:
+        if raise_on_empty:
+            raise PdfTextExtractionError(
+                "empty_pdf_text",
+                "PDF did not contain readable text. Upload a clearer PDF or a file with selectable text.",
+            )
+        return ""
+    return text
+
+
+def _normalize_pdf_text(value: str) -> str:
+    lines = [" ".join(line.strip().split()) for line in value.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def _load_pdf_ocr_dependencies():
+    try:
+        from PIL import Image
+        import pytesseract
+    except ImportError as exc:
+        raise PdfTextExtractionError(
+            "pdf_ocr_dependency_missing",
+            "PDF OCR processing is temporarily unavailable.",
+        ) from exc
+    return Image, pytesseract
+
+
+def _extract_pdf_page_ocr_text(page, ocr_dependencies, *, ocr_render_scale: float) -> str:
+    Image, pytesseract = ocr_dependencies
+    try:
+        scale = ocr_render_scale if ocr_render_scale and ocr_render_scale > 0 else DEFAULT_PDF_OCR_RENDER_SCALE
+        matrix = fitz.Matrix(scale, scale)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        with Image.open(BytesIO(pixmap.tobytes("png"))) as image:
+            return _normalize_pdf_text(pytesseract.image_to_string(image) or "")
+    except Exception as exc:
+        if type(exc).__name__ == "TesseractNotFoundError":
+            raise PdfTextExtractionError(
+                "pdf_ocr_dependency_missing",
+                "PDF OCR processing is temporarily unavailable.",
+            ) from exc
+        raise PdfTextExtractionError(
+            "pdf_ocr_failed",
+            "PDF OCR text could not be extracted.",
+        ) from exc
+
+
+def _raise_if_pdf_extraction_canceled(cancel_checker: Optional[Callable[[], bool]]) -> None:
+    if not cancel_checker:
+        return
+    try:
+        if cancel_checker():
+            raise PdfTextExtractionCanceled()
+    except PdfTextExtractionCanceled:
+        raise
+    except Exception as exc:
+        if type(exc).__name__ == "PublicAnalyzerCanceled":
+            raise PdfTextExtractionCanceled() from exc
+        raise
 
 
 def get_analysis_prompt(doc_type="general"):
@@ -94,7 +232,7 @@ def get_model_config():
     if _MODEL_CONFIG is not None:
         return _MODEL_CONFIG
     openai_model = os.getenv("OPENAI_MODEL", "gpt-5-chat-latest")
-    xai_model = os.getenv("XAI_MODEL", "grok-4-1-fast-reasoning")
+    xai_model = os.getenv("XAI_MODEL", "grok-4.3")
     anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
     _MODEL_CONFIG = {
         "openai": openai_model,
