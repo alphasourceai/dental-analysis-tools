@@ -5,6 +5,7 @@ import math
 import os
 import re
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Optional
 
 from fpdf import FPDF
@@ -12,6 +13,38 @@ from fpdf import FPDF
 from supabase_utils import SUPABASE_URL, _get_supabase_admin_client
 
 PDF_STORAGE_BUCKET = "consulting-uploads"
+FINANCIAL_CONTEXT_KEYWORDS = (
+    "production",
+    "revenue",
+    "income",
+    "collections",
+    "collection",
+    "writeoff",
+    "writeoffs",
+    "adjustment",
+    "adjustments",
+    "cost",
+    "costs",
+    "profit",
+    "gross",
+    "net",
+    "ebitda",
+    "overhead",
+    "expense",
+    "expenses",
+    "fee",
+    "fees",
+    "payment",
+    "payments",
+    "ar",
+    "accounts receivable",
+    "financial",
+    "cash flow",
+    "value",
+)
+FINANCIAL_NUMBER_PATTERN = re.compile(
+    r"(?<![\w$,\d])(?:\d{1,3}(?:,\d{3})+|\d{4,})(?:\.\d+)?(?![\w%])"
+)
 
 
 def _wrap_long_tokens(text: str, max_token_length: int = 28) -> str:
@@ -62,6 +95,76 @@ def safe_path_component(value: str) -> str:
         return "unknown"
     safe = value.strip().replace("/", "_").replace("\\", "_").replace(" ", "_")
     return safe or "unknown"
+
+
+def format_client_report_text(value: object, *, force_currency: bool = False) -> str:
+    text = "" if value is None else str(value)
+    if not text.strip():
+        return ""
+    return format_client_report_financial_values(text, force_currency=force_currency)
+
+
+def format_client_report_financial_values(text: str, *, force_currency: bool = False) -> str:
+    if not text:
+        return ""
+    lower_text = text.lower()
+    has_financial_context = force_currency or any(
+        re.search(rf"\b{re.escape(keyword)}\b", lower_text)
+        if " " not in keyword
+        else keyword in lower_text
+        for keyword in FINANCIAL_CONTEXT_KEYWORDS
+    )
+    if not has_financial_context:
+        return text
+
+    def is_part_of_existing_currency(start: int) -> bool:
+        if start <= 0:
+            return False
+        previous = text[start - 1]
+        if previous in "$,0123456789":
+            return True
+        index = start - 1
+        while index >= 0 and not text[index].isspace() and text[index] not in "([{;:":
+            if text[index] == "$":
+                return True
+            if text[index] in ".!?":
+                return False
+            index -= 1
+        return False
+
+    def replacement(match: re.Match[str]) -> str:
+        start, end = match.span()
+        raw_value = match.group(0)
+        if is_part_of_existing_currency(start):
+            return raw_value
+
+        following = text[end:end + 9].lower()
+        if following.startswith("%") or following.startswith(" percent"):
+            return raw_value
+
+        numeric_value = raw_value.replace(",", "")
+        digits_only = re.sub(r"\D", "", numeric_value)
+        if len(digits_only) in (10, 11):
+            return raw_value
+        if "." not in numeric_value and "," not in raw_value:
+            try:
+                whole_number = int(numeric_value)
+            except ValueError:
+                whole_number = 0
+            if 1900 <= whole_number <= 2100:
+                return raw_value
+
+        try:
+            amount = Decimal(numeric_value)
+        except (InvalidOperation, ValueError):
+            return raw_value
+        if amount.is_nan() or amount.is_infinite():
+            return raw_value
+
+        rounded = int(amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        return f"${rounded:,}"
+
+    return FINANCIAL_NUMBER_PATTERN.sub(replacement, text)
 
 
 def _repo_root() -> str:
@@ -201,7 +304,7 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
             self.ln(3)
             self.set_font(font_family, "", 9)
             self.set_text_color(*self.footer_muted)
-            self.cell(0, 5, sanitize_pdf_text("alphaSource Consulting | info@alphasourceai.com"), ln=0)
+            self.cell(0, 5, sanitize_pdf_text("alphaSource Consulting | hello@alphasourceconsulting.com"), ln=0)
             self.set_x(-34)
             self.cell(18, 5, sanitize_pdf_text(f"Page {self.page_no()}"), align="R")
 
@@ -334,11 +437,15 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
         safe_pdf_multi_cell(pdf, safe_text, field_label, height=5.6, width=content_width - 5)
         pdf.ln(1.2)
 
-    def render_opportunity(item: object, idx: int) -> None:
+    def render_opportunity(item: object, idx: int, *, format_financial: bool = False) -> None:
         if isinstance(item, dict):
             title_text = (item.get("title") or "").strip()
             impact_text = (item.get("impact") or "").strip()
             rec_text = (item.get("recommendation") or "").strip()
+            if format_financial:
+                title_text = format_client_report_text(title_text)
+                impact_text = format_client_report_text(impact_text)
+                rec_text = format_client_report_text(rec_text)
             card_inner_width = content_width - 12
             title_height = estimate_text_height(title_text or f"Opportunity {idx}", card_inner_width, 6, 11)
             impact_height = estimate_text_height(impact_text, card_inner_width, 5.4, 9) if impact_text else 0
@@ -374,7 +481,177 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
             return
         combined = str(item).strip() if item is not None else ""
         if combined:
+            if format_financial:
+                combined = format_client_report_text(combined)
             render_bullet(combined, f"opportunity:{idx}")
+
+    def structured_dict(key: str) -> dict[str, Any]:
+        structured = sections.get("structured")
+        if not isinstance(structured, dict):
+            return {}
+        value = structured.get(key)
+        return value if isinstance(value, dict) else {}
+
+    def structured_list(key: str) -> list[Any]:
+        structured = sections.get("structured")
+        if not isinstance(structured, dict):
+            return []
+        value = structured.get(key)
+        return value if isinstance(value, list) else []
+
+    def render_executive_summary() -> None:
+        summary = structured_dict("executive_summary")
+        rows = [
+            ("Summary", summary.get("summary")),
+            ("Primary Concern", summary.get("primaryConcern")),
+            ("Recommended Focus", summary.get("recommendedFocus")),
+        ]
+        rows = [(label, format_client_report_text(value)) for label, value in rows if format_client_report_text(value)]
+        if not rows:
+            return
+
+        section_title("Executive Summary", accent=lilac)
+        card_inner_width = content_width - 12
+        card_height = 12 + sum(estimate_text_height(value, card_inner_width, 5.4, 9) + 8 for _, value in rows)
+        ensure_space(card_height + 4)
+        card_y = pdf.get_y()
+        draw_card(pdf.l_margin, card_y, content_width, card_height, card)
+        pdf.set_xy(pdf.l_margin + 6, card_y + 6)
+        for label, value in rows:
+            render_label(label, lilac)
+            pdf.set_x(pdf.l_margin + 6)
+            set_regular(9, body)
+            safe_pdf_multi_cell(pdf, value, f"structured:summary:{label}", height=5.4, width=card_inner_width)
+            pdf.ln(1)
+            pdf.set_x(pdf.l_margin + 6)
+        pdf.set_y(card_y + card_height + 4)
+
+    def render_ranked_finding(item: dict[str, Any], idx: int) -> None:
+        title = format_client_report_text(item.get("title")) or f"Finding {idx}"
+        rank = item.get("rank") or idx
+        category = format_client_report_text(item.get("category"))
+        severity = format_client_report_text(item.get("severity"))
+        confidence = format_client_report_text(item.get("confidence"))
+        impact_category = format_client_report_text(item.get("estimatedImpactCategory"))
+        difficulty = format_client_report_text(item.get("implementationDifficulty"))
+        financial_value = format_client_report_text(item.get("financialValue"), force_currency=True)
+        client_summary = format_client_report_text(item.get("clientFacingSummary"))
+        operational_implication = format_client_report_text(item.get("operationalImplication"))
+        recommended_action = format_client_report_text(item.get("recommendedAction"))
+        evidence_items = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+
+        meta_values = [
+            ("Category", category),
+            ("Severity", severity),
+            ("Confidence", confidence),
+            ("Impact", impact_category),
+            ("Difficulty", difficulty),
+            ("Financial Value", financial_value),
+        ]
+        meta_values = [(label, value) for label, value in meta_values if value]
+        content_blocks = [
+            ("Client Summary", client_summary),
+            ("Operational Implication", operational_implication),
+            ("Recommended Action", recommended_action),
+        ]
+        content_blocks = [(label, value) for label, value in content_blocks if value]
+
+        card_inner_width = content_width - 12
+        card_height = 18 + estimate_text_height(title, card_inner_width, 6, 11)
+        if meta_values:
+            card_height += sum(estimate_text_height(f"{label}: {value}", card_inner_width, 4.8, 8) + 1 for label, value in meta_values)
+        for _, value in content_blocks:
+            card_height += estimate_text_height(value, card_inner_width, 5.2, 9) + 9
+        if evidence_items:
+            card_height += 8
+            for evidence in evidence_items[:5]:
+                if isinstance(evidence, dict):
+                    evidence_text = " - ".join(
+                        format_client_report_text(evidence.get(key), force_currency=(key == "value"))
+                        for key in ("label", "value", "sourceHint")
+                        if format_client_report_text(evidence.get(key), force_currency=(key == "value"))
+                    )
+                    if evidence_text:
+                        card_height += estimate_text_height(evidence_text, card_inner_width - 5, 5, 8) + 1
+
+        ensure_space(card_height + 5)
+        card_y = pdf.get_y()
+        draw_card(pdf.l_margin, card_y, content_width, card_height, (255, 255, 255))
+        pdf.set_fill_color(*teal)
+        pdf.rect(pdf.l_margin, card_y, 2, card_height, "F")
+        pdf.set_xy(pdf.l_margin + 6, card_y + 5)
+        set_bold(11, navy)
+        safe_pdf_multi_cell(pdf, f"{rank}. {title}", f"structured:finding:{idx}:title", height=6, width=card_inner_width)
+
+        if meta_values:
+            pdf.ln(1)
+            pdf.set_x(pdf.l_margin + 6)
+            set_regular(8, muted)
+            for label, value in meta_values:
+                safe_pdf_multi_cell(
+                    pdf,
+                    f"{label}: {value}",
+                    f"structured:finding:{idx}:meta:{label}",
+                    height=4.8,
+                    width=card_inner_width,
+                )
+                pdf.set_x(pdf.l_margin + 6)
+
+        for label, value in content_blocks:
+            pdf.ln(1)
+            pdf.set_x(pdf.l_margin + 6)
+            render_label(label, lilac)
+            pdf.set_x(pdf.l_margin + 6)
+            set_regular(9, body)
+            safe_pdf_multi_cell(pdf, value, f"structured:finding:{idx}:{label}", height=5.2, width=card_inner_width)
+
+        rendered_evidence = []
+        for evidence in evidence_items[:5]:
+            if not isinstance(evidence, dict):
+                continue
+            evidence_text = " - ".join(
+                format_client_report_text(evidence.get(key), force_currency=(key == "value"))
+                for key in ("label", "value", "sourceHint")
+                if format_client_report_text(evidence.get(key), force_currency=(key == "value"))
+            )
+            if evidence_text:
+                rendered_evidence.append(evidence_text)
+        if rendered_evidence:
+            pdf.ln(1)
+            pdf.set_x(pdf.l_margin + 6)
+            render_label("Evidence", green)
+            pdf.set_x(pdf.l_margin + 6)
+            for evidence_text in rendered_evidence:
+                render_bullet(evidence_text, f"structured:finding:{idx}:evidence", size=8, accent=green)
+                pdf.set_x(pdf.l_margin + 6)
+
+        pdf.set_y(card_y + card_height + 4)
+
+    def render_ranked_findings() -> None:
+        findings = [item for item in structured_list("ranked_findings") if isinstance(item, dict)]
+        if not findings:
+            return
+        section_title("Ranked Findings", accent=teal)
+        for idx, item in enumerate(findings, start=1):
+            render_ranked_finding(item, idx)
+
+    def render_structured_bullet_section(
+        title: str,
+        key: str,
+        field_label: str,
+        accent: tuple[int, int, int],
+    ) -> None:
+        items = [
+            format_client_report_text(item)
+            for item in structured_list(key)
+            if format_client_report_text(item)
+        ]
+        if not items:
+            return
+        section_title(title, accent=accent)
+        for idx, item in enumerate(items, start=1):
+            render_bullet(item, f"{field_label}:{idx}", accent=accent)
+        pdf.ln(1)
 
     logo_path = os.path.join(root, "public", "logo-dark-text.png")
     header_y = pdf.get_y()
@@ -385,7 +662,7 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
             pass
     else:
         set_bold(10, navy)
-        pdf.cell(34, 8, sanitize_pdf_text("AlphaSource"), ln=0)
+        pdf.cell(34, 8, sanitize_pdf_text("alphaSource"), ln=0)
 
     report_date = datetime.utcnow()
     report_date_text = f"{report_date:%b} {report_date.day}, {report_date:%Y}"
@@ -441,23 +718,38 @@ def generate_pdf_bytes(metadata: dict[str, Any], sections: dict[str, Any], notes
             pdf.ln(detail_gap)
     pdf.ln(10)
 
-    section_specs = [
-        ("opportunities", "Improvement Opportunities", lilac),
-        ("trends", "Trends", teal),
-        ("key_trends", "Key Trends Identified", green),
-    ]
-    for key, title, accent in section_specs:
-        items = sections.get(key) or []
-        if not items:
-            continue
-        section_title(title, accent=accent)
-        if key == "opportunities":
-            for idx, item in enumerate(items, start=1):
-                render_opportunity(item, idx)
-        else:
-            for idx, item in enumerate(items, start=1):
-                render_bullet(str(item).strip(), f"{key}:{idx}", accent=accent)
-        pdf.ln(1)
+    structured_sections = sections.get("structured") if isinstance(sections.get("structured"), dict) else None
+    if structured_sections:
+        render_executive_summary()
+        render_ranked_findings()
+
+        opportunities = sections.get("opportunities") or []
+        if opportunities:
+            section_title("Improvement Opportunities", accent=lilac)
+            for idx, item in enumerate(opportunities, start=1):
+                render_opportunity(item, idx, format_financial=True)
+
+        render_structured_bullet_section("Key Trends", "structured_trends", "structured:trends", teal)
+        render_structured_bullet_section("30-Day Action Plan", "action_plan_items", "structured:action_plan", green)
+        render_structured_bullet_section("Data Notes / Limitations", "data_notes", "structured:data_notes", lilac)
+    else:
+        section_specs = [
+            ("opportunities", "Improvement Opportunities", lilac),
+            ("trends", "Trends", teal),
+            ("key_trends", "Key Trends Identified", green),
+        ]
+        for key, title, accent in section_specs:
+            items = sections.get(key) or []
+            if not items:
+                continue
+            section_title(title, accent=accent)
+            if key == "opportunities":
+                for idx, item in enumerate(items, start=1):
+                    render_opportunity(item, idx)
+            else:
+                for idx, item in enumerate(items, start=1):
+                    render_bullet(str(item).strip(), f"{key}:{idx}", accent=accent)
+            pdf.ln(1)
 
     if notes:
         section_title("Additional Notes", accent=lilac)

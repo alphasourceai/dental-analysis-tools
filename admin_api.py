@@ -3498,6 +3498,7 @@ async def generate_admin_pdf_report(request: Request) -> JSONResponse:
         opportunities,
         trends,
         key_trends,
+        structured_sections,
         additional_notes,
         validation_error,
     ) = _validate_pdf_generation_body(body)
@@ -3565,6 +3566,8 @@ async def generate_admin_pdf_report(request: Request) -> JSONResponse:
         "trends": trends,
         "key_trends": key_trends,
     }
+    if structured_sections:
+        sections["structured"] = structured_sections
 
     try:
         pdf_bytes = generate_pdf_bytes(metadata, sections, additional_notes, next_version)
@@ -6768,14 +6771,14 @@ def _pdf_generator_signed_url(path: str, expires_in: int = 3600) -> tuple[Option
 
 def _validate_pdf_generation_body(
     body: dict[str, Any],
-) -> tuple[UUID, list[dict[str, str]], list[str], list[str], str, Optional[JSONResponse]]:
+) -> tuple[UUID, list[dict[str, str]], list[str], list[str], dict[str, Any], str, Optional[JSONResponse]]:
     upload_id_text = _clean_text(body.get("uploadId"))
     if not upload_id_text:
-        return UUID(int=0), [], [], [], "", _error_response(400, "missing_upload_id", "uploadId is required.")
+        return UUID(int=0), [], [], [], {}, "", _error_response(400, "missing_upload_id", "uploadId is required.")
     try:
         upload_id = UUID(upload_id_text)
     except ValueError:
-        return UUID(int=0), [], [], [], "", _error_response(400, "invalid_upload_id", "uploadId must be a valid UUID.")
+        return UUID(int=0), [], [], [], {}, "", _error_response(400, "invalid_upload_id", "uploadId must be a valid UUID.")
 
     opportunities_value = body.get("opportunities", [])
     trends_value = body.get("trends", [])
@@ -6787,11 +6790,11 @@ def _validate_pdf_generation_body(
         allow_empty=True,
     )
     if notes_error:
-        return UUID(int=0), [], [], [], "", notes_error
+        return UUID(int=0), [], [], [], {}, "", notes_error
 
     opportunities, opportunities_error = _pdf_generation_opportunities(opportunities_value)
     if opportunities_error:
-        return UUID(int=0), [], [], [], "", opportunities_error
+        return UUID(int=0), [], [], [], {}, "", opportunities_error
 
     trends, trends_error = _pdf_generation_text_list(
         trends_value,
@@ -6800,7 +6803,7 @@ def _validate_pdf_generation_body(
         max_length=4000,
     )
     if trends_error:
-        return UUID(int=0), [], [], [], "", trends_error
+        return UUID(int=0), [], [], [], {}, "", trends_error
 
     key_trends, key_trends_error = _pdf_generation_text_list(
         key_trends_value,
@@ -6809,17 +6812,214 @@ def _validate_pdf_generation_body(
         max_length=4000,
     )
     if key_trends_error:
-        return UUID(int=0), [], [], [], "", key_trends_error
+        return UUID(int=0), [], [], [], {}, "", key_trends_error
 
-    has_content = bool(opportunities or trends or key_trends or additional_notes)
+    structured_sections, structured_error = _pdf_generation_structured_sections(body)
+    if structured_error:
+        return UUID(int=0), [], [], [], {}, "", structured_error
+
+    has_content = bool(opportunities or trends or key_trends or structured_sections or additional_notes)
     if not has_content:
-        return UUID(int=0), [], [], [], "", _error_response(
+        return UUID(int=0), [], [], [], {}, "", _error_response(
             400,
             "missing_pdf_content",
-            "At least one opportunity, trend, key trend, or note is required.",
+            "At least one report section or note is required.",
         )
 
-    return upload_id, opportunities, trends, key_trends, additional_notes, None
+    return upload_id, opportunities, trends, key_trends, structured_sections, additional_notes, None
+
+
+def _pdf_generation_structured_sections(body: dict[str, Any]) -> tuple[dict[str, Any], Optional[JSONResponse]]:
+    executive_summary, summary_error = _pdf_generation_structured_summary(
+        body.get("executiveSummary")
+    )
+    if summary_error:
+        return {}, summary_error
+
+    ranked_findings, findings_error = _pdf_generation_ranked_findings(
+        body.get("rankedFindings", [])
+    )
+    if findings_error:
+        return {}, findings_error
+
+    structured_trends, trends_error = _pdf_generation_text_list(
+        body.get("structuredTrends", []),
+        "structuredTrends",
+        max_items=20,
+        max_length=4000,
+    )
+    if trends_error:
+        return {}, trends_error
+
+    action_plan_items, action_plan_error = _pdf_generation_text_list(
+        body.get("actionPlanItems", []),
+        "actionPlanItems",
+        max_items=20,
+        max_length=4000,
+    )
+    if action_plan_error:
+        return {}, action_plan_error
+
+    data_notes, data_notes_error = _pdf_generation_text_list(
+        body.get("dataNotes", []),
+        "dataNotes",
+        max_items=20,
+        max_length=4000,
+    )
+    if data_notes_error:
+        return {}, data_notes_error
+
+    structured_sections = {
+        "executive_summary": executive_summary,
+        "ranked_findings": ranked_findings,
+        "structured_trends": structured_trends,
+        "action_plan_items": action_plan_items,
+        "data_notes": data_notes,
+    }
+    if not any(
+        (
+            any(executive_summary.values()),
+            ranked_findings,
+            structured_trends,
+            action_plan_items,
+            data_notes,
+        )
+    ):
+        return {}, None
+    return structured_sections, None
+
+
+def _pdf_generation_structured_summary(value: object) -> tuple[dict[str, str], Optional[JSONResponse]]:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        return {}, _error_response(400, "invalid_executive_summary", "executiveSummary must be an object.")
+
+    summary: dict[str, str] = {}
+    for key in ("summary", "primaryConcern", "recommendedFocus"):
+        text, text_error = _pdf_generation_text(
+            value.get(key, ""),
+            f"executiveSummary.{key}",
+            4000,
+            allow_empty=True,
+        )
+        if text_error:
+            return {}, text_error
+        summary[key] = text
+    return summary, None
+
+
+def _pdf_generation_ranked_findings(value: object) -> tuple[list[dict[str, Any]], Optional[JSONResponse]]:
+    if value is None:
+        value = []
+    if not isinstance(value, list):
+        return [], _error_response(400, "invalid_ranked_findings", "rankedFindings must be a list.")
+    if len(value) > 20:
+        return [], _error_response(400, "too_many_ranked_findings", "rankedFindings must include 20 items or fewer.")
+
+    findings: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            return [], _error_response(400, "invalid_ranked_finding", "Each ranked finding must be an object.")
+
+        finding, finding_error = _pdf_generation_ranked_finding(item, index)
+        if finding_error:
+            return [], finding_error
+        if finding:
+            findings.append(finding)
+    return findings, None
+
+
+def _pdf_generation_ranked_finding(
+    item: dict[str, Any],
+    index: int,
+) -> tuple[dict[str, Any], Optional[JSONResponse]]:
+    rank_value = item.get("rank")
+    rank = index + 1
+    if rank_value is not None:
+        if isinstance(rank_value, bool):
+            return {}, _error_response(400, "invalid_ranked_finding_rank", f"rankedFindings[{index}].rank must be a number.")
+        try:
+            rank = int(rank_value)
+        except (TypeError, ValueError):
+            return {}, _error_response(400, "invalid_ranked_finding_rank", f"rankedFindings[{index}].rank must be a number.")
+        if rank < 1:
+            rank = index + 1
+
+    text_fields = (
+        "title",
+        "category",
+        "severity",
+        "confidence",
+        "estimatedImpactCategory",
+        "implementationDifficulty",
+        "financialValue",
+        "clientFacingSummary",
+        "operationalImplication",
+        "recommendedAction",
+    )
+    finding: dict[str, Any] = {"rank": rank}
+    for field in text_fields:
+        text, text_error = _pdf_generation_text(
+            item.get(field, ""),
+            f"rankedFindings[{index}].{field}",
+            4000,
+            allow_empty=True,
+        )
+        if text_error:
+            return {}, text_error
+        finding[field] = text
+
+    evidence, evidence_error = _pdf_generation_ranked_finding_evidence(
+        item.get("evidence", []),
+        index,
+    )
+    if evidence_error:
+        return {}, evidence_error
+    finding["evidence"] = evidence
+
+    if not any(
+        (
+            finding["title"],
+            finding["financialValue"],
+            finding["operationalImplication"],
+            finding["recommendedAction"],
+            evidence,
+        )
+    ):
+        return {}, None
+    return finding, None
+
+
+def _pdf_generation_ranked_finding_evidence(
+    value: object,
+    finding_index: int,
+) -> tuple[list[dict[str, str]], Optional[JSONResponse]]:
+    if value is None:
+        value = []
+    if not isinstance(value, list):
+        return [], _error_response(400, "invalid_ranked_finding_evidence", "ranked finding evidence must be a list.")
+    if len(value) > 5:
+        return [], _error_response(400, "too_many_ranked_finding_evidence", "ranked finding evidence must include 5 items or fewer.")
+
+    evidence_items: list[dict[str, str]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            return [], _error_response(400, "invalid_ranked_finding_evidence", "Each evidence item must be an object.")
+        evidence: dict[str, str] = {}
+        for field in ("label", "value", "sourceHint"):
+            text, text_error = _pdf_generation_text(
+                item.get(field, ""),
+                f"rankedFindings[{finding_index}].evidence[{index}].{field}",
+                1000,
+                allow_empty=True,
+            )
+            if text_error:
+                return [], text_error
+            evidence[field] = text
+        if any(evidence.values()):
+            evidence_items.append(evidence)
+    return evidence_items, None
 
 
 def _pdf_generation_opportunities(value: object) -> tuple[list[dict[str, str]], Optional[JSONResponse]]:
