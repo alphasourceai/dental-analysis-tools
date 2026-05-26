@@ -24,6 +24,7 @@ PROVIDER_UNAVAILABLE_MESSAGE = (
     "Analysis unavailable from this model due to temporary provider capacity. "
     "Other model results were processed."
 )
+PROVIDER_SKIPPED_MESSAGE = "Skipped for current admin xAI-only analysis mode."
 MAX_XLSX_SHEETS = 10
 MAX_XLSX_ROWS_PER_SHEET = 500
 MAX_XLSX_COLUMNS_PER_ROW = 50
@@ -40,6 +41,11 @@ MAX_STRUCTURED_LIST_ITEMS = 12
 MAX_STRUCTURED_EVIDENCE_ITEMS = 5
 MAX_STRUCTURED_TEXT_CHARS = 700
 MAX_STRUCTURED_SHORT_TEXT_CHARS = 180
+ADMIN_ANALYSIS_PROVIDER_MODE_ENV = "ADMIN_ANALYSIS_PROVIDER_MODE"
+ADMIN_ANALYSIS_PROVIDER_MODE_XAI_ONLY = "xai_only"
+ADMIN_ANALYSIS_PROVIDER_MODE_DEEP_REVIEW = "deep_review"
+ADMIN_ANALYSIS_PROVIDER_MODE_DEFAULT = ADMIN_ANALYSIS_PROVIDER_MODE_XAI_ONLY
+ADMIN_ANALYSIS_PROVIDER_ORDER = ("openai", "xai", "anthropic")
 
 CancelChecker = Callable[[], bool]
 
@@ -267,6 +273,7 @@ def run_financial_csv_analysis(
         ("xai", "xAI Analysis", "xai", _xai_analysis),
         ("anthropic", "AnthropicAI Analysis", "anthropic", _anthropic_analysis),
     ]
+    enabled_providers = _get_admin_analysis_enabled_providers()
 
     raw_analyses: dict[str, str] = {}
     provider_statuses: dict[str, dict[str, Any]] = {}
@@ -278,6 +285,19 @@ def run_financial_csv_analysis(
 
     for provider_name, result_key, label_key, analysis_func in provider_specs:
         _raise_if_canceled(cancel_checker)
+        if provider_name not in enabled_providers:
+            raw_analyses[result_key] = PROVIDER_SKIPPED_MESSAGE
+            provider_statuses[provider_name] = {
+                "ok": False,
+                "errorType": "skipped",
+                "status": "skipped",
+            }
+            parsed_issues[label_key] = []
+            parsed_trends[label_key] = []
+            provider_structured_outputs[label_key] = None
+            structured_provider_statuses[label_key] = {"status": "skipped"}
+            continue
+
         analysis_text, succeeded, error_type = _run_provider_analysis_with_retry(
             provider_name=provider_name,
             analysis_func=lambda input_text, func=analysis_func: func(
@@ -897,9 +917,24 @@ def _extract_pdf_page_ocr_text(
 def _get_model_config() -> dict[str, str]:
     return {
         "openai": os.getenv("OPENAI_MODEL", "gpt-5-chat-latest"),
-        "xai": os.getenv("XAI_MODEL", "grok-4-1-fast-reasoning"),
+        "xai": os.getenv("XAI_MODEL", "grok-4.3"),
         "anthropic": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
     }
+
+
+def _get_admin_analysis_enabled_providers() -> set[str]:
+    mode = os.getenv(
+        ADMIN_ANALYSIS_PROVIDER_MODE_ENV,
+        ADMIN_ANALYSIS_PROVIDER_MODE_DEFAULT,
+    ).strip().lower()
+    if mode in {
+        "multi_provider",
+        "three_provider",
+        "all",
+        ADMIN_ANALYSIS_PROVIDER_MODE_DEEP_REVIEW,
+    }:
+        return set(ADMIN_ANALYSIS_PROVIDER_ORDER)
+    return {"xai"}
 
 
 def _get_model_labels() -> dict[str, str]:
