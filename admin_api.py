@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import csv
 import io
 import logging
@@ -50,6 +51,7 @@ from models import (
     StripeCheckoutSessionUpload,
     StripeCustomer,
     StripeEvent,
+    StripeSubscription,
     Upload,
     UploadFile as UploadFileRecord,
     UploadPortalFile,
@@ -140,6 +142,14 @@ ADMIN_ONE_TIME_OFFER_PAYMENT_LINKS = {
         "default_amount": 350000,
     },
 }
+ADMIN_RECURRING_OFFER_PAYMENT_LINKS = {
+    "operations_intelligence_partner": {
+        "name": "Operations Intelligence Partner",
+        "interval": "month",
+    },
+}
+ADMIN_RETAINER_CONTRACT_MONTHS_MIN = 1
+ADMIN_RETAINER_CONTRACT_MONTHS_MAX = 24
 PERMISSION_CLIENTS_READ = "clients_read"
 PERMISSION_CLIENTS_WRITE = "clients_write"
 PERMISSION_UPLOADS_WRITE = "uploads_write"
@@ -4232,20 +4242,31 @@ async def create_admin_offer_payment_link(request: Request) -> JSONResponse:
         return validation_error
 
     offer_type = (_clean_text(body.get("offerType")) or "").lower()
+    billing_mode = (_clean_text(body.get("billingMode")) or _clean_text(body.get("mode")) or "one_time").lower()
+    if billing_mode == "recurring":
+        return _create_admin_recurring_offer_payment_link(
+            request=request,
+            body=body,
+            client_email=client_email,
+            offer_type=offer_type,
+            stripe_secret_key=stripe_secret_key,
+            admin_user=admin_user,
+            admin_access=admin_access,
+        )
+
+    if billing_mode != "one_time":
+        return _error_response(
+            400,
+            "invalid_billing_mode",
+            "billingMode must be one_time or recurring.",
+        )
+
     offer_config = ADMIN_ONE_TIME_OFFER_PAYMENT_LINKS.get(offer_type)
     if not offer_config:
         return _error_response(
             400,
             "invalid_offer_type",
             "offerType must be one of the supported one-time offers.",
-        )
-
-    billing_mode = (_clean_text(body.get("billingMode")) or _clean_text(body.get("mode")) or "one_time").lower()
-    if billing_mode != "one_time":
-        return _error_response(
-            400,
-            "invalid_billing_mode",
-            "Only one_time billing is supported by this endpoint.",
         )
 
     amount, validation_error = _required_amount(body.get("amount"))
@@ -4456,6 +4477,247 @@ async def create_admin_offer_payment_link(request: Request) -> JSONResponse:
         db.close()
 
 
+def _create_admin_recurring_offer_payment_link(
+    *,
+    request: Request,
+    body: dict[str, Any],
+    client_email: str,
+    offer_type: str,
+    stripe_secret_key: str,
+    admin_user: dict[str, Any],
+    admin_access: Optional[AdminUser],
+) -> JSONResponse:
+    offer_config = ADMIN_RECURRING_OFFER_PAYMENT_LINKS.get(offer_type)
+    if not offer_config:
+        return _error_response(
+            400,
+            "invalid_offer_type",
+            "offerType must be operations_intelligence_partner for recurring billing.",
+        )
+
+    interval = (_clean_text(body.get("interval")) or "month").lower()
+    if interval != "month":
+        return _error_response(400, "invalid_interval", "interval must be month.")
+
+    amount_source = body.get("amount") if "amount" in body else body.get("monthlyAmount")
+    monthly_amount, validation_error = _required_amount(amount_source)
+    if validation_error:
+        return validation_error
+
+    currency = (_clean_text(body.get("currency")) or "usd").lower()
+    if currency != "usd":
+        return _error_response(400, "invalid_currency", "currency must be usd.")
+
+    contract_months_source = body.get("contractMonths") if "contractMonths" in body else body.get("contract_months")
+    contract_months, validation_error = _required_contract_months(contract_months_source)
+    if validation_error:
+        return validation_error
+
+    raw_upload_id = _clean_text(body.get("uploadId"))
+    raw_upload_ids = body.get("uploadIds")
+    if raw_upload_id or (isinstance(raw_upload_ids, list) and raw_upload_ids) or (
+        raw_upload_ids is not None and not isinstance(raw_upload_ids, list)
+    ):
+        return _error_response(
+            400,
+            "recurring_upload_links_unsupported",
+            "Recurring retainer payment links cannot be linked to uploads in this phase.",
+        )
+
+    offer_name, validation_error = _optional_limited_text(body.get("offerName"), "offerName", 160)
+    if validation_error:
+        return validation_error
+    offer_name = offer_name or str(offer_config["name"])
+
+    description, validation_error = _optional_limited_text(body.get("description"), "description", 240)
+    if validation_error:
+        return validation_error
+    description = description or offer_name
+
+    internal_note, validation_error = _optional_limited_text(body.get("internalNote"), "internalNote", 2000)
+    if validation_error:
+        return validation_error
+
+    success_url, validation_error = _required_text(body.get("successUrl"), "successUrl")
+    if validation_error:
+        return validation_error
+    cancel_url, validation_error = _required_text(body.get("cancelUrl"), "cancelUrl")
+    if validation_error:
+        return validation_error
+    if not _is_safe_checkout_url(success_url) or not _is_safe_checkout_url(cancel_url):
+        return _error_response(400, "invalid_url", "Checkout URLs must use http or https.")
+
+    db = SessionLocal()
+    try:
+        user_record = db.query(User).filter(func.lower(User.email) == client_email).first()
+        stripe_customer_id, livemode = _get_or_create_stripe_customer(
+            db=db,
+            client_email=client_email,
+            user_record=user_record,
+            stripe_secret_key=stripe_secret_key,
+        )
+
+        metadata = {
+            "source": "admin_offer_payment_link",
+            "client_email": client_email,
+            "offer_type": offer_type,
+            "offer_name": offer_name,
+            "billing_mode": "recurring",
+            "interval": "month",
+            "contract_months": str(contract_months),
+            "monthly_amount": str(monthly_amount),
+            "created_by_admin_user_id": str(admin_user.get("id") or ""),
+        }
+
+        checkout_session = stripe.checkout.Session.create(
+            mode="subscription",
+            customer=stripe_customer_id,
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": currency,
+                        "unit_amount": monthly_amount,
+                        "recurring": {"interval": "month"},
+                        "product_data": {
+                            "name": offer_name,
+                            "description": description,
+                        },
+                    },
+                    "quantity": 1,
+                }
+            ],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata=metadata,
+            subscription_data={"metadata": metadata},
+            api_key=stripe_secret_key,
+        )
+        session_data = _stripe_object_to_dict(checkout_session)
+        checkout_session_id = _clean_text(session_data.get("id"))
+        checkout_url = _clean_text(session_data.get("url"))
+        stripe_subscription_id = _stripe_id(session_data.get("subscription"))
+        expires_at = _stripe_timestamp_to_datetime(session_data.get("expires_at"))
+        if not checkout_session_id or not checkout_url:
+            logger.error("[admin_api] Stripe retainer checkout link missing id or url.")
+            db.rollback()
+            return _error_response(502, "stripe_checkout_failed", "Unable to create subscription link.")
+
+        offer_metadata = {
+            "source": "admin_offer_payment_link",
+            "offerType": offer_type,
+            "offerName": offer_name,
+            "billingMode": "recurring",
+            "interval": "month",
+            "contractMonths": contract_months,
+            "monthlyAmount": monthly_amount,
+            "description": description,
+            "cancelScheduleStatus": "pending_checkout_completion",
+        }
+        local_session = StripeCheckoutSession(
+            stripe_checkout_session_id=checkout_session_id,
+            stripe_customer_id=stripe_customer_id,
+            client_email=client_email,
+            user_id=getattr(user_record, "id", None),
+            upload_id=None,
+            purpose=offer_type,
+            description=description,
+            offer_type=offer_type,
+            offer_name=offer_name,
+            billing_mode="recurring",
+            interval="month",
+            stripe_subscription_id=stripe_subscription_id,
+            contract_months=contract_months,
+            monthly_amount=monthly_amount,
+            subscription_status=None,
+            internal_note=internal_note,
+            offer_metadata=offer_metadata,
+            mode=_clean_text(session_data.get("mode")) or "subscription",
+            status=_clean_text(session_data.get("status")),
+            payment_status=_clean_text(session_data.get("payment_status")),
+            amount_total=_optional_int(session_data.get("amount_total")) or monthly_amount,
+            currency=_clean_text(session_data.get("currency")) or currency,
+            checkout_url=checkout_url,
+            expires_at=expires_at,
+            success_url=success_url,
+            cancel_url=cancel_url,
+            livemode=bool(session_data.get("livemode", livemode)),
+        )
+        db.add(local_session)
+        db.commit()
+        logger.info(
+            "[admin_api] Stripe retainer subscription link created id=%s client_email=%s amount=%s contract_months=%s admin_user_id=%s",
+            checkout_session_id,
+            client_email,
+            monthly_amount,
+            contract_months,
+            str(admin_user.get("id") or ""),
+        )
+        _record_admin_audit_event(
+            db,
+            request,
+            "checkout_session.created",
+            target_type="checkout_session",
+            target_id=getattr(local_session, "id", None),
+            client_email=client_email,
+            metadata={
+                "amount": monthly_amount,
+                "currency": currency,
+                "offerType": offer_type,
+                "offerName": offer_name,
+                "billingMode": "recurring",
+                "interval": "month",
+                "contractMonths": contract_months,
+                "expiresAt": _iso_datetime(expires_at),
+            },
+            admin_auth_user=admin_user,
+            admin_access=admin_access,
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "checkoutSessionId": checkout_session_id,
+                "url": checkout_url,
+                "status": _clean_text(session_data.get("status")) or "open",
+                "paymentStatus": _clean_text(session_data.get("payment_status")) or "unpaid",
+                "expiresAt": _iso_datetime(expires_at),
+                "expiredAt": None,
+                "uploadId": None,
+                "uploadIds": [],
+                "relatedUploads": [],
+                "offerType": offer_type,
+                "offerName": offer_name,
+                "billingMode": "recurring",
+                "interval": "month",
+                "internalNote": internal_note,
+                "monthlyAmount": monthly_amount,
+                "contractMonths": contract_months,
+                "stripeSubscriptionId": stripe_subscription_id,
+                "subscriptionStatus": None,
+                "currentPeriodEnd": None,
+                "cancelAt": None,
+            }
+        )
+    except stripe.error.StripeError:
+        db.rollback()
+        logger.exception(
+            "[admin_api] Stripe retainer subscription link creation failed client_email=%s amount=%s contract_months=%s",
+            client_email,
+            monthly_amount,
+            contract_months,
+        )
+        return _error_response(502, "stripe_checkout_failed", "Unable to create subscription link.")
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "[admin_api] retainer subscription link failed client_email=%s offer_type=%s",
+            client_email,
+            offer_type,
+        )
+        return _error_response(500, "payment_link_failed", "Unable to create subscription link.")
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/billing/checkout-sessions/{session_id}/expire")
 async def expire_admin_checkout_session(request: Request, session_id: str) -> JSONResponse:
     admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_BILLING_WRITE)
@@ -4599,6 +4861,13 @@ def get_admin_billing_client(
             .order_by(StripeCheckoutSession.created_at.desc())
             .all()
         )
+        subscriptions = (
+            db.query(StripeSubscription)
+            .filter(func.lower(StripeSubscription.client_email) == client_email)
+            .order_by(StripeSubscription.created_at.desc())
+            .limit(25)
+            .all()
+        )
         uploads_query = db.query(Upload).filter(func.lower(Upload.user_email) == client_email)
         uploads_query = _filter_uploads_by_void_status(uploads_query, normalized_upload_status)
         uploads = uploads_query.order_by(Upload.id.desc()).limit(25).all()
@@ -4687,6 +4956,7 @@ def get_admin_billing_client(
                     "paidCheckoutSessionCount": len(paid_sessions),
                     "openCheckoutSessionCount": len(open_sessions),
                     "expiredCheckoutSessionCount": len(expired_sessions),
+                    "subscriptionCount": len(subscriptions),
                     "manualOverrideCount": len(billing_overrides),
                     "latestPaymentStatus": _clean_text(
                         getattr(latest_session, "payment_status", None)
@@ -4721,7 +4991,7 @@ def get_admin_billing_client(
                     for override in billing_overrides
                 ],
                 "invoices": [],
-                "subscriptions": [],
+                "subscriptions": [_stripe_subscription_payload(subscription) for subscription in subscriptions],
             }
         )
     except Exception:
@@ -4756,6 +5026,7 @@ def get_admin_billing_overview(
     db = SessionLocal()
     try:
         checkout_query = db.query(StripeCheckoutSession)
+        subscription_query = db.query(StripeSubscription)
         override_query = db.query(BillingOverride)
         if search_like:
             checkout_query = checkout_query.filter(
@@ -4764,9 +5035,17 @@ def get_admin_billing_overview(
                     StripeCheckoutSession.purpose.ilike(search_like),
                 )
             )
+            subscription_query = subscription_query.filter(
+                or_(
+                    StripeSubscription.client_email.ilike(search_like),
+                    StripeSubscription.offer_name.ilike(search_like),
+                    StripeSubscription.offer_type.ilike(search_like),
+                )
+            )
             override_query = override_query.filter(BillingOverride.client_email.ilike(search_like))
 
         checkout_session_count = checkout_query.count()
+        subscription_count = subscription_query.count()
         paid_checkout_session_count = checkout_query.filter(_checkout_paid_filter()).count()
         expired_checkout_session_count = checkout_query.filter(_checkout_expired_filter()).count()
         open_checkout_filter = _checkout_open_filter()
@@ -4811,6 +5090,7 @@ def get_admin_billing_overview(
                     "paidCheckoutSessionCount": paid_checkout_session_count,
                     "openCheckoutSessionCount": open_checkout_session_count,
                     "expiredCheckoutSessionCount": expired_checkout_session_count,
+                    "subscriptionCount": subscription_count,
                     "manualOverrideCount": manual_override_count,
                     "needsReviewEventCount": needs_review_event_count,
                 },
@@ -4986,6 +5266,10 @@ def _record_stripe_event(event: Any, payload: bytes) -> JSONResponse:
 
 def _process_stripe_event(db: Any, event_data: dict[str, Any], now: datetime) -> str:
     event_type = _clean_text(event_data.get("type")) or "unknown"
+    if event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
+        return _process_stripe_subscription_event(db, event_data, now)
+    if event_type in {"invoice.payment_succeeded", "invoice.payment_failed"}:
+        return _process_stripe_invoice_event(db, event_data, now)
     if event_type not in {"checkout.session.completed", "checkout.session.expired"}:
         return "processed"
 
@@ -5020,7 +5304,12 @@ def _process_stripe_event(db: Any, event_data: dict[str, Any], now: datetime) ->
         ),
     )
     if event_type == "checkout.session.completed" and _checkout_session_is_paid_or_complete(local_session):
-        _mark_checkout_session_uploads_paid(db, local_session)
+        if (_clean_text(getattr(local_session, "billing_mode", None)) or "").lower() == "recurring":
+            subscription_status = _sync_subscription_from_checkout_session(db, local_session, session_data, event_data, now)
+            if subscription_status == "needs_review":
+                return "needs_review"
+        else:
+            _mark_checkout_session_uploads_paid(db, local_session)
     logger.info(
         "[admin_api] Stripe checkout session event processed event_type=%s session_id=%s status=%s payment_status=%s",
         event_type,
@@ -5029,6 +5318,189 @@ def _process_stripe_event(db: Any, event_data: dict[str, Any], now: datetime) ->
         local_session.payment_status,
     )
     return "processed"
+
+
+def _process_stripe_subscription_event(db: Any, event_data: dict[str, Any], now: datetime) -> str:
+    subscription_data = _stripe_event_object_from_event(event_data)
+    subscription_id = _stripe_id(subscription_data.get("id"))
+    if not subscription_id:
+        logger.warning("[admin_api] Stripe subscription event missing subscription id.")
+        return "needs_review"
+
+    subscription = _upsert_stripe_subscription(db, subscription_data, now)
+    if subscription:
+        _apply_subscription_to_checkout_sessions(db, subscription, now)
+    return "processed"
+
+
+def _process_stripe_invoice_event(db: Any, event_data: dict[str, Any], now: datetime) -> str:
+    invoice_data = _stripe_event_object_from_event(event_data)
+    subscription_id = _stripe_id(invoice_data.get("subscription"))
+    if not subscription_id:
+        parent = invoice_data.get("parent")
+        if isinstance(parent, dict):
+            subscription_details = parent.get("subscription_details")
+            if isinstance(subscription_details, dict):
+                subscription_id = _stripe_id(subscription_details.get("subscription"))
+    if not subscription_id:
+        return "processed"
+
+    subscription = (
+        db.query(StripeSubscription)
+        .filter(StripeSubscription.stripe_subscription_id == subscription_id)
+        .first()
+    )
+    if not subscription:
+        logger.info(
+            "[admin_api] Stripe invoice event for untracked subscription event_type=%s subscription_id=%s",
+            _clean_text(event_data.get("type")) or "unknown",
+            subscription_id,
+        )
+        return "processed"
+
+    event_type = _clean_text(event_data.get("type")) or ""
+    subscription.latest_invoice_id = _stripe_id(invoice_data.get("id")) or subscription.latest_invoice_id
+    subscription.latest_payment_status = "paid" if event_type == "invoice.payment_succeeded" else "failed"
+    subscription.updated_at = now
+    _apply_subscription_to_checkout_sessions(db, subscription, now)
+    return "processed"
+
+
+def _sync_subscription_from_checkout_session(
+    db: Any,
+    local_session: StripeCheckoutSession,
+    session_data: dict[str, Any],
+    event_data: dict[str, Any],
+    now: datetime,
+) -> str:
+    subscription_id = _stripe_id(session_data.get("subscription"))
+    if not subscription_id:
+        _update_checkout_offer_metadata(
+            local_session,
+            {
+                "cancelScheduleStatus": "needs_review",
+                "cancelScheduleReason": "missing_subscription_id",
+            },
+        )
+        logger.warning(
+            "[admin_api] completed recurring checkout session missing subscription id session_id=%s",
+            _clean_text(getattr(local_session, "stripe_checkout_session_id", None)),
+        )
+        return "needs_review"
+
+    local_session.stripe_subscription_id = subscription_id
+    stripe_secret_key = os.getenv("STRIPE_SECRET_KEY", "").strip()
+    subscription_data: dict[str, Any] = {"id": subscription_id, "metadata": _stripe_metadata_from_checkout_session(local_session)}
+    retrieved_subscription = False
+    if stripe_secret_key:
+        try:
+            subscription_data = _stripe_object_to_dict(
+                stripe.Subscription.retrieve(subscription_id, api_key=stripe_secret_key)
+            ) or subscription_data
+            retrieved_subscription = True
+        except stripe.error.StripeError:
+            logger.exception(
+                "[admin_api] Stripe subscription retrieve failed subscription_id=%s",
+                subscription_id,
+            )
+
+    local_subscription = _upsert_stripe_subscription(
+        db,
+        subscription_data,
+        now,
+        local_session=local_session,
+        session_data=session_data,
+    )
+
+    if not stripe_secret_key or not retrieved_subscription:
+        _update_checkout_offer_metadata(
+            local_session,
+            {
+                "cancelScheduleStatus": "needs_review",
+                "cancelScheduleReason": "subscription_retrieve_failed",
+            },
+        )
+        if local_subscription:
+            _merge_subscription_metadata(
+                local_subscription,
+                {
+                    "cancelScheduleStatus": "needs_review",
+                    "cancelScheduleReason": "subscription_retrieve_failed",
+                },
+            )
+        _apply_subscription_to_checkout_sessions(db, local_subscription, now) if local_subscription else None
+        return "needs_review"
+
+    cancel_at = _retainer_cancel_at(subscription_data, local_session, session_data, now)
+    if not cancel_at:
+        _update_checkout_offer_metadata(
+            local_session,
+            {
+                "cancelScheduleStatus": "needs_review",
+                "cancelScheduleReason": "missing_contract_months_or_start",
+            },
+        )
+        if local_subscription:
+            _merge_subscription_metadata(
+                local_subscription,
+                {
+                    "cancelScheduleStatus": "needs_review",
+                    "cancelScheduleReason": "missing_contract_months_or_start",
+                },
+            )
+        _apply_subscription_to_checkout_sessions(db, local_subscription, now) if local_subscription else None
+        return "needs_review"
+
+    try:
+        updated_subscription = stripe.Subscription.modify(
+            subscription_id,
+            cancel_at=int(cancel_at.timestamp()),
+            api_key=stripe_secret_key,
+        )
+        subscription_data = _stripe_object_to_dict(updated_subscription) or subscription_data
+        local_subscription = _upsert_stripe_subscription(
+            db,
+            subscription_data,
+            now,
+            local_session=local_session,
+            session_data=session_data,
+            cancel_at_override=cancel_at,
+            cancel_schedule_status="scheduled",
+        )
+        _update_checkout_offer_metadata(
+            local_session,
+            {
+                "cancelScheduleStatus": "scheduled",
+                "cancelAt": _iso_datetime(cancel_at),
+            },
+        )
+        _apply_subscription_to_checkout_sessions(db, local_subscription, now) if local_subscription else None
+        return "processed"
+    except stripe.error.StripeError:
+        logger.exception(
+            "[admin_api] Stripe subscription cancel_at scheduling failed subscription_id=%s",
+            subscription_id,
+        )
+        if local_subscription:
+            local_subscription.cancel_at = cancel_at
+            _merge_subscription_metadata(
+                local_subscription,
+                {
+                    "cancelScheduleStatus": "needs_review",
+                    "cancelScheduleReason": "stripe_cancel_schedule_failed",
+                    "intendedCancelAt": _iso_datetime(cancel_at),
+                },
+            )
+            _apply_subscription_to_checkout_sessions(db, local_subscription, now)
+        _update_checkout_offer_metadata(
+            local_session,
+            {
+                "cancelScheduleStatus": "needs_review",
+                "cancelScheduleReason": "stripe_cancel_schedule_failed",
+                "intendedCancelAt": _iso_datetime(cancel_at),
+            },
+        )
+        return "needs_review"
 
 
 def _checkout_session_is_paid_or_complete(session: StripeCheckoutSession) -> bool:
@@ -5097,6 +5569,9 @@ def _apply_checkout_session_data(
     local_session.currency = _clean_text(session_data.get("currency")) or local_session.currency
     local_session.stripe_customer_id = (
         _stripe_id(session_data.get("customer")) or local_session.stripe_customer_id
+    )
+    local_session.stripe_subscription_id = (
+        _stripe_id(session_data.get("subscription")) or local_session.stripe_subscription_id
     )
     session_livemode = session_data.get("livemode", event_livemode)
     if session_livemode is not None:
@@ -5175,6 +5650,291 @@ def _stripe_id(value: object) -> Optional[str]:
     return _clean_text(value)
 
 
+def _stripe_event_object_from_event(event_data: dict[str, Any]) -> dict[str, Any]:
+    data = event_data.get("data")
+    if not isinstance(data, dict):
+        return {}
+    stripe_object = data.get("object")
+    if isinstance(stripe_object, dict):
+        return stripe_object
+    return _stripe_object_to_dict(stripe_object)
+
+
+def _stripe_metadata_dict(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    metadata: dict[str, str] = {}
+    for key, item in value.items():
+        safe_key = _clean_text(key)
+        safe_value = _clean_text(item)
+        if safe_key and safe_value is not None:
+            metadata[safe_key] = safe_value
+    return metadata
+
+
+def _stripe_metadata_from_checkout_session(session: StripeCheckoutSession) -> dict[str, str]:
+    metadata = {
+        "source": "admin_offer_payment_link",
+        "client_email": _clean_text(getattr(session, "client_email", None)) or "",
+        "offer_type": _clean_text(getattr(session, "offer_type", None)) or "",
+        "offer_name": _clean_text(getattr(session, "offer_name", None)) or "",
+        "billing_mode": _clean_text(getattr(session, "billing_mode", None)) or "recurring",
+        "interval": _clean_text(getattr(session, "interval", None)) or "month",
+        "contract_months": str(_optional_int(getattr(session, "contract_months", None)) or ""),
+        "monthly_amount": str(_optional_int(getattr(session, "monthly_amount", None)) or ""),
+    }
+    return {key: value for key, value in metadata.items() if value}
+
+
+def _metadata_int(value: object) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = _clean_text(value)
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _subscription_items(subscription_data: dict[str, Any]) -> list[dict[str, Any]]:
+    items = subscription_data.get("items")
+    if not isinstance(items, dict):
+        return []
+    data = items.get("data")
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _subscription_price_amount(subscription_data: dict[str, Any]) -> Optional[int]:
+    for item in _subscription_items(subscription_data):
+        price = item.get("price")
+        if isinstance(price, dict):
+            amount = _optional_int(price.get("unit_amount"))
+            if amount is not None:
+                return amount
+    return None
+
+
+def _subscription_currency(subscription_data: dict[str, Any]) -> Optional[str]:
+    for item in _subscription_items(subscription_data):
+        price = item.get("price")
+        if isinstance(price, dict):
+            currency = _clean_text(price.get("currency"))
+            if currency:
+                return currency
+    return None
+
+
+def _subscription_period_datetime(subscription_data: dict[str, Any], field_name: str) -> Optional[datetime]:
+    value = _stripe_timestamp_to_datetime(subscription_data.get(field_name))
+    if value:
+        return value
+    for item in _subscription_items(subscription_data):
+        value = _stripe_timestamp_to_datetime(item.get(field_name))
+        if value:
+            return value
+    return None
+
+
+def _upsert_stripe_subscription(
+    db: Any,
+    subscription_data: dict[str, Any],
+    now: datetime,
+    *,
+    local_session: Optional[StripeCheckoutSession] = None,
+    session_data: Optional[dict[str, Any]] = None,
+    cancel_at_override: Optional[datetime] = None,
+    cancel_schedule_status: Optional[str] = None,
+) -> Optional[StripeSubscription]:
+    subscription_id = _stripe_id(subscription_data.get("id"))
+    if not subscription_id:
+        return None
+
+    metadata = _stripe_metadata_dict(subscription_data.get("metadata"))
+    existing = (
+        db.query(StripeSubscription)
+        .filter(StripeSubscription.stripe_subscription_id == subscription_id)
+        .first()
+    )
+    client_email = (
+        metadata.get("client_email")
+        or _clean_text(getattr(local_session, "client_email", None))
+        or _clean_text(getattr(existing, "client_email", None))
+    )
+    if not client_email:
+        return None
+
+    contract_months = (
+        _metadata_int(metadata.get("contract_months"))
+        or _optional_int(getattr(local_session, "contract_months", None))
+        or _optional_int(getattr(existing, "contract_months", None))
+    )
+    monthly_amount = (
+        _metadata_int(metadata.get("monthly_amount"))
+        or _optional_int(getattr(local_session, "monthly_amount", None))
+        or _subscription_price_amount(subscription_data)
+        or _optional_int(getattr(existing, "monthly_amount", None))
+    )
+    checkout_session_id = _clean_text(getattr(local_session, "stripe_checkout_session_id", None))
+    session_payload = session_data or {}
+    stripe_customer_id = (
+        _stripe_id(subscription_data.get("customer"))
+        or _stripe_id(session_payload.get("customer"))
+        or _clean_text(getattr(local_session, "stripe_customer_id", None))
+        or _clean_text(getattr(existing, "stripe_customer_id", None))
+    )
+    latest_invoice_id = _stripe_id(subscription_data.get("latest_invoice"))
+    latest_payment_status = (
+        _clean_text(getattr(local_session, "payment_status", None))
+        or _clean_text(getattr(existing, "latest_payment_status", None))
+    )
+    cancel_at = cancel_at_override or _stripe_timestamp_to_datetime(subscription_data.get("cancel_at"))
+    if existing:
+        subscription = existing
+    else:
+        subscription = StripeSubscription(
+            stripe_subscription_id=subscription_id,
+            client_email=client_email,
+            created_at=now,
+        )
+        db.add(subscription)
+
+    subscription.client_email = client_email
+    subscription.user_id = getattr(local_session, "user_id", None) or getattr(subscription, "user_id", None)
+    subscription.stripe_customer_id = stripe_customer_id
+    subscription.source_checkout_session_id = getattr(local_session, "id", None) or getattr(subscription, "source_checkout_session_id", None)
+    subscription.stripe_checkout_session_id = checkout_session_id or getattr(subscription, "stripe_checkout_session_id", None)
+    subscription.offer_type = (
+        metadata.get("offer_type")
+        or _clean_text(getattr(local_session, "offer_type", None))
+        or _clean_text(getattr(subscription, "offer_type", None))
+    )
+    subscription.offer_name = (
+        metadata.get("offer_name")
+        or _clean_text(getattr(local_session, "offer_name", None))
+        or _clean_text(getattr(subscription, "offer_name", None))
+    )
+    subscription.billing_mode = metadata.get("billing_mode") or "recurring"
+    subscription.interval = metadata.get("interval") or _clean_text(getattr(local_session, "interval", None)) or "month"
+    subscription.monthly_amount = monthly_amount
+    subscription.currency = _clean_text(subscription_data.get("currency")) or _subscription_currency(subscription_data) or _clean_text(getattr(local_session, "currency", None)) or "usd"
+    subscription.contract_months = contract_months
+    subscription.status = _clean_text(subscription_data.get("status")) or getattr(subscription, "status", None)
+    subscription.current_period_start = _subscription_period_datetime(subscription_data, "current_period_start") or getattr(subscription, "current_period_start", None)
+    subscription.current_period_end = _subscription_period_datetime(subscription_data, "current_period_end") or getattr(subscription, "current_period_end", None)
+    subscription.cancel_at = cancel_at or getattr(subscription, "cancel_at", None)
+    if isinstance(subscription_data.get("cancel_at_period_end"), bool):
+        subscription.cancel_at_period_end = subscription_data.get("cancel_at_period_end")
+    canceled_at = _stripe_timestamp_to_datetime(subscription_data.get("canceled_at"))
+    if canceled_at:
+        subscription.canceled_at = canceled_at
+    subscription.latest_invoice_id = latest_invoice_id or getattr(subscription, "latest_invoice_id", None)
+    subscription.latest_payment_status = latest_payment_status
+    subscription.internal_note = _clean_text(getattr(local_session, "internal_note", None)) or getattr(subscription, "internal_note", None)
+    subscription.livemode = bool(subscription_data.get("livemode", getattr(local_session, "livemode", False)))
+    subscription.updated_at = now
+    if metadata:
+        _merge_subscription_metadata(subscription, metadata)
+    if cancel_schedule_status:
+        _merge_subscription_metadata(subscription, {"cancelScheduleStatus": cancel_schedule_status})
+    return subscription
+
+
+def _merge_subscription_metadata(subscription: StripeSubscription, metadata: dict[str, Any]) -> None:
+    current = getattr(subscription, "subscription_metadata", None)
+    if not isinstance(current, dict):
+        current = {}
+    merged = dict(current)
+    for key, value in metadata.items():
+        safe_key = _clean_text(key)
+        if not safe_key:
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            merged[safe_key] = value
+    subscription.subscription_metadata = merged
+
+
+def _update_checkout_offer_metadata(session: StripeCheckoutSession, metadata: dict[str, Any]) -> None:
+    current = getattr(session, "offer_metadata", None)
+    if not isinstance(current, dict):
+        current = {}
+    updated = dict(current)
+    for key, value in metadata.items():
+        safe_key = _clean_text(key)
+        if safe_key:
+            updated[safe_key] = value
+    session.offer_metadata = updated
+
+
+def _apply_subscription_to_checkout_sessions(
+    db: Any,
+    subscription: Optional[StripeSubscription],
+    now: datetime,
+) -> None:
+    if not subscription:
+        return
+    subscription_id = _clean_text(getattr(subscription, "stripe_subscription_id", None))
+    if not subscription_id:
+        return
+
+    filters = [StripeCheckoutSession.stripe_subscription_id == subscription_id]
+    stripe_checkout_session_id = _clean_text(getattr(subscription, "stripe_checkout_session_id", None))
+    if stripe_checkout_session_id:
+        filters.append(StripeCheckoutSession.stripe_checkout_session_id == stripe_checkout_session_id)
+    rows = db.query(StripeCheckoutSession).filter(or_(*filters)).all()
+    for session in rows:
+        session.stripe_subscription_id = subscription_id
+        session.subscription_status = _clean_text(getattr(subscription, "status", None))
+        session.current_period_end = getattr(subscription, "current_period_end", None)
+        session.cancel_at = getattr(subscription, "cancel_at", None)
+        session.contract_months = (
+            _optional_int(getattr(session, "contract_months", None))
+            or _optional_int(getattr(subscription, "contract_months", None))
+        )
+        session.monthly_amount = (
+            _optional_int(getattr(session, "monthly_amount", None))
+            or _optional_int(getattr(subscription, "monthly_amount", None))
+        )
+        session.updated_at = now
+
+
+def _retainer_cancel_at(
+    subscription_data: dict[str, Any],
+    local_session: StripeCheckoutSession,
+    session_data: dict[str, Any],
+    now: datetime,
+) -> Optional[datetime]:
+    contract_months = _optional_int(getattr(local_session, "contract_months", None))
+    if not contract_months:
+        metadata = _stripe_metadata_dict(subscription_data.get("metadata"))
+        contract_months = _metadata_int(metadata.get("contract_months"))
+    if not contract_months:
+        return None
+
+    start_at = (
+        _subscription_period_datetime(subscription_data, "current_period_start")
+        or _stripe_timestamp_to_datetime(subscription_data.get("start_date"))
+        or _stripe_timestamp_to_datetime(session_data.get("created"))
+        or now
+    )
+    return _add_months(start_at, contract_months)
+
+
+def _add_months(value: datetime, months: int) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
+
+
 def _stripe_customer_payload(customer: StripeCustomer) -> dict[str, Any]:
     return {
         "id": _id_text(getattr(customer, "id", None)),
@@ -5184,6 +5944,36 @@ def _stripe_customer_payload(customer: StripeCustomer) -> dict[str, Any]:
         "livemode": bool(getattr(customer, "livemode", False)),
         "createdAt": _iso_datetime(getattr(customer, "created_at", None)),
         "updatedAt": _iso_datetime(getattr(customer, "updated_at", None)),
+    }
+
+
+def _stripe_subscription_payload(subscription: StripeSubscription) -> dict[str, Any]:
+    return {
+        "id": _id_text(getattr(subscription, "id", None)),
+        "clientEmail": _clean_text(getattr(subscription, "client_email", None)),
+        "stripeCustomerId": _clean_text(getattr(subscription, "stripe_customer_id", None)),
+        "stripeSubscriptionId": _clean_text(getattr(subscription, "stripe_subscription_id", None)),
+        "sourceCheckoutSessionId": _id_text(getattr(subscription, "source_checkout_session_id", None)),
+        "stripeCheckoutSessionId": _clean_text(getattr(subscription, "stripe_checkout_session_id", None)),
+        "offerType": _clean_text(getattr(subscription, "offer_type", None)),
+        "offerName": _clean_text(getattr(subscription, "offer_name", None)),
+        "billingMode": _clean_text(getattr(subscription, "billing_mode", None)),
+        "interval": _clean_text(getattr(subscription, "interval", None)),
+        "monthlyAmount": _optional_int(getattr(subscription, "monthly_amount", None)),
+        "currency": _clean_text(getattr(subscription, "currency", None)),
+        "contractMonths": _optional_int(getattr(subscription, "contract_months", None)),
+        "status": _clean_text(getattr(subscription, "status", None)),
+        "currentPeriodStart": _iso_datetime(getattr(subscription, "current_period_start", None)),
+        "currentPeriodEnd": _iso_datetime(getattr(subscription, "current_period_end", None)),
+        "cancelAt": _iso_datetime(getattr(subscription, "cancel_at", None)),
+        "cancelAtPeriodEnd": bool(getattr(subscription, "cancel_at_period_end", False)),
+        "canceledAt": _iso_datetime(getattr(subscription, "canceled_at", None)),
+        "latestInvoiceId": _clean_text(getattr(subscription, "latest_invoice_id", None)),
+        "latestPaymentStatus": _clean_text(getattr(subscription, "latest_payment_status", None)),
+        "internalNote": _clean_text(getattr(subscription, "internal_note", None)),
+        "livemode": bool(getattr(subscription, "livemode", False)),
+        "createdAt": _iso_datetime(getattr(subscription, "created_at", None)),
+        "updatedAt": _iso_datetime(getattr(subscription, "updated_at", None)),
     }
 
 
@@ -7550,6 +8340,12 @@ def _checkout_session_payload(
         "offerName": _clean_text(getattr(session, "offer_name", None)),
         "billingMode": _clean_text(getattr(session, "billing_mode", None)),
         "interval": _clean_text(getattr(session, "interval", None)),
+        "monthlyAmount": _optional_int(getattr(session, "monthly_amount", None)),
+        "contractMonths": _optional_int(getattr(session, "contract_months", None)),
+        "stripeSubscriptionId": _clean_text(getattr(session, "stripe_subscription_id", None)),
+        "subscriptionStatus": _clean_text(getattr(session, "subscription_status", None)),
+        "currentPeriodEnd": _iso_datetime(getattr(session, "current_period_end", None)),
+        "cancelAt": _iso_datetime(getattr(session, "cancel_at", None)),
         "internalNote": _clean_text(getattr(session, "internal_note", None)),
         "mode": _clean_text(getattr(session, "mode", None)),
         "status": _clean_text(getattr(session, "status", None)),
@@ -8066,6 +8862,7 @@ def _stripe_object_to_dict(value: Any) -> dict[str, Any]:
             "amount_total",
             "currency",
             "customer",
+            "subscription",
             "expires_at",
             "expired_at",
             "created",
@@ -8170,6 +8967,18 @@ def _required_amount(value: object) -> tuple[int, Optional[JSONResponse]]:
         return 0, _error_response(400, "invalid_amount", "amount must be greater than zero.")
     if value > 10000000:
         return 0, _error_response(400, "invalid_amount", "amount is too large.")
+    return value, None
+
+
+def _required_contract_months(value: object) -> tuple[int, Optional[JSONResponse]]:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0, _error_response(400, "invalid_contract_months", "contractMonths must be an integer.")
+    if value < ADMIN_RETAINER_CONTRACT_MONTHS_MIN or value > ADMIN_RETAINER_CONTRACT_MONTHS_MAX:
+        return 0, _error_response(
+            400,
+            "invalid_contract_months",
+            f"contractMonths must be between {ADMIN_RETAINER_CONTRACT_MONTHS_MIN} and {ADMIN_RETAINER_CONTRACT_MONTHS_MAX}.",
+        )
     return value, None
 
 

@@ -150,6 +150,12 @@ class StripeCheckoutSession(Base):
     offer_name = Column(Text, nullable=True)
     billing_mode = Column(String(50), nullable=True, index=True)
     interval = Column(String(50), nullable=True)
+    stripe_subscription_id = Column(Text, nullable=True, index=True)
+    contract_months = Column(Integer, nullable=True)
+    monthly_amount = Column(Integer, nullable=True)
+    subscription_status = Column(String(50), nullable=True, index=True)
+    current_period_end = Column(DateTime(timezone=True), nullable=True)
+    cancel_at = Column(DateTime(timezone=True), nullable=True)
     internal_note = Column(Text, nullable=True)
     offer_metadata = Column(JSONB, nullable=True)
     mode = Column(String(50), nullable=True)
@@ -177,6 +183,38 @@ class StripeCheckoutSessionUpload(Base):
     checkout_session_id = Column(PGUUID(as_uuid=True), ForeignKey("stripe_checkout_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
     upload_id = Column(PGUUID(as_uuid=True), ForeignKey("uploads.id"), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+# Stripe subscription audit/link model
+class StripeSubscription(Base):
+    __tablename__ = "stripe_subscriptions"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    client_email = Column(Text, nullable=False, index=True)
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    stripe_customer_id = Column(Text, nullable=True, index=True)
+    stripe_subscription_id = Column(Text, nullable=True, unique=True, index=True)
+    source_checkout_session_id = Column(PGUUID(as_uuid=True), ForeignKey("stripe_checkout_sessions.id"), nullable=True, index=True)
+    stripe_checkout_session_id = Column(Text, nullable=True, index=True)
+    offer_type = Column(Text, nullable=True, index=True)
+    offer_name = Column(Text, nullable=True)
+    billing_mode = Column(Text, nullable=True, server_default=text("'recurring'"))
+    interval = Column(Text, nullable=True, server_default=text("'month'"))
+    monthly_amount = Column(Integer, nullable=True)
+    currency = Column(Text, nullable=True, server_default=text("'usd'"))
+    contract_months = Column(Integer, nullable=True)
+    status = Column(Text, nullable=True, index=True)
+    current_period_start = Column(DateTime(timezone=True), nullable=True)
+    current_period_end = Column(DateTime(timezone=True), nullable=True)
+    cancel_at = Column(DateTime(timezone=True), nullable=True)
+    cancel_at_period_end = Column(Boolean, nullable=True)
+    canceled_at = Column(DateTime(timezone=True), nullable=True)
+    latest_invoice_id = Column(Text, nullable=True)
+    latest_payment_status = Column(Text, nullable=True)
+    internal_note = Column(Text, nullable=True)
+    subscription_metadata = Column("metadata", JSONB, nullable=True)
+    livemode = Column(Boolean, nullable=False, server_default=text("false"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 # Stripe payment audit/link model
 class StripePayment(Base):
