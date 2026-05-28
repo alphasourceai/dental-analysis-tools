@@ -4942,6 +4942,7 @@ def get_admin_billing_client(
             checkout_sessions,
             upload_status=normalized_upload_status,
         )
+        checkout_subscriptions = _checkout_subscriptions_by_session(db, checkout_sessions)
 
         return JSONResponse(
             {
@@ -4966,12 +4967,14 @@ def get_admin_billing_client(
                     _checkout_session_payload(
                         latest_paid_session,
                         checkout_related_uploads.get(_id_text(getattr(latest_paid_session, "id", None)) or "", []),
+                        checkout_subscriptions.get(_id_text(getattr(latest_paid_session, "id", None)) or ""),
                     ) if latest_paid_session else None
                 ),
                 "checkoutSessions": [
                     _checkout_session_payload(
                         session,
                         checkout_related_uploads.get(_id_text(getattr(session, "id", None)) or "", []),
+                        checkout_subscriptions.get(_id_text(getattr(session, "id", None)) or ""),
                     )
                     for session in checkout_sessions[:25]
                 ],
@@ -5081,6 +5084,7 @@ def get_admin_billing_overview(
             .all()
         )
         checkout_related_uploads = _checkout_related_uploads_by_session(db, checkout_rows)
+        checkout_subscriptions = _checkout_subscriptions_by_session(db, checkout_rows)
 
         return JSONResponse(
             {
@@ -5098,6 +5102,7 @@ def get_admin_billing_overview(
                     _checkout_session_payload(
                         session,
                         checkout_related_uploads.get(_id_text(getattr(session, "id", None)) or "", []),
+                        checkout_subscriptions.get(_id_text(getattr(session, "id", None)) or ""),
                     )
                     for session in checkout_rows
                 ],
@@ -5890,6 +5895,9 @@ def _apply_subscription_to_checkout_sessions(
     for session in rows:
         session.stripe_subscription_id = subscription_id
         session.subscription_status = _clean_text(getattr(subscription, "status", None))
+        latest_payment_status = _clean_text(getattr(subscription, "latest_payment_status", None))
+        if latest_payment_status:
+            session.payment_status = latest_payment_status
         session.current_period_end = getattr(subscription, "current_period_end", None)
         session.cancel_at = getattr(subscription, "cancel_at", None)
         session.contract_months = (
@@ -8310,9 +8318,94 @@ def _checkout_related_uploads_by_session(
     return related_uploads_by_session_id
 
 
+def _checkout_subscriptions_by_session(
+    db: Any,
+    sessions: list[StripeCheckoutSession],
+) -> dict[str, StripeSubscription]:
+    session_ids = [
+        getattr(session, "id")
+        for session in sessions
+        if getattr(session, "id", None)
+    ]
+    stripe_checkout_session_ids = [
+        _clean_text(getattr(session, "stripe_checkout_session_id", None))
+        for session in sessions
+        if _clean_text(getattr(session, "stripe_checkout_session_id", None))
+    ]
+    stripe_subscription_ids = [
+        _clean_text(getattr(session, "stripe_subscription_id", None))
+        for session in sessions
+        if _clean_text(getattr(session, "stripe_subscription_id", None))
+    ]
+    if not session_ids and not stripe_checkout_session_ids and not stripe_subscription_ids:
+        return {}
+
+    filters = []
+    if session_ids:
+        filters.append(StripeSubscription.source_checkout_session_id.in_(session_ids))
+    if stripe_checkout_session_ids:
+        filters.append(StripeSubscription.stripe_checkout_session_id.in_(stripe_checkout_session_ids))
+    if stripe_subscription_ids:
+        filters.append(StripeSubscription.stripe_subscription_id.in_(stripe_subscription_ids))
+    if not filters:
+        return {}
+
+    subscriptions = (
+        db.query(StripeSubscription)
+        .filter(or_(*filters))
+        .order_by(StripeSubscription.updated_at.desc())
+        .all()
+    )
+    by_key: dict[tuple[str, str], StripeSubscription] = {}
+    for subscription in subscriptions:
+        local_session_id = _id_text(getattr(subscription, "source_checkout_session_id", None))
+        stripe_checkout_session_id = _clean_text(getattr(subscription, "stripe_checkout_session_id", None))
+        stripe_subscription_id = _clean_text(getattr(subscription, "stripe_subscription_id", None))
+        if local_session_id:
+            by_key.setdefault(("local", local_session_id), subscription)
+        if stripe_checkout_session_id:
+            by_key.setdefault(("checkout", stripe_checkout_session_id), subscription)
+        if stripe_subscription_id:
+            by_key.setdefault(("subscription", stripe_subscription_id), subscription)
+
+    subscriptions_by_session: dict[str, StripeSubscription] = {}
+    for session in sessions:
+        session_id = _id_text(getattr(session, "id", None))
+        if not session_id:
+            continue
+        stripe_checkout_session_id = _clean_text(getattr(session, "stripe_checkout_session_id", None))
+        stripe_subscription_id = _clean_text(getattr(session, "stripe_subscription_id", None))
+        subscription = (
+            by_key.get(("local", session_id))
+            or (by_key.get(("checkout", stripe_checkout_session_id)) if stripe_checkout_session_id else None)
+            or (by_key.get(("subscription", stripe_subscription_id)) if stripe_subscription_id else None)
+        )
+        if subscription:
+            subscriptions_by_session[session_id] = subscription
+
+    return subscriptions_by_session
+
+
+def _subscription_metadata_text(
+    subscription: Optional[StripeSubscription],
+    session: StripeCheckoutSession,
+    key: str,
+) -> str:
+    for metadata in (
+        getattr(subscription, "subscription_metadata", None) if subscription else None,
+        getattr(session, "offer_metadata", None),
+    ):
+        if isinstance(metadata, dict):
+            value = _clean_text(metadata.get(key))
+            if value:
+                return value
+    return ""
+
+
 def _checkout_session_payload(
     session: StripeCheckoutSession,
     related_uploads: Optional[list[Upload]] = None,
+    subscription: Optional[StripeSubscription] = None,
 ) -> dict[str, Any]:
     related_uploads = related_uploads or []
     upload_ids = []
@@ -8327,6 +8420,42 @@ def _checkout_session_payload(
     if legacy_upload_id and legacy_upload_id not in seen_upload_ids:
         upload_ids.append(legacy_upload_id)
 
+    stripe_subscription_id = (
+        _clean_text(getattr(subscription, "stripe_subscription_id", None))
+        if subscription
+        else ""
+    ) or _clean_text(getattr(session, "stripe_subscription_id", None))
+    subscription_status = (
+        _clean_text(getattr(subscription, "status", None))
+        if subscription
+        else ""
+    ) or _clean_text(getattr(session, "subscription_status", None))
+    subscription_current_period_start = (
+        getattr(subscription, "current_period_start", None)
+        if subscription
+        else None
+    )
+    subscription_current_period_end = (
+        getattr(subscription, "current_period_end", None)
+        if subscription
+        else None
+    ) or getattr(session, "current_period_end", None)
+    subscription_cancel_at = (
+        getattr(subscription, "cancel_at", None)
+        if subscription
+        else None
+    ) or getattr(session, "cancel_at", None)
+    latest_payment_status = (
+        _clean_text(getattr(subscription, "latest_payment_status", None))
+        if subscription
+        else ""
+    )
+    cancel_schedule_status = _subscription_metadata_text(
+        subscription,
+        session,
+        "cancelScheduleStatus",
+    )
+
     return {
         "id": _id_text(getattr(session, "id", None)),
         "stripeCheckoutSessionId": _clean_text(
@@ -8339,13 +8468,29 @@ def _checkout_session_payload(
         "offerType": _clean_text(getattr(session, "offer_type", None)),
         "offerName": _clean_text(getattr(session, "offer_name", None)),
         "billingMode": _clean_text(getattr(session, "billing_mode", None)),
-        "interval": _clean_text(getattr(session, "interval", None)),
-        "monthlyAmount": _optional_int(getattr(session, "monthly_amount", None)),
-        "contractMonths": _optional_int(getattr(session, "contract_months", None)),
-        "stripeSubscriptionId": _clean_text(getattr(session, "stripe_subscription_id", None)),
-        "subscriptionStatus": _clean_text(getattr(session, "subscription_status", None)),
-        "currentPeriodEnd": _iso_datetime(getattr(session, "current_period_end", None)),
-        "cancelAt": _iso_datetime(getattr(session, "cancel_at", None)),
+        "interval": _clean_text(getattr(session, "interval", None))
+        or (_clean_text(getattr(subscription, "interval", None)) if subscription else ""),
+        "monthlyAmount": _optional_int(getattr(session, "monthly_amount", None))
+        or (_optional_int(getattr(subscription, "monthly_amount", None)) if subscription else None),
+        "contractMonths": _optional_int(getattr(session, "contract_months", None))
+        or (_optional_int(getattr(subscription, "contract_months", None)) if subscription else None),
+        "stripeSubscriptionId": stripe_subscription_id,
+        "subscriptionStatus": subscription_status,
+        "subscriptionCurrentPeriodStart": _iso_datetime(subscription_current_period_start),
+        "subscriptionCurrentPeriodEnd": _iso_datetime(subscription_current_period_end),
+        "subscriptionCancelAt": _iso_datetime(subscription_cancel_at),
+        "subscriptionCancelAtPeriodEnd": (
+            bool(getattr(subscription, "cancel_at_period_end", False))
+            if subscription and getattr(subscription, "cancel_at_period_end", None) is not None
+            else None
+        ),
+        "subscriptionCanceledAt": _iso_datetime(
+            getattr(subscription, "canceled_at", None) if subscription else None
+        ),
+        "latestPaymentStatus": latest_payment_status,
+        "cancelScheduleStatus": cancel_schedule_status,
+        "currentPeriodEnd": _iso_datetime(subscription_current_period_end),
+        "cancelAt": _iso_datetime(subscription_cancel_at),
         "internalNote": _clean_text(getattr(session, "internal_note", None)),
         "mode": _clean_text(getattr(session, "mode", None)),
         "status": _clean_text(getattr(session, "status", None)),
