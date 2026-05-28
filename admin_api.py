@@ -122,6 +122,24 @@ ADMIN_AUDIT_METADATA_DENY_KEYS = {
     "token",
     "url",
 }
+ADMIN_ONE_TIME_OFFER_PAYMENT_LINKS = {
+    "practice_opportunity_review": {
+        "name": "Practice Opportunity Review",
+        "default_amount": 99500,
+    },
+    "revenue_leak_sprint": {
+        "name": "Revenue Leak Sprint",
+        "default_amount": 350000,
+    },
+    "ar_claims_cleanup_sprint": {
+        "name": "AR / Claims Cleanup Sprint",
+        "default_amount": 250000,
+    },
+    "growth_new_patient_conversion_sprint": {
+        "name": "Growth + New Patient Conversion Sprint",
+        "default_amount": 350000,
+    },
+}
 PERMISSION_CLIENTS_READ = "clients_read"
 PERMISSION_CLIENTS_WRITE = "clients_write"
 PERMISSION_UPLOADS_WRITE = "uploads_write"
@@ -4194,6 +4212,250 @@ async def create_admin_checkout_session(request: Request) -> JSONResponse:
         db.close()
 
 
+@app.post("/api/admin/billing/payment-links")
+async def create_admin_offer_payment_link(request: Request) -> JSONResponse:
+    admin_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_BILLING_WRITE)
+    if error_response:
+        return error_response
+
+    stripe_secret_key = os.getenv("STRIPE_SECRET_KEY", "").strip()
+    if not stripe_secret_key:
+        logger.error("[admin_api] Stripe secret key is not configured.")
+        return _error_response(503, "stripe_not_configured", "Stripe is not configured.")
+
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    client_email, validation_error = _required_email(body.get("clientEmail"))
+    if validation_error:
+        return validation_error
+
+    offer_type = (_clean_text(body.get("offerType")) or "").lower()
+    offer_config = ADMIN_ONE_TIME_OFFER_PAYMENT_LINKS.get(offer_type)
+    if not offer_config:
+        return _error_response(
+            400,
+            "invalid_offer_type",
+            "offerType must be one of the supported one-time offers.",
+        )
+
+    billing_mode = (_clean_text(body.get("billingMode")) or _clean_text(body.get("mode")) or "one_time").lower()
+    if billing_mode != "one_time":
+        return _error_response(
+            400,
+            "invalid_billing_mode",
+            "Only one_time billing is supported by this endpoint.",
+        )
+
+    amount, validation_error = _required_amount(body.get("amount"))
+    if validation_error:
+        return validation_error
+
+    currency = (_clean_text(body.get("currency")) or "usd").lower()
+    if currency != "usd":
+        return _error_response(400, "invalid_currency", "currency must be usd.")
+
+    offer_name, validation_error = _optional_limited_text(body.get("offerName"), "offerName", 160)
+    if validation_error:
+        return validation_error
+    offer_name = offer_name or str(offer_config["name"])
+
+    description, validation_error = _optional_limited_text(body.get("description"), "description", 240)
+    if validation_error:
+        return validation_error
+    description = description or offer_name
+
+    internal_note, validation_error = _optional_limited_text(body.get("internalNote"), "internalNote", 2000)
+    if validation_error:
+        return validation_error
+
+    success_url, validation_error = _required_text(body.get("successUrl"), "successUrl")
+    if validation_error:
+        return validation_error
+    cancel_url, validation_error = _required_text(body.get("cancelUrl"), "cancelUrl")
+    if validation_error:
+        return validation_error
+    if not _is_safe_checkout_url(success_url) or not _is_safe_checkout_url(cancel_url):
+        return _error_response(400, "invalid_url", "Checkout URLs must use http or https.")
+
+    upload_ids, validation_error = _checkout_upload_ids_from_body(body)
+    if validation_error:
+        return validation_error
+    upload_id = upload_ids[0] if upload_ids else None
+
+    db = SessionLocal()
+    try:
+        upload_records, validation_error = _validate_checkout_uploads(db, upload_ids, client_email)
+        if validation_error:
+            return validation_error
+
+        user_record = db.query(User).filter(func.lower(User.email) == client_email).first()
+        stripe_customer_id, livemode = _get_or_create_stripe_customer(
+            db=db,
+            client_email=client_email,
+            user_record=user_record,
+            stripe_secret_key=stripe_secret_key,
+        )
+
+        metadata = {
+            "source": "admin_offer_payment_link",
+            "client_email": client_email,
+            "offer_type": offer_type,
+            "offer_name": offer_name,
+            "billing_mode": "one_time",
+            "created_by_admin_user_id": str(admin_user.get("id") or ""),
+            "upload_count": str(len(upload_ids)),
+        }
+        if upload_id:
+            metadata["upload_id"] = str(upload_id)
+        upload_ids_metadata = ",".join(str(selected_upload_id) for selected_upload_id in upload_ids)
+        if upload_ids_metadata and len(upload_ids_metadata) <= 500:
+            metadata["upload_ids"] = upload_ids_metadata
+
+        checkout_session = stripe.checkout.Session.create(
+            mode="payment",
+            customer=stripe_customer_id,
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": currency,
+                        "unit_amount": amount,
+                        "product_data": {
+                            "name": offer_name,
+                            "description": description,
+                        },
+                    },
+                    "quantity": 1,
+                }
+            ],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata=metadata,
+            api_key=stripe_secret_key,
+        )
+        session_data = _stripe_object_to_dict(checkout_session)
+        checkout_session_id = _clean_text(session_data.get("id"))
+        checkout_url = _clean_text(session_data.get("url"))
+        expires_at = _stripe_timestamp_to_datetime(session_data.get("expires_at"))
+        if not checkout_session_id or not checkout_url:
+            logger.error("[admin_api] Stripe offer payment link missing id or url.")
+            db.rollback()
+            return _error_response(502, "stripe_checkout_failed", "Unable to create payment link.")
+
+        offer_metadata = {
+            "source": "admin_offer_payment_link",
+            "offerType": offer_type,
+            "offerName": offer_name,
+            "billingMode": "one_time",
+            "defaultAmount": _optional_int(offer_config.get("default_amount")),
+            "description": description,
+            "uploadCount": len(upload_ids),
+        }
+        local_session = StripeCheckoutSession(
+            stripe_checkout_session_id=checkout_session_id,
+            stripe_customer_id=stripe_customer_id,
+            client_email=client_email,
+            user_id=getattr(user_record, "id", None),
+            upload_id=upload_id,
+            purpose=offer_type,
+            description=description,
+            offer_type=offer_type,
+            offer_name=offer_name,
+            billing_mode="one_time",
+            interval=None,
+            internal_note=internal_note,
+            offer_metadata=offer_metadata,
+            mode=_clean_text(session_data.get("mode")) or "payment",
+            status=_clean_text(session_data.get("status")),
+            payment_status=_clean_text(session_data.get("payment_status")),
+            amount_total=_optional_int(session_data.get("amount_total")) or amount,
+            currency=_clean_text(session_data.get("currency")) or currency,
+            checkout_url=checkout_url,
+            expires_at=expires_at,
+            success_url=success_url,
+            cancel_url=cancel_url,
+            livemode=bool(session_data.get("livemode", livemode)),
+        )
+        db.add(local_session)
+        db.flush()
+        for selected_upload_id in upload_ids:
+            db.add(
+                StripeCheckoutSessionUpload(
+                    checkout_session_id=local_session.id,
+                    upload_id=selected_upload_id,
+                )
+            )
+        db.commit()
+        logger.info(
+            "[admin_api] Stripe offer payment link created id=%s client_email=%s offer_type=%s amount=%s currency=%s admin_user_id=%s",
+            checkout_session_id,
+            client_email,
+            offer_type,
+            amount,
+            currency,
+            str(admin_user.get("id") or ""),
+        )
+        _record_admin_audit_event(
+            db,
+            request,
+            "checkout_session.created",
+            target_type="checkout_session",
+            target_id=getattr(local_session, "id", None),
+            client_email=client_email,
+            metadata={
+                "amount": amount,
+                "currency": currency,
+                "offerType": offer_type,
+                "offerName": offer_name,
+                "billingMode": "one_time",
+                "uploadCount": len(upload_ids),
+                "expiresAt": _iso_datetime(expires_at),
+            },
+            admin_auth_user=admin_user,
+            admin_access=admin_access,
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "checkoutSessionId": checkout_session_id,
+                "url": checkout_url,
+                "status": _clean_text(session_data.get("status")) or "open",
+                "paymentStatus": _clean_text(session_data.get("payment_status")) or "unpaid",
+                "expiresAt": _iso_datetime(expires_at),
+                "expiredAt": None,
+                "uploadId": _id_text(upload_id),
+                "uploadIds": [_id_text(selected_upload_id) for selected_upload_id in upload_ids],
+                "relatedUploads": [_upload_payload(upload) for upload in upload_records],
+                "offerType": offer_type,
+                "offerName": offer_name,
+                "billingMode": "one_time",
+                "interval": None,
+                "internalNote": internal_note,
+            }
+        )
+    except stripe.error.StripeError:
+        db.rollback()
+        logger.exception(
+            "[admin_api] Stripe offer payment link creation failed client_email=%s offer_type=%s amount=%s currency=%s",
+            client_email,
+            offer_type,
+            amount,
+            currency,
+        )
+        return _error_response(502, "stripe_checkout_failed", "Unable to create payment link.")
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "[admin_api] offer payment link failed client_email=%s offer_type=%s",
+            client_email,
+            offer_type,
+        )
+        return _error_response(500, "payment_link_failed", "Unable to create payment link.")
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/billing/checkout-sessions/{session_id}/expire")
 async def expire_admin_checkout_session(request: Request, session_id: str) -> JSONResponse:
     admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_BILLING_WRITE)
@@ -7283,6 +7545,12 @@ def _checkout_session_payload(
         "stripeCustomerId": _clean_text(getattr(session, "stripe_customer_id", None)),
         "clientEmail": _clean_text(getattr(session, "client_email", None)),
         "purpose": _clean_text(getattr(session, "purpose", None)),
+        "description": _clean_text(getattr(session, "description", None)),
+        "offerType": _clean_text(getattr(session, "offer_type", None)),
+        "offerName": _clean_text(getattr(session, "offer_name", None)),
+        "billingMode": _clean_text(getattr(session, "billing_mode", None)),
+        "interval": _clean_text(getattr(session, "interval", None)),
+        "internalNote": _clean_text(getattr(session, "internal_note", None)),
         "mode": _clean_text(getattr(session, "mode", None)),
         "status": _clean_text(getattr(session, "status", None)),
         "paymentStatus": _clean_text(getattr(session, "payment_status", None)),
