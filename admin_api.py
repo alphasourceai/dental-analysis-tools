@@ -4861,6 +4861,7 @@ def get_admin_billing_client(
             .order_by(StripeCheckoutSession.created_at.desc())
             .all()
         )
+        _recover_missing_recurring_subscription_sessions(db, checkout_sessions)
         subscriptions = (
             db.query(StripeSubscription)
             .filter(func.lower(StripeSubscription.client_email) == client_email)
@@ -5046,6 +5047,22 @@ def get_admin_billing_overview(
                 )
             )
             override_query = override_query.filter(BillingOverride.client_email.ilike(search_like))
+
+        recovery_candidates = (
+            checkout_query.filter(_recurring_checkout_filter())
+            .filter(StripeCheckoutSession.stripe_checkout_session_id.isnot(None))
+            .filter(
+                or_(
+                    StripeCheckoutSession.stripe_subscription_id.is_(None),
+                    StripeCheckoutSession.subscription_status.is_(None),
+                    _checkout_open_filter(),
+                )
+            )
+            .order_by(StripeCheckoutSession.created_at.desc())
+            .limit(25)
+            .all()
+        )
+        _recover_missing_recurring_subscription_sessions(db, recovery_candidates)
 
         checkout_session_count = checkout_query.count()
         subscription_count = subscription_query.count()
@@ -5309,7 +5326,7 @@ def _process_stripe_event(db: Any, event_data: dict[str, Any], now: datetime) ->
         ),
     )
     if event_type == "checkout.session.completed" and _checkout_session_is_paid_or_complete(local_session):
-        if (_clean_text(getattr(local_session, "billing_mode", None)) or "").lower() == "recurring":
+        if _checkout_session_is_recurring(local_session):
             subscription_status = _sync_subscription_from_checkout_session(db, local_session, session_data, event_data, now)
             if subscription_status == "needs_review":
                 return "needs_review"
@@ -5521,6 +5538,31 @@ def _checkout_session_is_expired(session: StripeCheckoutSession) -> bool:
 
 def _checkout_session_is_open_or_unpaid(session: StripeCheckoutSession) -> bool:
     return not _checkout_session_is_paid_or_complete(session) and not _checkout_session_is_expired(session)
+
+
+def _checkout_session_is_recurring(session: StripeCheckoutSession) -> bool:
+    billing_mode = (_clean_text(getattr(session, "billing_mode", None)) or "").lower()
+    mode = (_clean_text(getattr(session, "mode", None)) or "").lower()
+    return billing_mode == "recurring" or mode == "subscription"
+
+
+def _checkout_session_cancel_schedule_status(session: StripeCheckoutSession) -> str:
+    offer_metadata = getattr(session, "offer_metadata", None)
+    if isinstance(offer_metadata, dict):
+        return (_clean_text(offer_metadata.get("cancelScheduleStatus")) or "").lower()
+    return ""
+
+
+def _checkout_session_needs_subscription_recovery(session: StripeCheckoutSession) -> bool:
+    if not _checkout_session_is_recurring(session):
+        return False
+    if not _clean_text(getattr(session, "stripe_checkout_session_id", None)):
+        return False
+    if not _clean_text(getattr(session, "stripe_subscription_id", None)):
+        return True
+    if not _clean_text(getattr(session, "subscription_status", None)):
+        return True
+    return _checkout_session_cancel_schedule_status(session) == "pending_checkout_completion"
 
 
 def _stripe_checkout_expire_error_is_not_expirable(error: Exception) -> bool:
@@ -5735,6 +5777,22 @@ def _subscription_currency(subscription_data: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _subscription_latest_invoice_payment_status(subscription_data: dict[str, Any]) -> str:
+    latest_invoice = subscription_data.get("latest_invoice")
+    if isinstance(latest_invoice, dict):
+        invoice_status = (_clean_text(latest_invoice.get("status")) or "").lower()
+        if invoice_status:
+            return invoice_status
+        payment_intent = latest_invoice.get("payment_intent")
+        if isinstance(payment_intent, dict):
+            payment_intent_status = (_clean_text(payment_intent.get("status")) or "").lower()
+            if payment_intent_status == "succeeded":
+                return "paid"
+            if payment_intent_status:
+                return payment_intent_status
+    return ""
+
+
 def _subscription_period_datetime(subscription_data: dict[str, Any], field_name: str) -> Optional[datetime]:
     value = _stripe_timestamp_to_datetime(subscription_data.get(field_name))
     if value:
@@ -5794,8 +5852,12 @@ def _upsert_stripe_subscription(
         or _clean_text(getattr(existing, "stripe_customer_id", None))
     )
     latest_invoice_id = _stripe_id(subscription_data.get("latest_invoice"))
+    invoice_payment_status = _subscription_latest_invoice_payment_status(subscription_data)
+    local_payment_status = _clean_text(getattr(local_session, "payment_status", None))
     latest_payment_status = (
-        _clean_text(getattr(local_session, "payment_status", None))
+        ("paid" if invoice_payment_status == "paid" else "")
+        or local_payment_status
+        or invoice_payment_status
         or _clean_text(getattr(existing, "latest_payment_status", None))
     )
     cancel_at = cancel_at_override or _stripe_timestamp_to_datetime(subscription_data.get("cancel_at"))
@@ -8203,6 +8265,13 @@ def _filter_uploads_by_void_status(query: Any, upload_status: str) -> Any:
     return query.filter(Upload.voided_at.is_(None))
 
 
+def _recurring_checkout_filter() -> Any:
+    return or_(
+        func.lower(StripeCheckoutSession.billing_mode) == "recurring",
+        func.lower(StripeCheckoutSession.mode) == "subscription",
+    )
+
+
 def _checkout_paid_filter() -> Any:
     return or_(
         func.lower(StripeCheckoutSession.payment_status) == "paid",
@@ -8316,6 +8385,133 @@ def _checkout_related_uploads_by_session(
             related_uploads_by_session_id[session_id] = [legacy_uploads_by_id[legacy_upload_id]]
 
     return related_uploads_by_session_id
+
+
+def _recover_missing_recurring_subscription_sessions(
+    db: Any,
+    sessions: list[StripeCheckoutSession],
+) -> None:
+    stripe_secret_key = os.getenv("STRIPE_SECRET_KEY", "").strip()
+    if not stripe_secret_key:
+        return
+
+    for session in sessions:
+        if not _checkout_session_needs_subscription_recovery(session):
+            continue
+        try:
+            recovered = _recover_recurring_subscription_session(
+                db,
+                session,
+                stripe_secret_key,
+                datetime.now(timezone.utc),
+            )
+            if recovered:
+                db.commit()
+        except stripe.error.StripeError as error:
+            db.rollback()
+            logger.warning(
+                "[admin_api] recurring subscription recovery Stripe lookup failed checkout_session_id=%s error_type=%s",
+                _clean_text(getattr(session, "stripe_checkout_session_id", None)),
+                error.__class__.__name__,
+            )
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "[admin_api] recurring subscription recovery failed checkout_session_id=%s",
+                _clean_text(getattr(session, "stripe_checkout_session_id", None)),
+            )
+
+
+def _recover_recurring_subscription_session(
+    db: Any,
+    local_session: StripeCheckoutSession,
+    stripe_secret_key: str,
+    now: datetime,
+) -> bool:
+    checkout_session_id = _clean_text(getattr(local_session, "stripe_checkout_session_id", None))
+    if not checkout_session_id:
+        return False
+
+    stripe_session = stripe.checkout.Session.retrieve(
+        checkout_session_id,
+        expand=["subscription", "subscription.latest_invoice"],
+        api_key=stripe_secret_key,
+    )
+    session_data = _stripe_object_to_dict(stripe_session)
+    if not session_data:
+        return False
+
+    _apply_checkout_session_data(local_session, session_data, now)
+    subscription_value = session_data.get("subscription")
+    subscription_id = _stripe_id(subscription_value)
+    if not subscription_id:
+        logger.info(
+            "[admin_api] recurring subscription recovery found no subscription checkout_session_id=%s status=%s payment_status=%s",
+            checkout_session_id,
+            _clean_text(session_data.get("status")),
+            _clean_text(session_data.get("payment_status")),
+        )
+        return True
+
+    local_session.stripe_subscription_id = subscription_id
+    subscription_data = subscription_value if isinstance(subscription_value, dict) else {}
+    if not subscription_data:
+        subscription_data = {"id": subscription_id, "metadata": _stripe_metadata_from_checkout_session(local_session)}
+    if not subscription_data.get("current_period_end") or not subscription_data.get("status"):
+        retrieved_subscription = stripe.Subscription.retrieve(
+            subscription_id,
+            expand=["latest_invoice"],
+            api_key=stripe_secret_key,
+        )
+        subscription_data = _stripe_object_to_dict(retrieved_subscription) or subscription_data
+
+    cancel_at = _stripe_timestamp_to_datetime(subscription_data.get("cancel_at"))
+    cancel_schedule_status = "scheduled" if cancel_at else None
+    local_subscription = _upsert_stripe_subscription(
+        db,
+        subscription_data,
+        now,
+        local_session=local_session,
+        session_data=session_data,
+        cancel_schedule_status=cancel_schedule_status,
+    )
+    if not local_subscription:
+        _update_checkout_offer_metadata(
+            local_session,
+            {
+                "cancelScheduleStatus": "needs_review",
+                "cancelScheduleReason": "subscription_recovery_validation_failed",
+            },
+        )
+        return True
+
+    if cancel_at:
+        _update_checkout_offer_metadata(
+            local_session,
+            {
+                "cancelScheduleStatus": "scheduled",
+                "cancelAt": _iso_datetime(cancel_at),
+            },
+        )
+    elif _checkout_session_cancel_schedule_status(local_session) == "pending_checkout_completion":
+        intended_cancel_at = _retainer_cancel_at(subscription_data, local_session, session_data, now)
+        recovery_metadata: dict[str, Any] = {
+            "cancelScheduleStatus": "needs_review",
+            "cancelScheduleReason": "subscription_recovery_missing_cancel_at",
+        }
+        if intended_cancel_at:
+            recovery_metadata["intendedCancelAt"] = _iso_datetime(intended_cancel_at)
+        _update_checkout_offer_metadata(local_session, recovery_metadata)
+        _merge_subscription_metadata(local_subscription, recovery_metadata)
+
+    _apply_subscription_to_checkout_sessions(db, local_subscription, now)
+    logger.info(
+        "[admin_api] recurring subscription recovery synced checkout_session_id=%s subscription_id=%s status=%s",
+        checkout_session_id,
+        subscription_id,
+        _clean_text(getattr(local_subscription, "status", None)),
+    )
+    return True
 
 
 def _checkout_subscriptions_by_session(
