@@ -47,6 +47,11 @@ AGREEMENTS_EMAIL_LINK_TTL_SECONDS = max(
 )
 AGREEMENTS_TOKEN_TTL_DAYS = max(1, int(os.getenv("AGREEMENTS_SIGNER_TOKEN_TTL_DAYS", "7")))
 MAX_SIGNATURE_IMAGE_BYTES = 2 * 1024 * 1024
+AGREEMENTS_DEFAULT_FROM_NAME = "alphaSource Consulting"
+AGREEMENTS_EMAIL_LOGO_URL = (
+    "https://rytlclkkcvvnkoncfaid.supabase.co/storage/v1/object/public/"
+    "email-assets/Color%20logo%20-%20no%20background.png"
+)
 
 
 class AgreementServiceError(Exception):
@@ -670,7 +675,8 @@ def send_agreement_signature_request_email(
         subject,
         plain_text=(
             "alphaSource Consulting BAA/Privacy Agreement\n\n"
-            f"Please review and sign the agreement for {client_legal_name}.\n\n"
+            "alphaSource Consulting has prepared a BAA/Privacy Agreement for "
+            f"{client_legal_name} for review and signature.\n\n"
             f"Secure signing link: {signing_url}\n"
             f"This link expires on {expires_label}.\n\n"
             "alphaSource Consulting"
@@ -678,8 +684,8 @@ def send_agreement_signature_request_email(
         html_content=_email_shell(
             "BAA/Privacy Agreement signature requested",
             f"""
-            <p>Please review and sign the BAA/Privacy Agreement for <strong>{_escape(client_legal_name)}</strong>.</p>
-            <p><a class="cta" href="{_escape(signing_url)}">Review and sign</a></p>
+            <p>alphaSource Consulting has prepared a BAA/Privacy Agreement for <strong>{_escape(client_legal_name)}</strong> for review and signature.</p>
+            {_email_cta(signing_url, "Review and sign")}
             <p>This secure link expires on <strong>{_escape(expires_label)}</strong>.</p>
             """,
         ),
@@ -706,7 +712,8 @@ def send_agreement_ba_countersign_request_email(
         subject,
         plain_text=(
             "alphaSource Consulting BAA/Privacy Agreement\n\n"
-            f"The client signature for {client_legal_name} has been captured. Please review and countersign.\n\n"
+            f"The client signature for {client_legal_name} has been captured. "
+            "BA countersignature is needed to complete the agreement.\n\n"
             f"Secure signing link: {signing_url}\n"
             f"This link expires on {expires_label}.\n\n"
             "alphaSource Consulting"
@@ -714,8 +721,8 @@ def send_agreement_ba_countersign_request_email(
         html_content=_email_shell(
             "BAA/Privacy Agreement countersignature requested",
             f"""
-            <p>The client signature for <strong>{_escape(client_legal_name)}</strong> has been captured.</p>
-            <p><a class="cta" href="{_escape(signing_url)}">Review and countersign</a></p>
+            <p>The client signature for <strong>{_escape(client_legal_name)}</strong> has been captured. BA countersignature is needed to complete the agreement.</p>
+            {_email_cta(signing_url, "Review and countersign")}
             <p>This secure link expires on <strong>{_escape(expires_label)}</strong>.</p>
             """,
         ),
@@ -735,9 +742,9 @@ def send_agreement_signed_copy_email(
     subject = "Signed BAA/Privacy Agreement available"
     signed_label = signed_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     audience_line = (
-        "A signed BAA/Privacy Agreement is available for company records."
+        "The fully signed BAA/Privacy Agreement is available for company records."
         if company_copy
-        else "Your signed BAA/Privacy Agreement is available."
+        else "The BAA/Privacy Agreement has been fully signed and is available."
     )
     return _send_email(
         to_email,
@@ -755,7 +762,7 @@ def send_agreement_signed_copy_email(
             <p>{_escape(audience_line)}</p>
             <p><strong>Client:</strong> {_escape(client_legal_name)}<br>
             <strong>Signed at:</strong> {_escape(signed_label)}</p>
-            <p><a class="cta" href="{_escape(signed_url)}">Open signed agreement</a></p>
+            {_email_cta(signed_url, "View signed agreement")}
             <p>The download link is time-limited.</p>
             """,
         ),
@@ -764,10 +771,12 @@ def send_agreement_signed_copy_email(
 
 def _send_email(to_email: str, subject: str, *, plain_text: str, html_content: str) -> dict[str, Any]:
     from sendgrid import SendGridAPIClient
-    from sendgrid.helpers.mail import ClickTracking, Mail, TrackingSettings
+    from sendgrid.helpers.mail import ClickTracking, Email, Mail, TrackingSettings
 
+    from_email = normalize_text(os.getenv("FROM_EMAIL"))
+    from_name = normalize_text(os.getenv("FROM_NAME")) or AGREEMENTS_DEFAULT_FROM_NAME
     message = Mail(
-        from_email=os.getenv("FROM_EMAIL"),
+        from_email=Email(from_email, from_name),
         to_emails=to_email,
         subject=subject,
         plain_text_content=plain_text,
@@ -779,17 +788,63 @@ def _send_email(to_email: str, subject: str, *, plain_text: str, html_content: s
     return {"statusCode": getattr(response, "status_code", None) or getattr(response, "statusCode", None)}
 
 
+def _email_cta(url: str, label: str) -> str:
+    return (
+        f'<p style="margin:24px 0 22px 0;">'
+        f'<a href="{_escape(url)}" target="_blank" '
+        f'style="display:inline-block;background:#A380F6;color:#ffffff;'
+        f'text-decoration:none;border-radius:12px;padding:13px 20px;'
+        f'font-size:14px;line-height:18px;font-weight:800;'
+        f'font-family:-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif;">'
+        f'{_escape(label)}</a></p>'
+    )
+
+
 def _email_shell(title: str, body_html: str) -> str:
     return f"""
     <html>
-      <body style="margin:0;padding:0;background:#F8F9FD;font-family:Arial,sans-serif;color:#0A1547;">
-        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#F8F9FD;padding:28px 16px;">
+      <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      </head>
+      <body style="margin:0;padding:0;background:#F8F9FD;">
+        <div style="display:none!important;max-height:0;overflow:hidden;opacity:0;visibility:hidden;color:#F8F9FD;">{_escape(title)}</div>
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;background:#F8F9FD;padding:0;margin:0;">
           <tr>
             <td align="center">
-              <table width="560" cellpadding="0" cellspacing="0" role="presentation" style="background:#ffffff;border-radius:18px;padding:28px;border:1px solid rgba(10,21,71,0.10);">
-                <tr><td style="font-size:22px;line-height:1.25;font-weight:800;color:#0A1547;">{_escape(title)}</td></tr>
-                <tr><td style="padding-top:16px;font-size:15px;line-height:1.65;color:rgba(10,21,71,0.72);">{body_html}</td></tr>
-                <tr><td style="padding-top:18px;border-top:1px solid rgba(10,21,71,0.08);font-size:12px;color:rgba(10,21,71,0.48);">alphaSource Consulting · All rights reserved.</td></tr>
+              <table width="640" cellpadding="0" cellspacing="0" role="presentation" style="width:640px;max-width:640px;">
+                <tr>
+                  <td style="padding:32px 24px 16px 24px;">
+                    <a href="https://www.alphasourceconsulting.com" target="_blank" style="text-decoration:none;border:0;outline:0;display:inline-block;">
+                      <img src="{_escape(AGREEMENTS_EMAIL_LOGO_URL)}" alt="alphaSource Consulting" width="300" style="display:block;max-width:300px;width:300px;height:auto;border:0;outline:none;text-decoration:none;">
+                    </a>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:8px 24px 24px 24px;">
+                    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#ffffff;border-radius:18px;border:1px solid rgba(10,21,71,0.10);box-shadow:0 14px 34px rgba(10,21,71,0.08);overflow:hidden;">
+                      <tr>
+                        <td style="height:5px;background:#02D99D;font-size:1px;line-height:1px;">&nbsp;</td>
+                      </tr>
+                      <tr>
+                        <td style="padding:28px 28px 8px 28px;font-family:-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif;font-size:22px;line-height:28px;font-weight:800;color:#0A1547;">{_escape(title)}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding:0 28px 24px 28px;font-family:-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif;font-size:15px;line-height:24px;color:rgba(10,21,71,0.72);">{body_html}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding:16px 28px 24px 28px;border-top:1px solid rgba(10,21,71,0.08);font-family:-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif;font-size:12px;line-height:18px;color:rgba(10,21,71,0.48);">
+                          alphaSource Consulting &middot; Secure agreement delivery
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:0 24px 40px 24px;font-family:-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:rgba(10,21,71,0.46);font-size:11px;line-height:16px;">
+                    &copy; alphaSource Consulting &middot; All rights reserved.
+                  </td>
+                </tr>
               </table>
             </td>
           </tr>
