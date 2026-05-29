@@ -533,7 +533,7 @@ def create_agreement_signed_url(path: Optional[str], expires_in: Optional[int] =
 
 
 def agreement_email_configured() -> bool:
-    return bool(os.getenv("SENDGRID_API_KEY") and (os.getenv("FROM_EMAIL") or os.getenv("SENDGRID_FROM")))
+    return bool(os.getenv("SENDGRID_API_KEY") and os.getenv("FROM_EMAIL"))
 
 
 def send_agreement_signature_request_email(
@@ -617,7 +617,7 @@ def _send_email(to_email: str, subject: str, *, plain_text: str, html_content: s
     from sendgrid.helpers.mail import ClickTracking, Mail, TrackingSettings
 
     message = Mail(
-        from_email=os.getenv("FROM_EMAIL") or os.getenv("SENDGRID_FROM"),
+        from_email=os.getenv("FROM_EMAIL"),
         to_emails=to_email,
         subject=subject,
         plain_text_content=plain_text,

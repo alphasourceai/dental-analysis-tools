@@ -4,6 +4,9 @@ WORKDIR /app
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
+    fontconfig \
+    fonts-dejavu \
+    libreoffice-writer \
     tesseract-ocr \
   && rm -rf /var/lib/apt/lists/*
 
