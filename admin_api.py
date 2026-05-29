@@ -58,6 +58,7 @@ from consulting_agreements import (
     parse_signature_image,
     payload_template_values,
     render_agreement_pdf,
+    send_agreement_ba_countersign_request_email,
     send_agreement_signature_request_email,
     send_agreement_signed_copy_email,
     upload_agreement_file,
@@ -1432,7 +1433,7 @@ def list_admin_agreements(
         return error_response
 
     normalized_status = (_clean_text(status) or "").lower()
-    if normalized_status and normalized_status not in {"draft", "sent", "signed", "voided", "superseded", "expired"}:
+    if normalized_status and normalized_status not in {"draft", "sent", "pending_ba_signature", "signed", "voided", "superseded", "expired"}:
         return _error_response(400, "invalid_status", "status is not supported.")
     normalized_document_type = _clean_text(documentType) or AGREEMENT_DOCUMENT_TYPE
     if normalized_document_type != AGREEMENT_DOCUMENT_TYPE:
@@ -1623,7 +1624,7 @@ async def send_admin_agreement(request: Request) -> JSONResponse:
             ba_signer_name=payload.get("ba_signer_name"),
             ba_signer_title=payload.get("ba_signer_title"),
             ba_signer_email=payload.get("ba_signer_email"),
-            ba_signature_mode=payload.get("ba_signature_mode"),
+            ba_signature_mode="tokenized_link",
             created_by_admin_id=admin_user_id,
             created_by_admin_email=admin_email,
             sent_by_admin_id=admin_user_id,
@@ -1667,6 +1668,7 @@ async def send_admin_agreement(request: Request) -> JSONResponse:
                 "templateVersion": agreement.template_version,
                 "effectiveDate": agreement.effective_date.isoformat(),
                 "signerEmail": agreement.signer_email,
+                "baSignerEmail": agreement.ba_signer_email,
                 "tokenExpiresAt": _iso_datetime(agreement.signer_token_expires_at),
             },
             admin_auth_user=admin_auth_user,
@@ -1818,14 +1820,15 @@ async def create_public_agreement_session(request: Request) -> JSONResponse:
     token_hash = hash_signer_token(raw_token)
     db = SessionLocal()
     try:
-        agreement = db.query(ConsultingAgreement).filter(ConsultingAgreement.signer_token_hash == token_hash).first()
-        validation_error = _validate_public_signable_agreement(agreement)
+        agreement, signer_role = _find_public_agreement_by_token_hash(db, token_hash)
+        validation_error = _validate_public_signable_agreement(agreement, signer_role)
         if validation_error:
             return validation_error
 
         now = agreement_utcnow()
-        if not agreement.opened_at:
-            agreement.opened_at = now
+        opened_field = "ba_opened_at" if signer_role == "ba" else "opened_at"
+        if not getattr(agreement, opened_field, None):
+            setattr(agreement, opened_field, now)
             agreement.updated_at = now
             db.commit()
             db.refresh(agreement)
@@ -1839,6 +1842,7 @@ async def create_public_agreement_session(request: Request) -> JSONResponse:
                 metadata={
                     "documentType": agreement.document_type,
                     "status": agreement.status,
+                    "signerRole": signer_role,
                 },
                 source="agreements_public",
             )
@@ -1850,6 +1854,10 @@ async def create_public_agreement_session(request: Request) -> JSONResponse:
         if not draft_pdf_url:
             return _agreement_public_error("agreement_preview_unavailable", "Agreement preview is unavailable.", status=502)
 
+        expires_at = agreement.ba_signer_token_expires_at if signer_role == "ba" else agreement.signer_token_expires_at
+        session_signer_name = agreement.ba_signer_name if signer_role == "ba" else agreement.signer_name
+        session_signer_email = agreement.ba_signer_email if signer_role == "ba" else agreement.signer_email
+        session_signer_title = agreement.ba_signer_title if signer_role == "ba" else agreement.signer_title
         return JSONResponse(
             {
                 "ok": True,
@@ -1857,14 +1865,15 @@ async def create_public_agreement_session(request: Request) -> JSONResponse:
                     "id": _id_text(agreement.id),
                     "documentType": agreement.document_type,
                     "status": agreement.status,
+                    "signerRole": signer_role,
                     "clientLegalName": agreement.client_legal_name,
                     "effectiveDate": _iso_date(agreement.effective_date),
-                    "signerName": agreement.signer_name,
-                    "signerEmail": agreement.signer_email,
-                    "signerTitle": agreement.signer_title,
-                    "expiresAt": _iso_datetime(agreement.signer_token_expires_at),
+                    "signerName": session_signer_name,
+                    "signerEmail": session_signer_email,
+                    "signerTitle": session_signer_title,
+                    "expiresAt": _iso_datetime(expires_at),
                     "sentAt": _iso_datetime(agreement.sent_at),
-                    "openedAt": _iso_datetime(agreement.opened_at),
+                    "openedAt": _iso_datetime(getattr(agreement, opened_field, None)),
                     "draftPdfUrl": draft_pdf_url,
                     "signedPdfUrl": None,
                 },
@@ -1912,33 +1921,146 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
     token_hash = hash_signer_token(raw_token)
     db = SessionLocal()
     try:
-        agreement = db.query(ConsultingAgreement).filter(ConsultingAgreement.signer_token_hash == token_hash).first()
-        validation_error = _validate_public_signable_agreement(agreement)
+        agreement, signer_role = _find_public_agreement_by_token_hash(db, token_hash)
+        validation_error = _validate_public_signable_agreement(agreement, signer_role)
         if validation_error:
             return validation_error
 
         signed_at = agreement_utcnow()
-        signature_path = f"agreements/{agreement.id}/signatures/client.{signature['extension']}"
-        signed_pdf_path = f"agreements/{agreement.id}/signed.pdf"
         signer_ip = _request_client_ip(request)
         signer_user_agent = _request_user_agent(request)
 
-        try:
-            upload_agreement_file(signature_path, signature["buffer"], signature["mime"])
-            draft_pdf_bytes = download_agreement_file(agreement.draft_pdf_path)
-            payload_values = _agreement_template_values_from_row(agreement)
-            signed_pdf_bytes = build_signed_agreement_pdf(
-                draft_pdf_bytes,
-                agreement_id=_id_text(agreement.id) or "",
-                payload_values=payload_values,
-                signer_name=signer_name,
-                signer_title=signer_title,
-                signed_at=signed_at,
-                signer_ip=signer_ip,
-                signer_user_agent=signer_user_agent,
-                signature=signature,
+        if signer_role == "client":
+            locked_agreement = (
+                db.query(ConsultingAgreement)
+                .filter(ConsultingAgreement.id == agreement.id)
+                .with_for_update()
+                .first()
             )
-            upload_agreement_file(signed_pdf_path, signed_pdf_bytes, "application/pdf")
+            validation_error = _validate_public_signable_agreement(locked_agreement, signer_role)
+            if validation_error:
+                db.rollback()
+                return validation_error
+
+            ba_signer_name = _clean_text(getattr(locked_agreement, "ba_signer_name", None))
+            ba_signer_title = _clean_text(getattr(locked_agreement, "ba_signer_title", None))
+            ba_signer_email = normalize_agreement_email(getattr(locked_agreement, "ba_signer_email", None))
+            if not ba_signer_name or not ba_signer_title or not ba_signer_email:
+                db.rollback()
+                return _agreement_public_error(
+                    "ba_signer_required",
+                    "BA countersign setup is incomplete. Please contact alphaSource Consulting.",
+                    status=409,
+                )
+
+            raw_ba_token, ba_token_hash, ba_token_expires_at = generate_signer_token()
+            signature_path = f"agreements/{locked_agreement.id}/signatures/client.{signature['extension']}"
+
+            try:
+                upload_agreement_file(signature_path, signature["buffer"], signature["mime"], upsert=True)
+                send_agreement_ba_countersign_request_email(
+                    ba_signer_email,
+                    build_signing_url(raw_ba_token),
+                    client_legal_name=locked_agreement.client_legal_name,
+                    expires_at=ba_token_expires_at,
+                )
+            except AgreementServiceError as exc:
+                db.rollback()
+                return _agreement_error_response(exc)
+            except Exception:
+                db.rollback()
+                logger.exception("[agreements_public] BA countersign email failed agreement_id=%s", locked_agreement.id)
+                return _agreement_public_error(
+                    "agreement_ba_email_send_failed",
+                    "BA countersign email could not be sent. Please contact alphaSource Consulting.",
+                    status=502,
+                )
+
+            locked_agreement.status = "pending_ba_signature"
+            locked_agreement.opened_at = locked_agreement.opened_at or signed_at
+            locked_agreement.signer_name = signer_name
+            locked_agreement.signer_title = signer_title
+            locked_agreement.signer_authority_confirmed = True
+            locked_agreement.signer_accepted = True
+            locked_agreement.client_signed_at = signed_at
+            locked_agreement.signer_ip = signer_ip
+            locked_agreement.signer_user_agent = signer_user_agent
+            locked_agreement.signature_image_path = signature_path
+            locked_agreement.signature_sha256 = signature["sha256"]
+            locked_agreement.client_signature_image_path = signature_path
+            locked_agreement.client_signature_sha256 = signature["sha256"]
+            locked_agreement.ba_signer_name = ba_signer_name
+            locked_agreement.ba_signer_title = ba_signer_title
+            locked_agreement.ba_signer_email = ba_signer_email
+            locked_agreement.ba_signer_token_hash = ba_token_hash
+            locked_agreement.ba_signer_token_expires_at = ba_token_expires_at
+            locked_agreement.updated_at = signed_at
+            snapshot = dict(locked_agreement.template_snapshot or {})
+            snapshot["clientSignature"] = {
+                "signedAt": signed_at.isoformat(),
+                "signerName": signer_name,
+                "signerTitle": signer_title,
+                "signerAccepted": True,
+                "signerAuthorityConfirmed": True,
+                "signatureSha256": signature["sha256"],
+            }
+            locked_agreement.template_snapshot = snapshot
+            db.commit()
+            db.refresh(locked_agreement)
+
+            _record_admin_audit_event(
+                db,
+                request,
+                "agreement.client_signed",
+                target_type="consulting_agreement",
+                target_id=locked_agreement.id,
+                client_email=locked_agreement.client_email,
+                metadata={
+                    "documentType": locked_agreement.document_type,
+                    "templateVersion": locked_agreement.template_version,
+                    "signerRole": "client",
+                    "signerEmail": locked_agreement.signer_email,
+                    "signerTitle": locked_agreement.signer_title,
+                },
+                source="agreements_public",
+            )
+
+            _record_admin_audit_event(
+                db,
+                request,
+                "agreement.ba_signature_requested",
+                target_type="consulting_agreement",
+                target_id=locked_agreement.id,
+                client_email=locked_agreement.client_email,
+                metadata={
+                    "documentType": locked_agreement.document_type,
+                    "baSignerEmail": locked_agreement.ba_signer_email,
+                    "tokenExpiresAt": _iso_datetime(locked_agreement.ba_signer_token_expires_at),
+                },
+                source="agreements_public",
+            )
+
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "agreement": {
+                        "id": _id_text(locked_agreement.id),
+                        "status": locked_agreement.status,
+                        "signerRole": "client",
+                        "signedAt": None,
+                        "clientSignedAt": _iso_datetime(locked_agreement.client_signed_at),
+                        "signerName": locked_agreement.signer_name,
+                        "signerTitle": locked_agreement.signer_title,
+                    },
+                    "signedPdfUrl": None,
+                    "expiresInSeconds": AGREEMENTS_SIGNED_URL_TTL_SECONDS,
+                }
+            )
+
+        signature_path = f"agreements/{agreement.id}/signatures/ba.{signature['extension']}"
+        signed_pdf_path = f"agreements/{agreement.id}/signed.pdf"
+        try:
+            upload_agreement_file(signature_path, signature["buffer"], signature["mime"], upsert=True)
         except AgreementServiceError as exc:
             return _agreement_error_response(exc)
 
@@ -1948,10 +2070,51 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
             .with_for_update()
             .first()
         )
-        validation_error = _validate_public_signable_agreement(locked_agreement)
+        validation_error = _validate_public_signable_agreement(locked_agreement, signer_role)
         if validation_error:
             db.rollback()
             return validation_error
+
+        try:
+            draft_pdf_bytes = download_agreement_file(locked_agreement.draft_pdf_path)
+            client_signature_path = (
+                _clean_text(getattr(locked_agreement, "client_signature_image_path", None))
+                or _clean_text(getattr(locked_agreement, "signature_image_path", None))
+            )
+            if not client_signature_path:
+                db.rollback()
+                return _agreement_public_error("client_signature_missing", "Client signature is not available.", status=409)
+            client_signature_bytes = download_agreement_file(client_signature_path)
+            payload_values = _agreement_template_values_from_row(locked_agreement)
+            signed_pdf_bytes = build_signed_agreement_pdf(
+                draft_pdf_bytes,
+                agreement_id=_id_text(locked_agreement.id) or "",
+                payload_values=payload_values,
+                client_signer_name=locked_agreement.signer_name or "",
+                client_signer_title=locked_agreement.signer_title or "",
+                client_signed_at=locked_agreement.client_signed_at or signed_at,
+                client_signer_ip=locked_agreement.signer_ip,
+                client_signer_user_agent=locked_agreement.signer_user_agent,
+                client_authority_confirmed=bool(locked_agreement.signer_authority_confirmed),
+                client_accepted=bool(locked_agreement.signer_accepted),
+                client_signature={
+                    "buffer": client_signature_bytes,
+                    "sha256": locked_agreement.client_signature_sha256 or locked_agreement.signature_sha256,
+                },
+                ba_signer_name=signer_name,
+                ba_signer_title=signer_title,
+                ba_signer_email=locked_agreement.ba_signer_email or "",
+                ba_signed_at=signed_at,
+                ba_signer_ip=signer_ip,
+                ba_signer_user_agent=signer_user_agent,
+                ba_authority_confirmed=True,
+                ba_accepted=True,
+                ba_signature=signature,
+            )
+            upload_agreement_file(signed_pdf_path, signed_pdf_bytes, "application/pdf", upsert=True)
+        except AgreementServiceError as exc:
+            db.rollback()
+            return _agreement_error_response(exc)
 
         previous_current_rows = (
             db.query(ConsultingAgreement)
@@ -1970,22 +2133,23 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
 
         locked_agreement.status = "signed"
         locked_agreement.is_current = True
-        locked_agreement.opened_at = locked_agreement.opened_at or signed_at
-        locked_agreement.signer_name = signer_name
-        locked_agreement.signer_title = signer_title
-        locked_agreement.signer_authority_confirmed = True
-        locked_agreement.signer_accepted = True
+        locked_agreement.ba_opened_at = locked_agreement.ba_opened_at or signed_at
+        locked_agreement.ba_signer_name = signer_name
+        locked_agreement.ba_signer_title = signer_title
+        locked_agreement.ba_signer_authority_confirmed = True
+        locked_agreement.ba_signer_accepted = True
+        locked_agreement.ba_signed_at = signed_at
+        locked_agreement.ba_signer_ip = signer_ip
+        locked_agreement.ba_signer_user_agent = signer_user_agent
+        locked_agreement.ba_signature_image_path = signature_path
+        locked_agreement.ba_signature_sha256 = signature["sha256"]
         locked_agreement.signed_at = signed_at
-        locked_agreement.signer_ip = signer_ip
-        locked_agreement.signer_user_agent = signer_user_agent
-        locked_agreement.signature_image_path = signature_path
-        locked_agreement.signature_sha256 = signature["sha256"]
         locked_agreement.signed_pdf_path = signed_pdf_path
         locked_agreement.superseded_at = None
         locked_agreement.superseded_by_agreement_id = None
         locked_agreement.updated_at = signed_at
         snapshot = dict(locked_agreement.template_snapshot or {})
-        snapshot["execution"] = {
+        snapshot["baSignature"] = {
             "signedAt": signed_at.isoformat(),
             "signerName": signer_name,
             "signerTitle": signer_title,
@@ -1993,9 +2157,32 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
             "signerAuthorityConfirmed": True,
             "signatureSha256": signature["sha256"],
         }
+        snapshot["execution"] = {
+            "signedAt": signed_at.isoformat(),
+            "clientSignedAt": _iso_datetime(locked_agreement.client_signed_at),
+            "baSignedAt": signed_at.isoformat(),
+            "signaturePage": "workflow_certificate",
+        }
         locked_agreement.template_snapshot = snapshot
         db.commit()
         db.refresh(locked_agreement)
+
+        _record_admin_audit_event(
+            db,
+            request,
+            "agreement.ba_signed",
+            target_type="consulting_agreement",
+            target_id=locked_agreement.id,
+            client_email=locked_agreement.client_email,
+            metadata={
+                "documentType": locked_agreement.document_type,
+                "templateVersion": locked_agreement.template_version,
+                "signerRole": "ba",
+                "baSignerEmail": locked_agreement.ba_signer_email,
+                "baSignerTitle": locked_agreement.ba_signer_title,
+            },
+            source="agreements_public",
+        )
 
         _record_admin_audit_event(
             db,
@@ -2008,7 +2195,7 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
                 "documentType": locked_agreement.document_type,
                 "templateVersion": locked_agreement.template_version,
                 "signerEmail": locked_agreement.signer_email,
-                "signerTitle": locked_agreement.signer_title,
+                "baSignerEmail": locked_agreement.ba_signer_email,
                 "supersededCount": len(previous_current_rows),
             },
             source="agreements_public",
@@ -2041,17 +2228,24 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
         company_email = _clean_text(os.getenv("AGREEMENTS_COMPANY_EMAIL"))
         if company_email:
             copy_recipients.append(company_email)
+        if locked_agreement.ba_signer_email:
+            copy_recipients.append(locked_agreement.ba_signer_email)
 
         sent_copy_count = 0
         if email_signed_url:
+            seen_recipients: set[str] = set()
             for recipient in copy_recipients:
+                normalized_recipient = (recipient or "").lower()
+                if not normalized_recipient or normalized_recipient in seen_recipients:
+                    continue
+                seen_recipients.add(normalized_recipient)
                 try:
                     email_result = send_agreement_signed_copy_email(
                         recipient,
                         email_signed_url,
                         client_legal_name=locked_agreement.client_legal_name,
                         signed_at=signed_at,
-                        company_copy=recipient == company_email,
+                        company_copy=normalized_recipient == (company_email or "").lower(),
                     )
                     if not (isinstance(email_result, dict) and email_result.get("skipped")):
                         sent_copy_count += 1
@@ -2078,7 +2272,10 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
                 "agreement": {
                     "id": _id_text(locked_agreement.id),
                     "status": locked_agreement.status,
+                    "signerRole": "ba",
                     "signedAt": _iso_datetime(locked_agreement.signed_at),
+                    "clientSignedAt": _iso_datetime(locked_agreement.client_signed_at),
+                    "baSignedAt": _iso_datetime(locked_agreement.ba_signed_at),
                     "signerName": locked_agreement.signer_name,
                     "signerTitle": locked_agreement.signer_title,
                 },
@@ -10642,7 +10839,20 @@ def _agreement_template_values_from_row(agreement: ConsultingAgreement) -> dict[
     )
 
 
-def _validate_public_signable_agreement(agreement: Optional[ConsultingAgreement]) -> Optional[JSONResponse]:
+def _find_public_agreement_by_token_hash(db: Any, token_hash: str) -> tuple[Optional[ConsultingAgreement], Optional[str]]:
+    agreement = db.query(ConsultingAgreement).filter(ConsultingAgreement.signer_token_hash == token_hash).first()
+    if agreement:
+        return agreement, "client"
+    agreement = db.query(ConsultingAgreement).filter(ConsultingAgreement.ba_signer_token_hash == token_hash).first()
+    if agreement:
+        return agreement, "ba"
+    return None, None
+
+
+def _validate_public_signable_agreement(
+    agreement: Optional[ConsultingAgreement],
+    signer_role: Optional[str],
+) -> Optional[JSONResponse]:
     unavailable = _agreement_public_error(
         "signing_link_unavailable",
         "This signing link is invalid or expired.",
@@ -10650,10 +10860,25 @@ def _validate_public_signable_agreement(agreement: Optional[ConsultingAgreement]
     )
     if not agreement:
         return unavailable
-    if getattr(agreement, "status", None) != "sent":
+    if signer_role == "client":
+        if getattr(agreement, "status", None) != "sent":
+            return unavailable
+        expires_at = getattr(agreement, "signer_token_expires_at", None)
+    elif signer_role == "ba":
+        if getattr(agreement, "status", None) != "pending_ba_signature":
+            return unavailable
+        expires_at = getattr(agreement, "ba_signer_token_expires_at", None)
+        client_signature_path = (
+            _clean_text(getattr(agreement, "client_signature_image_path", None))
+            or _clean_text(getattr(agreement, "signature_image_path", None))
+        )
+        if not client_signature_path or not getattr(agreement, "client_signed_at", None):
+            return unavailable
+    else:
         return unavailable
-    expires_at = getattr(agreement, "signer_token_expires_at", None)
     if isinstance(expires_at, datetime) and expires_at <= agreement_utcnow():
+        return unavailable
+    if not isinstance(expires_at, datetime):
         return unavailable
     if not _clean_text(getattr(agreement, "draft_pdf_path", None)):
         return unavailable
@@ -10678,19 +10903,29 @@ def _agreement_payload(agreement: ConsultingAgreement, *, include_snapshot: bool
         "hasDraftPdf": bool(_clean_text(getattr(agreement, "draft_pdf_path", None))),
         "hasSignedPdf": bool(_clean_text(getattr(agreement, "signed_pdf_path", None))),
         "signerTokenExpiresAt": _iso_datetime(getattr(agreement, "signer_token_expires_at", None)),
+        "baSignerTokenExpiresAt": _iso_datetime(getattr(agreement, "ba_signer_token_expires_at", None)),
         "sentAt": _iso_datetime(getattr(agreement, "sent_at", None)),
         "openedAt": _iso_datetime(getattr(agreement, "opened_at", None)),
+        "baOpenedAt": _iso_datetime(getattr(agreement, "ba_opened_at", None)),
         "signerName": _clean_text(getattr(agreement, "signer_name", None)),
         "signerEmail": _clean_text(getattr(agreement, "signer_email", None)),
         "signerTitle": _clean_text(getattr(agreement, "signer_title", None)),
         "signerAuthorityConfirmed": bool(getattr(agreement, "signer_authority_confirmed", False)),
         "signerAccepted": bool(getattr(agreement, "signer_accepted", False)),
+        "clientSignedAt": _iso_datetime(getattr(agreement, "client_signed_at", None)),
+        "hasClientSignature": bool(
+            _clean_text(getattr(agreement, "client_signature_image_path", None))
+            or _clean_text(getattr(agreement, "signature_image_path", None))
+        ),
         "signedAt": _iso_datetime(getattr(agreement, "signed_at", None)),
         "baSignerName": _clean_text(getattr(agreement, "ba_signer_name", None)),
         "baSignerTitle": _clean_text(getattr(agreement, "ba_signer_title", None)),
         "baSignerEmail": _clean_text(getattr(agreement, "ba_signer_email", None)),
         "baSignatureMode": _clean_text(getattr(agreement, "ba_signature_mode", None)),
+        "baSignerAuthorityConfirmed": bool(getattr(agreement, "ba_signer_authority_confirmed", False)),
+        "baSignerAccepted": bool(getattr(agreement, "ba_signer_accepted", False)),
         "baSignedAt": _iso_datetime(getattr(agreement, "ba_signed_at", None)),
+        "hasBaSignature": bool(_clean_text(getattr(agreement, "ba_signature_image_path", None))),
         "createdByAdminId": _clean_text(getattr(agreement, "created_by_admin_id", None)),
         "createdByAdminEmail": _clean_text(getattr(agreement, "created_by_admin_email", None)),
         "sentByAdminId": _clean_text(getattr(agreement, "sent_by_admin_id", None)),

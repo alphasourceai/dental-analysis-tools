@@ -24,23 +24,33 @@ create table if not exists consulting_agreements (
     signed_pdf_path text null,
     signer_token_hash text unique,
     signer_token_expires_at timestamptz null,
+    ba_signer_token_hash text unique,
+    ba_signer_token_expires_at timestamptz null,
     sent_at timestamptz null,
     opened_at timestamptz null,
+    ba_opened_at timestamptz null,
     signer_name text null,
     signer_email text not null,
     signer_title text null,
     signer_authority_confirmed boolean not null default false,
     signer_accepted boolean not null default false,
+    client_signed_at timestamptz null,
     signed_at timestamptz null,
     signer_ip text null,
     signer_user_agent text null,
     signature_image_path text null,
     signature_sha256 text null,
+    client_signature_image_path text null,
+    client_signature_sha256 text null,
     ba_signer_name text null,
     ba_signer_title text null,
     ba_signer_email text null,
     ba_signature_mode text null,
+    ba_signer_authority_confirmed boolean not null default false,
+    ba_signer_accepted boolean not null default false,
     ba_signed_at timestamptz null,
+    ba_signer_ip text null,
+    ba_signer_user_agent text null,
     ba_signature_image_path text null,
     ba_signature_sha256 text null,
     created_by_admin_id text null,
@@ -58,7 +68,7 @@ create table if not exists consulting_agreements (
     constraint consulting_agreements_document_type_check
         check (document_type in ('baa_privacy_agreement')),
     constraint consulting_agreements_status_check
-        check (status in ('draft', 'sent', 'signed', 'voided', 'superseded', 'expired'))
+        check (status in ('draft', 'sent', 'pending_ba_signature', 'signed', 'voided', 'superseded', 'expired'))
 );
 
 create index if not exists consulting_agreements_client_email_lower_idx
@@ -70,6 +80,10 @@ create index if not exists consulting_agreements_status_idx
 create unique index if not exists consulting_agreements_signer_token_hash_key
     on consulting_agreements (signer_token_hash)
     where signer_token_hash is not null;
+
+create unique index if not exists consulting_agreements_ba_signer_token_hash_key
+    on consulting_agreements (ba_signer_token_hash)
+    where ba_signer_token_hash is not null;
 
 create index if not exists consulting_agreements_document_type_idx
     on consulting_agreements (document_type);

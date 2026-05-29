@@ -28,7 +28,7 @@ logger = logging.getLogger("consulting_agreements")
 AGREEMENT_DOCUMENT_TYPE = "baa_privacy_agreement"
 AGREEMENT_TEMPLATE_VERSION = os.getenv(
     "AGREEMENTS_BAA_TEMPLATE_VERSION",
-    "baa_privacy_agreement_v1",
+    "baa_privacy_agreement_v2",
 )
 AGREEMENT_TEMPLATE_PATH = Path(
     os.getenv(
@@ -151,6 +151,12 @@ def validate_admin_agreement_payload(payload: dict[str, Any]) -> None:
         raise AgreementServiceError("missing_effectiveDate", "effectiveDate is required.")
     if not payload.get("signer_email"):
         raise AgreementServiceError("missing_signerEmail", "signerEmail is required.")
+    if not payload.get("ba_signer_name"):
+        raise AgreementServiceError("missing_baSignerName", "baSignerName is required.")
+    if not payload.get("ba_signer_title"):
+        raise AgreementServiceError("missing_baSignerTitle", "baSignerTitle is required.")
+    if not payload.get("ba_signer_email"):
+        raise AgreementServiceError("missing_baSignerEmail", "baSignerEmail is required.")
     for field_name, max_length in (
         ("client_legal_name", 255),
         ("office_name", 255),
@@ -206,6 +212,7 @@ def build_template_snapshot(payload: dict[str, Any], source_template_sha256: Opt
         "values": payload_template_values(payload),
         "rendering": {
             "source": "docx_template",
+            "signaturePage": "workflow_certificate",
             "dynamicFields": [
                 "[Client Name]",
                 "[State]",
@@ -288,8 +295,25 @@ def _prepare_docx_template(payload: dict[str, Any], destination: Path) -> None:
                     text = data.decode("utf-8")
                     for needle, replacement in xml_replacements.items():
                         text = text.replace(needle, replacement)
+                    if item.filename == "word/document.xml":
+                        text = _remove_template_signature_block_xml(text)
                     data = text.encode("utf-8")
                 target_zip.writestr(item, data)
+
+
+def _remove_template_signature_block_xml(text: str) -> str:
+    for pattern in (
+        r"Signatures",
+        r"Covered(?:(?!</w:p>).)*?Entity(?:(?!</w:p>).)*?Date",
+        r"BA(?:(?!</w:p>).)*?alphaSource(?:(?!</w:p>).)*?Date",
+    ):
+        text = re.sub(
+            rf"<w:p\b(?:(?!</w:p>).)*?{pattern}(?:(?!</w:p>).)*?</w:p>",
+            "",
+            text,
+            flags=re.S,
+        )
+    return text
 
 
 def _convert_docx_to_pdf(docx_path: Path, output_dir: Path) -> Path:
@@ -343,12 +367,23 @@ def build_signed_agreement_pdf(
     *,
     agreement_id: str,
     payload_values: dict[str, Any],
-    signer_name: str,
-    signer_title: str,
-    signed_at: datetime,
-    signer_ip: Optional[str],
-    signer_user_agent: Optional[str],
-    signature: dict[str, Any],
+    client_signer_name: str,
+    client_signer_title: str,
+    client_signed_at: datetime,
+    client_signer_ip: Optional[str],
+    client_signer_user_agent: Optional[str],
+    client_authority_confirmed: bool,
+    client_accepted: bool,
+    client_signature: dict[str, Any],
+    ba_signer_name: str,
+    ba_signer_title: str,
+    ba_signer_email: str,
+    ba_signed_at: datetime,
+    ba_signer_ip: Optional[str],
+    ba_signer_user_agent: Optional[str],
+    ba_authority_confirmed: bool,
+    ba_accepted: bool,
+    ba_signature: dict[str, Any],
 ) -> bytes:
     if fitz is None:
         raise AgreementServiceError(
@@ -383,38 +418,85 @@ def build_signed_agreement_pdf(
             f"Client legal name: {payload_values.get('clientLegalName') or ''}",
             f"Client email: {payload_values.get('clientEmail') or ''}",
             f"Effective date: {payload_values.get('effectiveDateDisplay') or ''}",
-            f"Signer name: {signer_name}",
-            f"Signer title: {signer_title}",
-            f"Signer email: {payload_values.get('signerEmail') or ''}",
-            f"Signed at: {signed_at.isoformat()}",
-            "Agreement accepted: Yes",
-            "Signer authority confirmed: Yes",
-            f"Signer IP: {signer_ip or 'Unknown'}",
-            f"Signer user agent: {(signer_user_agent or 'Unknown')[:240]}",
-            f"Signature SHA-256: {signature.get('sha256') or ''}",
         ]
         page.insert_textbox(
-            fitz.Rect(margin, 104, 612 - margin, 370),
+            fitz.Rect(margin, 100, 612 - margin, 174),
             "\n".join(certificate_lines),
-            fontsize=10,
+            fontsize=9,
             fontname="helv",
             color=(0.04, 0.08, 0.28),
             lineheight=1.25,
         )
-        signature_bytes = signature.get("buffer")
-        if signature_bytes:
+
+        def insert_party_section(
+            y: int,
+            heading: str,
+            lines: list[str],
+            signature: dict[str, Any],
+        ) -> None:
             page.insert_textbox(
-                fitz.Rect(margin, 392, 612 - margin, 416),
+                fitz.Rect(margin, y, 612 - margin, y + 24),
+                heading,
+                fontsize=12,
+                fontname="helv",
+                color=(0.04, 0.08, 0.28),
+            )
+            page.insert_textbox(
+                fitz.Rect(margin, y + 30, 612 - margin, y + 138),
+                "\n".join(lines),
+                fontsize=8,
+                fontname="helv",
+                color=(0.04, 0.08, 0.28),
+                lineheight=1.12,
+            )
+            signature_bytes = signature.get("buffer")
+            if not signature_bytes:
+                return
+            page.insert_textbox(
+                fitz.Rect(margin, y + 146, 612 - margin, y + 164),
                 "Captured signature:",
-                fontsize=10,
+                fontsize=8,
                 fontname="helv",
                 color=(0.04, 0.08, 0.28),
             )
             page.insert_image(
-                fitz.Rect(margin, 426, margin + 220, 500),
+                fitz.Rect(margin, y + 166, margin + 230, y + 232),
                 stream=signature_bytes,
                 keep_proportion=True,
             )
+
+        insert_party_section(
+            180,
+            "Client / Covered Entity",
+            [
+                f"Name: {client_signer_name}",
+                f"Title: {client_signer_title}",
+                f"Email: {payload_values.get('signerEmail') or ''}",
+                f"Signed at: {client_signed_at.isoformat()}",
+                f"Authority confirmed: {'Yes' if client_authority_confirmed else 'No'}",
+                f"Agreement accepted: {'Yes' if client_accepted else 'No'}",
+                f"IP address: {client_signer_ip or 'Unknown'}",
+                f"User agent: {(client_signer_user_agent or 'Unknown')[:180]}",
+                f"Signature SHA-256: {client_signature.get('sha256') or ''}",
+            ],
+            client_signature,
+        )
+        insert_party_section(
+            470,
+            "BA / alphaSource Consulting",
+            [
+                f"Name: {ba_signer_name}",
+                f"Title: {ba_signer_title}",
+                f"Email: {ba_signer_email}",
+                f"Signed at: {ba_signed_at.isoformat()}",
+                f"Authority confirmed: {'Yes' if ba_authority_confirmed else 'No'}",
+                f"Agreement accepted: {'Yes' if ba_accepted else 'No'}",
+                f"IP address: {ba_signer_ip or 'Unknown'}",
+                f"User agent: {(ba_signer_user_agent or 'Unknown')[:180]}",
+                f"Signature SHA-256: {ba_signature.get('sha256') or ''}",
+            ],
+            ba_signature,
+        )
         try:
             return document.tobytes(garbage=4, deflate=True)
         except TypeError:
@@ -566,6 +648,42 @@ def send_agreement_signature_request_email(
             f"""
             <p>Please review and sign the BAA/Privacy Agreement for <strong>{_escape(client_legal_name)}</strong>.</p>
             <p><a class="cta" href="{_escape(signing_url)}">Review and sign</a></p>
+            <p>This secure link expires on <strong>{_escape(expires_label)}</strong>.</p>
+            """,
+        ),
+    )
+
+
+def send_agreement_ba_countersign_request_email(
+    to_email: str,
+    signing_url: str,
+    *,
+    client_legal_name: str,
+    expires_at: datetime,
+) -> dict[str, Any]:
+    if not agreement_email_configured():
+        raise AgreementServiceError(
+            "agreement_email_not_configured",
+            "SendGrid agreement email configuration is missing.",
+            status=500,
+        )
+    subject = "BAA/Privacy Agreement countersignature requested"
+    expires_label = expires_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return _send_email(
+        to_email,
+        subject,
+        plain_text=(
+            "alphaSource Consulting BAA/Privacy Agreement\n\n"
+            f"The client signature for {client_legal_name} has been captured. Please review and countersign.\n\n"
+            f"Secure signing link: {signing_url}\n"
+            f"This link expires on {expires_label}.\n\n"
+            "alphaSource Consulting"
+        ),
+        html_content=_email_shell(
+            "BAA/Privacy Agreement countersignature requested",
+            f"""
+            <p>The client signature for <strong>{_escape(client_legal_name)}</strong> has been captured.</p>
+            <p><a class="cta" href="{_escape(signing_url)}">Review and countersign</a></p>
             <p>This secure link expires on <strong>{_escape(expires_label)}</strong>.</p>
             """,
         ),
