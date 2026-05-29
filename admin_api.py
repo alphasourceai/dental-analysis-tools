@@ -1947,10 +1947,32 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
             ba_signer_email = normalize_agreement_email(getattr(locked_agreement, "ba_signer_email", None))
             if not ba_signer_name or not ba_signer_title or not ba_signer_email:
                 db.rollback()
+                logger.warning(
+                    "[agreements_public] BA signer setup missing agreement_id=%s has_name=%s has_title=%s has_email=%s",
+                    locked_agreement.id,
+                    bool(ba_signer_name),
+                    bool(ba_signer_title),
+                    bool(ba_signer_email),
+                )
                 return _agreement_public_error(
                     "ba_signer_required",
                     "BA countersign setup is incomplete. Please contact alphaSource Consulting.",
                     status=409,
+                )
+
+            if not agreement_email_configured():
+                db.rollback()
+                logger.error(
+                    "[agreements_public] BA countersign email config missing agreement_id=%s has_sendgrid=%s has_from_email=%s has_signer_base_url=%s",
+                    locked_agreement.id,
+                    bool(os.getenv("SENDGRID_API_KEY")),
+                    bool(os.getenv("FROM_EMAIL")),
+                    bool(os.getenv("AGREEMENTS_SIGNER_BASE_URL")),
+                )
+                return _agreement_public_error(
+                    "agreement_email_not_configured",
+                    "Agreement email delivery is not configured. Please contact alphaSource Consulting.",
+                    status=503,
                 )
 
             raw_ba_token, ba_token_hash, ba_token_expires_at = generate_signer_token()
@@ -1966,10 +1988,33 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
                 )
             except AgreementServiceError as exc:
                 db.rollback()
-                return _agreement_error_response(exc)
+                logger.warning(
+                    "[agreements_public] client signature prerequisite failed agreement_id=%s code=%s status=%s",
+                    locked_agreement.id,
+                    exc.code,
+                    exc.status,
+                )
+                if exc.code == "agreement_email_not_configured":
+                    return _agreement_public_error(
+                        exc.code,
+                        "Agreement email delivery is not configured. Please contact alphaSource Consulting.",
+                        status=503,
+                    )
+                if exc.code == "agreement_storage_upload_failed":
+                    return _agreement_public_error(
+                        exc.code,
+                        "Agreement signature could not be saved. Please contact alphaSource Consulting.",
+                        status=502,
+                    )
+                return _agreement_public_error(exc.code, exc.message, status=exc.status)
             except Exception:
                 db.rollback()
-                logger.exception("[agreements_public] BA countersign email failed agreement_id=%s", locked_agreement.id)
+                logger.exception(
+                    "[agreements_public] BA countersign email failed agreement_id=%s error_type=%s sendgrid_status=%s",
+                    locked_agreement.id,
+                    type(exc).__name__,
+                    getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None),
+                )
                 return _agreement_public_error(
                     "agreement_ba_email_send_failed",
                     "BA countersign email could not be sent. Please contact alphaSource Consulting.",
