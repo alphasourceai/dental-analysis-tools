@@ -1,6 +1,6 @@
 import os
 import bcrypt
-from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from database import Base, engine, get_db
 
@@ -331,6 +331,62 @@ class AdminAnalysisPhiAcknowledgment(Base):
     ip_address = Column(Text, nullable=True)
     user_agent = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+
+# BAA/Privacy agreement signing workflow model
+class ConsultingAgreement(Base):
+    __tablename__ = "consulting_agreements"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    client_email = Column(Text, nullable=False, index=True)
+    client_user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    client_legal_name = Column(Text, nullable=False)
+    office_name = Column(Text, nullable=True)
+    org_type = Column(Text, nullable=True)
+    phone = Column(Text, nullable=True)
+    state = Column(Text, nullable=False)
+    effective_date = Column(Date, nullable=False)
+    document_type = Column(Text, nullable=False, server_default=text("'baa_privacy_agreement'"), index=True)
+    status = Column(Text, nullable=False, server_default=text("'draft'"), index=True)
+    is_current = Column(Boolean, nullable=False, server_default=text("false"), index=True)
+    template_version = Column(Text, nullable=True)
+    template_snapshot = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    source_template_path = Column(Text, nullable=True)
+    source_template_sha256 = Column(Text, nullable=True)
+    draft_pdf_path = Column(Text, nullable=True)
+    signed_pdf_path = Column(Text, nullable=True)
+    signer_token_hash = Column(Text, nullable=True, unique=True, index=True)
+    signer_token_expires_at = Column(DateTime(timezone=True), nullable=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    opened_at = Column(DateTime(timezone=True), nullable=True)
+    signer_name = Column(Text, nullable=True)
+    signer_email = Column(Text, nullable=False)
+    signer_title = Column(Text, nullable=True)
+    signer_authority_confirmed = Column(Boolean, nullable=False, server_default=text("false"))
+    signer_accepted = Column(Boolean, nullable=False, server_default=text("false"))
+    signed_at = Column(DateTime(timezone=True), nullable=True)
+    signer_ip = Column(Text, nullable=True)
+    signer_user_agent = Column(Text, nullable=True)
+    signature_image_path = Column(Text, nullable=True)
+    signature_sha256 = Column(Text, nullable=True)
+    ba_signer_name = Column(Text, nullable=True)
+    ba_signer_title = Column(Text, nullable=True)
+    ba_signer_email = Column(Text, nullable=True)
+    ba_signature_mode = Column(Text, nullable=True)
+    ba_signed_at = Column(DateTime(timezone=True), nullable=True)
+    ba_signature_image_path = Column(Text, nullable=True)
+    ba_signature_sha256 = Column(Text, nullable=True)
+    created_by_admin_id = Column(Text, nullable=True)
+    created_by_admin_email = Column(Text, nullable=True)
+    sent_by_admin_id = Column(Text, nullable=True)
+    sent_by_admin_email = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    voided_at = Column(DateTime(timezone=True), nullable=True)
+    voided_by_admin_id = Column(Text, nullable=True)
+    voided_by_admin_email = Column(Text, nullable=True)
+    void_reason = Column(Text, nullable=True)
+    superseded_at = Column(DateTime(timezone=True), nullable=True)
+    superseded_by_agreement_id = Column(PGUUID(as_uuid=True), ForeignKey("consulting_agreements.id"), nullable=True)
 
 # Unified admin audit event model
 class AdminAuditEvent(Base):

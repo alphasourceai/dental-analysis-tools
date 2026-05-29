@@ -38,6 +38,31 @@ from admin_pdf_generator_service import (
     safe_path_component,
     upload_pdf_report,
 )
+from consulting_agreements import (
+    AGREEMENT_DOCUMENT_TYPE,
+    AGREEMENT_TEMPLATE_PATH,
+    AGREEMENT_TEMPLATE_VERSION,
+    AGREEMENTS_EMAIL_LINK_TTL_SECONDS,
+    AGREEMENTS_SIGNED_URL_TTL_SECONDS,
+    AgreementServiceError,
+    agreement_email_configured,
+    build_signed_agreement_pdf,
+    build_signing_url,
+    build_template_snapshot,
+    create_agreement_signed_url,
+    download_agreement_file,
+    generate_signer_token,
+    hash_signer_token,
+    normalize_admin_agreement_payload,
+    normalize_email as normalize_agreement_email,
+    parse_signature_image,
+    payload_template_values,
+    render_agreement_pdf,
+    send_agreement_signature_request_email,
+    send_agreement_signed_copy_email,
+    upload_agreement_file,
+    utcnow as agreement_utcnow,
+)
 from database import SessionLocal
 from models import (
     AdminAnalysisJob,
@@ -47,6 +72,7 @@ from models import (
     AdminUser,
     BillingOverride,
     ClientSubmission,
+    ConsultingAgreement,
     StripeCheckoutSession,
     StripeCheckoutSessionUpload,
     StripeCustomer,
@@ -161,6 +187,8 @@ PERMISSION_PDF_READ = "pdf_read"
 PERMISSION_PDF_GENERATE = "pdf_generate"
 PERMISSION_SECURE_UPLOADS_READ = "secure_uploads_read"
 PERMISSION_SECURE_UPLOADS_WRITE = "secure_uploads_write"
+PERMISSION_AGREEMENTS_READ = "agreements_read"
+PERMISSION_AGREEMENTS_WRITE = "agreements_write"
 PERMISSION_ADMIN_MANAGEMENT_READ = "admin_management_read"
 PERMISSION_ADMIN_MANAGEMENT_WRITE = "admin_management_write"
 PERMISSION_AUDIT_READ = "audit_read"
@@ -177,6 +205,8 @@ ADMIN_API_ALL_PERMISSIONS = {
     PERMISSION_PDF_GENERATE,
     PERMISSION_SECURE_UPLOADS_READ,
     PERMISSION_SECURE_UPLOADS_WRITE,
+    PERMISSION_AGREEMENTS_READ,
+    PERMISSION_AGREEMENTS_WRITE,
     PERMISSION_ADMIN_MANAGEMENT_READ,
     PERMISSION_ADMIN_MANAGEMENT_WRITE,
     PERMISSION_AUDIT_READ,
@@ -1383,6 +1413,683 @@ def list_admin_client_options(
     except Exception:
         logger.exception("[admin_api] client options query failed.")
         return _error_response(500, "client_options_failed", "Unable to load client options.")
+    finally:
+        db.close()
+
+
+@app.get("/api/admin/agreements")
+def list_admin_agreements(
+    request: Request,
+    clientEmail: Optional[str] = None,
+    status: Optional[str] = None,
+    documentType: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = Query(50, ge=1),
+    offset: int = Query(0, ge=0),
+) -> JSONResponse:
+    _, _, error_response = _require_admin_permission(request, PERMISSION_AGREEMENTS_READ)
+    if error_response:
+        return error_response
+
+    normalized_status = (_clean_text(status) or "").lower()
+    if normalized_status and normalized_status not in {"draft", "sent", "signed", "voided", "superseded", "expired"}:
+        return _error_response(400, "invalid_status", "status is not supported.")
+    normalized_document_type = _clean_text(documentType) or AGREEMENT_DOCUMENT_TYPE
+    if normalized_document_type != AGREEMENT_DOCUMENT_TYPE:
+        return _error_response(400, "invalid_document_type", "documentType is not supported.")
+    normalized_client_email = normalize_agreement_email(clientEmail)
+    if clientEmail and not normalized_client_email:
+        return _error_response(400, "invalid_client_email", "clientEmail must be a valid email.")
+    normalized_search = _clean_text(search)
+    safe_limit = min(limit, 100)
+
+    db = SessionLocal()
+    try:
+        query = db.query(ConsultingAgreement).filter(ConsultingAgreement.document_type == normalized_document_type)
+        if normalized_client_email:
+            query = query.filter(func.lower(ConsultingAgreement.client_email) == normalized_client_email)
+        if normalized_status:
+            query = query.filter(ConsultingAgreement.status == normalized_status)
+        if normalized_search:
+            search_like = f"%{normalized_search}%"
+            query = query.filter(
+                or_(
+                    ConsultingAgreement.client_email.ilike(search_like),
+                    ConsultingAgreement.client_legal_name.ilike(search_like),
+                    ConsultingAgreement.office_name.ilike(search_like),
+                    ConsultingAgreement.signer_email.ilike(search_like),
+                    ConsultingAgreement.signer_name.ilike(search_like),
+                )
+            )
+
+        rows = (
+            query.order_by(ConsultingAgreement.created_at.desc(), ConsultingAgreement.id.desc())
+            .offset(offset)
+            .limit(safe_limit + 1)
+            .all()
+        )
+        has_more = len(rows) > safe_limit
+        rows = rows[:safe_limit]
+        return JSONResponse(
+            {
+                "ok": True,
+                "items": [_agreement_payload(row) for row in rows],
+                "count": len(rows),
+                "limit": safe_limit,
+                "offset": offset,
+                "hasMore": has_more,
+            }
+        )
+    except Exception:
+        logger.exception("[agreements] list failed")
+        return _error_response(500, "agreements_lookup_failed", "Unable to load agreements.")
+    finally:
+        db.close()
+
+
+@app.get("/api/admin/agreements/{agreement_id}")
+def get_admin_agreement(request: Request, agreement_id: str) -> JSONResponse:
+    _, _, error_response = _require_admin_permission(request, PERMISSION_AGREEMENTS_READ)
+    if error_response:
+        return error_response
+
+    agreement_uuid, validation_error = _required_uuid(agreement_id, "agreementId")
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        agreement = db.query(ConsultingAgreement).filter(ConsultingAgreement.id == agreement_uuid).first()
+        if not agreement:
+            return _error_response(404, "agreement_not_found", "Agreement was not found.")
+        return JSONResponse({"ok": True, "agreement": _agreement_payload(agreement, include_snapshot=True)})
+    except Exception:
+        logger.exception("[agreements] get failed agreement_id=%s", agreement_uuid)
+        return _error_response(500, "agreement_lookup_failed", "Unable to load agreement.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/agreements/preview")
+async def preview_admin_agreement(request: Request) -> Response:
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_AGREEMENTS_WRITE)
+    if error_response:
+        return error_response
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    try:
+        payload = normalize_admin_agreement_payload(body)
+        pdf_bytes, template_sha = render_agreement_pdf(payload)
+    except AgreementServiceError as exc:
+        return _agreement_error_response(exc)
+    except Exception:
+        logger.exception("[agreements] preview failed")
+        return _error_response(500, "agreement_preview_failed", "Unable to generate agreement preview.")
+
+    db = SessionLocal()
+    try:
+        _record_admin_audit_event(
+            db,
+            request,
+            "agreement.previewed",
+            target_type="consulting_agreement",
+            client_email=payload["client_email"],
+            metadata={
+                "documentType": payload["document_type"],
+                "templateVersion": AGREEMENT_TEMPLATE_VERSION,
+                "sourceTemplateSha256Present": bool(template_sha),
+                "effectiveDate": payload["effective_date"].isoformat(),
+            },
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
+        )
+    finally:
+        db.close()
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'inline; filename="baa-privacy-agreement-preview.pdf"'},
+    )
+
+
+@app.post("/api/admin/agreements/send")
+async def send_admin_agreement(request: Request) -> JSONResponse:
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_AGREEMENTS_WRITE)
+    if error_response:
+        return error_response
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    if not agreement_email_configured():
+        return _error_response(
+            500,
+            "agreement_email_not_configured",
+            "SendGrid agreement email configuration is missing.",
+        )
+
+    try:
+        payload = normalize_admin_agreement_payload(body)
+        draft_pdf_bytes, template_sha = render_agreement_pdf(payload)
+        raw_token, token_hash, token_expires_at = generate_signer_token()
+    except AgreementServiceError as exc:
+        return _agreement_error_response(exc)
+    except Exception:
+        logger.exception("[agreements] send preparation failed")
+        return _error_response(500, "agreement_send_failed", "Unable to prepare agreement.")
+
+    agreement_id = uuid4()
+    draft_pdf_path = f"agreements/{agreement_id}/draft.pdf"
+    try:
+        upload_agreement_file(draft_pdf_path, draft_pdf_bytes, "application/pdf")
+    except AgreementServiceError as exc:
+        return _agreement_error_response(exc)
+
+    db = SessionLocal()
+    try:
+        client_user_id = _agreement_client_user_id(db, payload)
+        now = agreement_utcnow()
+        admin_user_id = _clean_text((admin_auth_user or {}).get("id"))
+        admin_email = (
+            _clean_text(getattr(admin_access, "email", None))
+            or _clean_text((admin_auth_user or {}).get("email"))
+        )
+        agreement = ConsultingAgreement(
+            id=agreement_id,
+            client_email=payload["client_email"],
+            client_user_id=client_user_id,
+            client_legal_name=payload["client_legal_name"],
+            office_name=payload.get("office_name"),
+            org_type=payload.get("org_type"),
+            phone=payload.get("phone"),
+            state=payload["state"],
+            effective_date=payload["effective_date"],
+            document_type=payload["document_type"],
+            status="draft",
+            is_current=False,
+            template_version=AGREEMENT_TEMPLATE_VERSION,
+            template_snapshot=build_template_snapshot(payload, template_sha),
+            source_template_path=str(AGREEMENT_TEMPLATE_PATH),
+            source_template_sha256=template_sha,
+            draft_pdf_path=draft_pdf_path,
+            signer_token_hash=token_hash,
+            signer_token_expires_at=token_expires_at,
+            signer_name=payload.get("signer_name"),
+            signer_email=payload["signer_email"],
+            signer_title=payload.get("signer_title"),
+            ba_signer_name=payload.get("ba_signer_name"),
+            ba_signer_title=payload.get("ba_signer_title"),
+            ba_signer_email=payload.get("ba_signer_email"),
+            ba_signature_mode=payload.get("ba_signature_mode"),
+            created_by_admin_id=admin_user_id,
+            created_by_admin_email=admin_email,
+            sent_by_admin_id=admin_user_id,
+            sent_by_admin_email=admin_email,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(agreement)
+        db.commit()
+        db.refresh(agreement)
+
+        signing_url = build_signing_url(raw_token)
+        try:
+            send_agreement_signature_request_email(
+                payload["signer_email"],
+                signing_url,
+                client_legal_name=payload["client_legal_name"],
+                expires_at=token_expires_at,
+            )
+        except AgreementServiceError as exc:
+            return _agreement_error_response(exc)
+        except Exception:
+            logger.exception("[agreements] signature request email failed agreement_id=%s", agreement_id)
+            return _error_response(502, "agreement_email_send_failed", "Agreement email could not be sent.")
+
+        agreement.status = "sent"
+        agreement.sent_at = agreement_utcnow()
+        agreement.updated_at = agreement.sent_at
+        db.commit()
+        db.refresh(agreement)
+
+        _record_admin_audit_event(
+            db,
+            request,
+            "agreement.sent",
+            target_type="consulting_agreement",
+            target_id=agreement.id,
+            client_email=agreement.client_email,
+            metadata={
+                "documentType": agreement.document_type,
+                "templateVersion": agreement.template_version,
+                "effectiveDate": agreement.effective_date.isoformat(),
+                "signerEmail": agreement.signer_email,
+                "tokenExpiresAt": _iso_datetime(agreement.signer_token_expires_at),
+            },
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
+        )
+        return JSONResponse({"ok": True, "agreement": _agreement_payload(agreement)})
+    except Exception:
+        db.rollback()
+        logger.exception("[agreements] send failed agreement_id=%s", agreement_id)
+        return _error_response(500, "agreement_send_failed", "Unable to send agreement.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/agreements/{agreement_id}/download-url")
+async def create_admin_agreement_download_url(request: Request, agreement_id: str) -> JSONResponse:
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_AGREEMENTS_READ)
+    if error_response:
+        return error_response
+
+    agreement_uuid, validation_error = _required_uuid(agreement_id, "agreementId")
+    if validation_error:
+        return validation_error
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+    file_type = (_clean_text(body.get("fileType") or body.get("document") or body.get("target")) or "").lower()
+
+    db = SessionLocal()
+    try:
+        agreement = db.query(ConsultingAgreement).filter(ConsultingAgreement.id == agreement_uuid).first()
+        if not agreement:
+            return _error_response(404, "agreement_not_found", "Agreement was not found.")
+        if not file_type:
+            file_type = "signed" if _clean_text(getattr(agreement, "signed_pdf_path", None)) else "draft"
+        if file_type not in {"draft", "signed"}:
+            return _error_response(400, "invalid_file_type", "fileType must be draft or signed.")
+        object_path = agreement.signed_pdf_path if file_type == "signed" else agreement.draft_pdf_path
+        if not object_path:
+            return _error_response(404, "agreement_file_not_found", "Requested agreement file is not available.")
+        try:
+            signed_url = create_agreement_signed_url(object_path, AGREEMENTS_SIGNED_URL_TTL_SECONDS)
+        except AgreementServiceError as exc:
+            return _agreement_error_response(exc)
+        if not signed_url:
+            return _error_response(502, "agreement_signed_url_failed", "Unable to create agreement download URL.")
+
+        _record_admin_audit_event(
+            db,
+            request,
+            "agreement.download_url_created",
+            target_type="consulting_agreement",
+            target_id=agreement.id,
+            client_email=agreement.client_email,
+            metadata={
+                "documentType": agreement.document_type,
+                "fileType": file_type,
+                "status": agreement.status,
+            },
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "url": signed_url,
+                "expiresInSeconds": AGREEMENTS_SIGNED_URL_TTL_SECONDS,
+                "fileType": file_type,
+            }
+        )
+    except Exception:
+        logger.exception("[agreements] download url failed agreement_id=%s", agreement_uuid)
+        return _error_response(500, "agreement_download_url_failed", "Unable to create agreement download URL.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/agreements/{agreement_id}/void")
+async def void_admin_agreement(request: Request, agreement_id: str) -> JSONResponse:
+    admin_auth_user, admin_access, error_response = _require_admin_permission(request, PERMISSION_AGREEMENTS_WRITE)
+    if error_response:
+        return error_response
+
+    agreement_uuid, validation_error = _required_uuid(agreement_id, "agreementId")
+    if validation_error:
+        return validation_error
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+    reason, validation_error = _required_reason(body.get("reason"))
+    if validation_error:
+        return validation_error
+
+    db = SessionLocal()
+    try:
+        agreement = db.query(ConsultingAgreement).filter(ConsultingAgreement.id == agreement_uuid).first()
+        if not agreement:
+            return _error_response(404, "agreement_not_found", "Agreement was not found.")
+        if agreement.status == "voided":
+            return _error_response(409, "agreement_already_voided", "Agreement is already voided.")
+
+        now = agreement_utcnow()
+        previous_status = agreement.status
+        agreement.status = "voided"
+        agreement.is_current = False
+        agreement.voided_at = now
+        agreement.voided_by_admin_id = _clean_text((admin_auth_user or {}).get("id"))
+        agreement.voided_by_admin_email = (
+            _clean_text(getattr(admin_access, "email", None))
+            or _clean_text((admin_auth_user or {}).get("email"))
+        )
+        agreement.void_reason = reason
+        agreement.updated_at = now
+        db.commit()
+        db.refresh(agreement)
+        _record_admin_audit_event(
+            db,
+            request,
+            "agreement.voided",
+            target_type="consulting_agreement",
+            target_id=agreement.id,
+            client_email=agreement.client_email,
+            metadata={
+                "documentType": agreement.document_type,
+                "previousStatus": previous_status,
+                "reason": reason,
+            },
+            admin_auth_user=admin_auth_user,
+            admin_access=admin_access,
+        )
+        return JSONResponse({"ok": True, "agreement": _agreement_payload(agreement)})
+    except Exception:
+        db.rollback()
+        logger.exception("[agreements] void failed agreement_id=%s", agreement_uuid)
+        return _error_response(500, "agreement_void_failed", "Unable to void agreement.")
+    finally:
+        db.close()
+
+
+@app.post("/api/agreements/session")
+async def create_public_agreement_session(request: Request) -> JSONResponse:
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+    raw_token = _clean_text(body.get("token"))
+    if not raw_token:
+        return _agreement_public_error("token_required", "Signing token is required.", status=400)
+
+    token_hash = hash_signer_token(raw_token)
+    db = SessionLocal()
+    try:
+        agreement = db.query(ConsultingAgreement).filter(ConsultingAgreement.signer_token_hash == token_hash).first()
+        validation_error = _validate_public_signable_agreement(agreement)
+        if validation_error:
+            return validation_error
+
+        now = agreement_utcnow()
+        if not agreement.opened_at:
+            agreement.opened_at = now
+            agreement.updated_at = now
+            db.commit()
+            db.refresh(agreement)
+            _record_admin_audit_event(
+                db,
+                request,
+                "agreement.opened",
+                target_type="consulting_agreement",
+                target_id=agreement.id,
+                client_email=agreement.client_email,
+                metadata={
+                    "documentType": agreement.document_type,
+                    "status": agreement.status,
+                },
+                source="agreements_public",
+            )
+
+        try:
+            draft_pdf_url = create_agreement_signed_url(agreement.draft_pdf_path, AGREEMENTS_SIGNED_URL_TTL_SECONDS)
+        except AgreementServiceError as exc:
+            return _agreement_error_response(exc)
+        if not draft_pdf_url:
+            return _agreement_public_error("agreement_preview_unavailable", "Agreement preview is unavailable.", status=502)
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "agreement": {
+                    "id": _id_text(agreement.id),
+                    "documentType": agreement.document_type,
+                    "status": agreement.status,
+                    "clientLegalName": agreement.client_legal_name,
+                    "effectiveDate": _iso_date(agreement.effective_date),
+                    "signerName": agreement.signer_name,
+                    "signerEmail": agreement.signer_email,
+                    "signerTitle": agreement.signer_title,
+                    "expiresAt": _iso_datetime(agreement.signer_token_expires_at),
+                    "sentAt": _iso_datetime(agreement.sent_at),
+                    "openedAt": _iso_datetime(agreement.opened_at),
+                    "draftPdfUrl": draft_pdf_url,
+                    "signedPdfUrl": None,
+                },
+                "expiresInSeconds": AGREEMENTS_SIGNED_URL_TTL_SECONDS,
+            }
+        )
+    except Exception:
+        logger.exception("[agreements_public] session failed")
+        return _agreement_public_error("agreement_session_failed", "Agreement session could not be loaded.", status=500)
+    finally:
+        db.close()
+
+
+@app.post("/api/agreements/sign")
+async def sign_public_agreement(request: Request) -> JSONResponse:
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    raw_token = _clean_text(body.get("token"))
+    if not raw_token:
+        return _agreement_public_error("token_required", "Signing token is required.", status=400)
+    signer_name = _clean_text(body.get("typedSignerName") or body.get("typed_name") or body.get("signerName"))
+    if not signer_name:
+        return _agreement_public_error("signer_name_required", "Signer name is required.", status=400)
+    signer_title = _clean_text(body.get("signerTitle") or body.get("title") or body.get("typedSignerTitle"))
+    if not signer_title:
+        return _agreement_public_error("signer_title_required", "Signer title is required.", status=400)
+    accepted = _truthy(body.get("accepted") or body.get("agreementAccepted"))
+    if not accepted:
+        return _agreement_public_error("agreement_acceptance_required", "Agreement acceptance is required.", status=400)
+    authority_confirmed = _truthy(body.get("authorityConfirmed") or body.get("signerAuthorityConfirmed"))
+    if not authority_confirmed:
+        return _agreement_public_error("signer_authority_required", "Signer authority confirmation is required.", status=400)
+    try:
+        signature = parse_signature_image(
+            body.get("signatureImage")
+            or body.get("signature_image")
+            or body.get("signatureImageDataUrl")
+            or body.get("signature_image_data_url")
+        )
+    except AgreementServiceError as exc:
+        return _agreement_error_response(exc)
+
+    token_hash = hash_signer_token(raw_token)
+    db = SessionLocal()
+    try:
+        agreement = db.query(ConsultingAgreement).filter(ConsultingAgreement.signer_token_hash == token_hash).first()
+        validation_error = _validate_public_signable_agreement(agreement)
+        if validation_error:
+            return validation_error
+
+        signed_at = agreement_utcnow()
+        signature_path = f"agreements/{agreement.id}/signatures/client.{signature['extension']}"
+        signed_pdf_path = f"agreements/{agreement.id}/signed.pdf"
+        signer_ip = _request_client_ip(request)
+        signer_user_agent = _request_user_agent(request)
+
+        try:
+            upload_agreement_file(signature_path, signature["buffer"], signature["mime"])
+            draft_pdf_bytes = download_agreement_file(agreement.draft_pdf_path)
+            payload_values = _agreement_template_values_from_row(agreement)
+            signed_pdf_bytes = build_signed_agreement_pdf(
+                draft_pdf_bytes,
+                agreement_id=_id_text(agreement.id) or "",
+                payload_values=payload_values,
+                signer_name=signer_name,
+                signer_title=signer_title,
+                signed_at=signed_at,
+                signer_ip=signer_ip,
+                signer_user_agent=signer_user_agent,
+                signature=signature,
+            )
+            upload_agreement_file(signed_pdf_path, signed_pdf_bytes, "application/pdf")
+        except AgreementServiceError as exc:
+            return _agreement_error_response(exc)
+
+        locked_agreement = (
+            db.query(ConsultingAgreement)
+            .filter(ConsultingAgreement.id == agreement.id)
+            .with_for_update()
+            .first()
+        )
+        validation_error = _validate_public_signable_agreement(locked_agreement)
+        if validation_error:
+            db.rollback()
+            return validation_error
+
+        previous_current_rows = (
+            db.query(ConsultingAgreement)
+            .filter(func.lower(ConsultingAgreement.client_email) == locked_agreement.client_email.lower())
+            .filter(ConsultingAgreement.document_type == locked_agreement.document_type)
+            .filter(ConsultingAgreement.is_current.is_(True))
+            .filter(ConsultingAgreement.id != locked_agreement.id)
+            .all()
+        )
+        for previous in previous_current_rows:
+            previous.is_current = False
+            previous.status = "superseded"
+            previous.superseded_at = signed_at
+            previous.superseded_by_agreement_id = locked_agreement.id
+            previous.updated_at = signed_at
+
+        locked_agreement.status = "signed"
+        locked_agreement.is_current = True
+        locked_agreement.opened_at = locked_agreement.opened_at or signed_at
+        locked_agreement.signer_name = signer_name
+        locked_agreement.signer_title = signer_title
+        locked_agreement.signer_authority_confirmed = True
+        locked_agreement.signer_accepted = True
+        locked_agreement.signed_at = signed_at
+        locked_agreement.signer_ip = signer_ip
+        locked_agreement.signer_user_agent = signer_user_agent
+        locked_agreement.signature_image_path = signature_path
+        locked_agreement.signature_sha256 = signature["sha256"]
+        locked_agreement.signed_pdf_path = signed_pdf_path
+        locked_agreement.superseded_at = None
+        locked_agreement.superseded_by_agreement_id = None
+        locked_agreement.updated_at = signed_at
+        snapshot = dict(locked_agreement.template_snapshot or {})
+        snapshot["execution"] = {
+            "signedAt": signed_at.isoformat(),
+            "signerName": signer_name,
+            "signerTitle": signer_title,
+            "signerAccepted": True,
+            "signerAuthorityConfirmed": True,
+            "signatureSha256": signature["sha256"],
+        }
+        locked_agreement.template_snapshot = snapshot
+        db.commit()
+        db.refresh(locked_agreement)
+
+        _record_admin_audit_event(
+            db,
+            request,
+            "agreement.signed",
+            target_type="consulting_agreement",
+            target_id=locked_agreement.id,
+            client_email=locked_agreement.client_email,
+            metadata={
+                "documentType": locked_agreement.document_type,
+                "templateVersion": locked_agreement.template_version,
+                "signerEmail": locked_agreement.signer_email,
+                "signerTitle": locked_agreement.signer_title,
+                "supersededCount": len(previous_current_rows),
+            },
+            source="agreements_public",
+        )
+        if previous_current_rows:
+            _record_admin_audit_event(
+                db,
+                request,
+                "agreement.superseded",
+                target_type="consulting_agreement",
+                target_id=locked_agreement.id,
+                client_email=locked_agreement.client_email,
+                metadata={
+                    "documentType": locked_agreement.document_type,
+                    "supersededCount": len(previous_current_rows),
+                },
+                source="agreements_public",
+            )
+
+        signed_url = None
+        email_signed_url = None
+        try:
+            signed_url = create_agreement_signed_url(signed_pdf_path, AGREEMENTS_SIGNED_URL_TTL_SECONDS)
+            email_signed_url = create_agreement_signed_url(signed_pdf_path, AGREEMENTS_EMAIL_LINK_TTL_SECONDS)
+        except AgreementServiceError:
+            logger.exception("[agreements_public] signed url creation failed agreement_id=%s", locked_agreement.id)
+        copy_recipients: list[str] = []
+        if locked_agreement.signer_email:
+            copy_recipients.append(locked_agreement.signer_email)
+        company_email = _clean_text(os.getenv("AGREEMENTS_COMPANY_EMAIL"))
+        if company_email:
+            copy_recipients.append(company_email)
+
+        sent_copy_count = 0
+        if email_signed_url:
+            for recipient in copy_recipients:
+                try:
+                    email_result = send_agreement_signed_copy_email(
+                        recipient,
+                        email_signed_url,
+                        client_legal_name=locked_agreement.client_legal_name,
+                        signed_at=signed_at,
+                        company_copy=recipient == company_email,
+                    )
+                    if not (isinstance(email_result, dict) and email_result.get("skipped")):
+                        sent_copy_count += 1
+                except Exception:
+                    logger.exception("[agreements_public] signed copy email failed agreement_id=%s", locked_agreement.id)
+        if sent_copy_count:
+            _record_admin_audit_event(
+                db,
+                request,
+                "agreement.signed_copy_sent",
+                target_type="consulting_agreement",
+                target_id=locked_agreement.id,
+                client_email=locked_agreement.client_email,
+                metadata={
+                    "documentType": locked_agreement.document_type,
+                    "recipientCount": sent_copy_count,
+                },
+                source="agreements_public",
+            )
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "agreement": {
+                    "id": _id_text(locked_agreement.id),
+                    "status": locked_agreement.status,
+                    "signedAt": _iso_datetime(locked_agreement.signed_at),
+                    "signerName": locked_agreement.signer_name,
+                    "signerTitle": locked_agreement.signer_title,
+                },
+                "signedPdfUrl": signed_url,
+                "expiresInSeconds": AGREEMENTS_SIGNED_URL_TTL_SECONDS,
+            }
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("[agreements_public] signing failed")
+        return _agreement_public_error("agreement_sign_failed", "Agreement could not be signed.", status=500)
     finally:
         db.close()
 
@@ -9660,6 +10367,8 @@ def _admin_permissions_payload(admin_user: Optional[AdminUser]) -> dict[str, boo
         "canGeneratePdf": _admin_has_permission(admin_user, PERMISSION_PDF_GENERATE),
         "canReadSecureUploads": _admin_has_permission(admin_user, PERMISSION_SECURE_UPLOADS_READ),
         "canWriteSecureUploads": _admin_has_permission(admin_user, PERMISSION_SECURE_UPLOADS_WRITE),
+        "canReadAgreements": _admin_has_permission(admin_user, PERMISSION_AGREEMENTS_READ),
+        "canWriteAgreements": _admin_has_permission(admin_user, PERMISSION_AGREEMENTS_WRITE),
         "canReadAdminManagement": _admin_has_permission(admin_user, PERMISSION_ADMIN_MANAGEMENT_READ),
         "canManageAdminAccess": _admin_has_permission(admin_user, PERMISSION_ADMIN_MANAGEMENT_WRITE),
         "canReadAudit": _admin_has_permission(admin_user, PERMISSION_AUDIT_READ),
@@ -9866,6 +10575,137 @@ def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
             },
         },
     )
+
+
+def _agreement_error_response(exc: AgreementServiceError) -> JSONResponse:
+    return _error_response(exc.status, exc.code, exc.message)
+
+
+def _agreement_public_error(code: str, message: str, status: int = 400) -> JSONResponse:
+    return _error_response(status, code, message)
+
+
+def _iso_date(value: object) -> Optional[str]:
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except TypeError:
+            return None
+    return None
+
+
+def _truthy(value: object) -> bool:
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    normalized = str(value).strip().lower()
+    return normalized in {"1", "true", "yes", "y", "on"}
+
+
+def _agreement_client_user_id(db: Any, payload: dict[str, Any]) -> Optional[UUID]:
+    explicit_user_id = _uuid_or_none(payload.get("client_user_id"))
+    if explicit_user_id:
+        return explicit_user_id
+    client_email = normalize_agreement_email(payload.get("client_email"))
+    if not client_email:
+        return None
+    user = db.query(User).filter(func.lower(User.email) == client_email).first()
+    return getattr(user, "id", None) if user else None
+
+
+def _agreement_template_values_from_row(agreement: ConsultingAgreement) -> dict[str, Any]:
+    snapshot = getattr(agreement, "template_snapshot", None)
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("values"), dict):
+        values = dict(snapshot["values"])
+        if not values.get("signerEmail"):
+            values["signerEmail"] = getattr(agreement, "signer_email", None)
+        return values
+    return payload_template_values(
+        {
+            "client_email": getattr(agreement, "client_email", None),
+            "client_legal_name": getattr(agreement, "client_legal_name", None),
+            "office_name": getattr(agreement, "office_name", None),
+            "org_type": getattr(agreement, "org_type", None),
+            "phone": getattr(agreement, "phone", None),
+            "state": getattr(agreement, "state", None),
+            "effective_date": getattr(agreement, "effective_date", None),
+            "document_type": getattr(agreement, "document_type", None) or AGREEMENT_DOCUMENT_TYPE,
+            "signer_name": getattr(agreement, "signer_name", None),
+            "signer_email": getattr(agreement, "signer_email", None),
+            "signer_title": getattr(agreement, "signer_title", None),
+            "ba_signer_name": getattr(agreement, "ba_signer_name", None),
+            "ba_signer_title": getattr(agreement, "ba_signer_title", None),
+            "ba_signer_email": getattr(agreement, "ba_signer_email", None),
+            "ba_signature_mode": getattr(agreement, "ba_signature_mode", None),
+        }
+    )
+
+
+def _validate_public_signable_agreement(agreement: Optional[ConsultingAgreement]) -> Optional[JSONResponse]:
+    unavailable = _agreement_public_error(
+        "signing_link_unavailable",
+        "This signing link is invalid or expired.",
+        status=404,
+    )
+    if not agreement:
+        return unavailable
+    if getattr(agreement, "status", None) != "sent":
+        return unavailable
+    expires_at = getattr(agreement, "signer_token_expires_at", None)
+    if isinstance(expires_at, datetime) and expires_at <= agreement_utcnow():
+        return unavailable
+    if not _clean_text(getattr(agreement, "draft_pdf_path", None)):
+        return unavailable
+    return None
+
+
+def _agreement_payload(agreement: ConsultingAgreement, *, include_snapshot: bool = False) -> dict[str, Any]:
+    payload = {
+        "id": _id_text(getattr(agreement, "id", None)),
+        "clientEmail": _clean_text(getattr(agreement, "client_email", None)),
+        "clientUserId": _id_text(getattr(agreement, "client_user_id", None)),
+        "clientLegalName": _clean_text(getattr(agreement, "client_legal_name", None)),
+        "officeName": _clean_text(getattr(agreement, "office_name", None)),
+        "orgType": _clean_text(getattr(agreement, "org_type", None)),
+        "phone": _clean_text(getattr(agreement, "phone", None)),
+        "state": _clean_text(getattr(agreement, "state", None)),
+        "effectiveDate": _iso_date(getattr(agreement, "effective_date", None)),
+        "documentType": _clean_text(getattr(agreement, "document_type", None)),
+        "status": _clean_text(getattr(agreement, "status", None)),
+        "isCurrent": bool(getattr(agreement, "is_current", False)),
+        "templateVersion": _clean_text(getattr(agreement, "template_version", None)),
+        "hasDraftPdf": bool(_clean_text(getattr(agreement, "draft_pdf_path", None))),
+        "hasSignedPdf": bool(_clean_text(getattr(agreement, "signed_pdf_path", None))),
+        "signerTokenExpiresAt": _iso_datetime(getattr(agreement, "signer_token_expires_at", None)),
+        "sentAt": _iso_datetime(getattr(agreement, "sent_at", None)),
+        "openedAt": _iso_datetime(getattr(agreement, "opened_at", None)),
+        "signerName": _clean_text(getattr(agreement, "signer_name", None)),
+        "signerEmail": _clean_text(getattr(agreement, "signer_email", None)),
+        "signerTitle": _clean_text(getattr(agreement, "signer_title", None)),
+        "signerAuthorityConfirmed": bool(getattr(agreement, "signer_authority_confirmed", False)),
+        "signerAccepted": bool(getattr(agreement, "signer_accepted", False)),
+        "signedAt": _iso_datetime(getattr(agreement, "signed_at", None)),
+        "baSignerName": _clean_text(getattr(agreement, "ba_signer_name", None)),
+        "baSignerTitle": _clean_text(getattr(agreement, "ba_signer_title", None)),
+        "baSignerEmail": _clean_text(getattr(agreement, "ba_signer_email", None)),
+        "baSignatureMode": _clean_text(getattr(agreement, "ba_signature_mode", None)),
+        "baSignedAt": _iso_datetime(getattr(agreement, "ba_signed_at", None)),
+        "createdByAdminId": _clean_text(getattr(agreement, "created_by_admin_id", None)),
+        "createdByAdminEmail": _clean_text(getattr(agreement, "created_by_admin_email", None)),
+        "sentByAdminId": _clean_text(getattr(agreement, "sent_by_admin_id", None)),
+        "sentByAdminEmail": _clean_text(getattr(agreement, "sent_by_admin_email", None)),
+        "createdAt": _iso_datetime(getattr(agreement, "created_at", None)),
+        "updatedAt": _iso_datetime(getattr(agreement, "updated_at", None)),
+        "voidedAt": _iso_datetime(getattr(agreement, "voided_at", None)),
+        "voidedByAdminEmail": _clean_text(getattr(agreement, "voided_by_admin_email", None)),
+        "voidReason": _clean_text(getattr(agreement, "void_reason", None)),
+        "supersededAt": _iso_datetime(getattr(agreement, "superseded_at", None)),
+        "supersededByAgreementId": _id_text(getattr(agreement, "superseded_by_agreement_id", None)),
+    }
+    if include_snapshot:
+        payload["templateSnapshot"] = getattr(agreement, "template_snapshot", None) or {}
+    return payload
 
 
 def _audit_parse_datetime(value: object, field_name: str) -> tuple[Optional[datetime], bool, Optional[JSONResponse]]:
