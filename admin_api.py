@@ -73,6 +73,7 @@ from upload_portal import (
 )
 
 logger = logging.getLogger("uvicorn.error")
+SUBSCRIPTION_RECOVERY_DEBUG_PREFIX = "[billing_subscription_recovery_debug]"
 
 app = FastAPI(title="Admin API")
 UPLOAD_PORTAL_STATIC_ROOT = Path(__file__).resolve().parent / "upload_portal_static"
@@ -5565,6 +5566,71 @@ def _checkout_session_needs_subscription_recovery(session: StripeCheckoutSession
     return _checkout_session_cancel_schedule_status(session) == "pending_checkout_completion"
 
 
+def _short_stripe_id(value: object) -> str:
+    text = _clean_text(value) or ""
+    if len(text) <= 20:
+        return text
+    return f"{text[:12]}...{text[-6:]}"
+
+
+def _stripe_secret_key_mode(stripe_secret_key: str) -> str:
+    if stripe_secret_key.startswith("sk_test"):
+        return "sk_test"
+    if stripe_secret_key.startswith("sk_live"):
+        return "sk_live"
+    return "other/unknown"
+
+
+def _email_domain(value: object) -> str:
+    text = (_clean_text(value) or "").lower()
+    if "@" not in text:
+        return ""
+    return text.rsplit("@", 1)[-1]
+
+
+def _safe_stripe_error_code(error: Exception) -> str:
+    code = _clean_text(getattr(error, "code", None))
+    if code:
+        return code
+    json_body = getattr(error, "json_body", None)
+    if isinstance(json_body, dict):
+        error_body = json_body.get("error")
+        if isinstance(error_body, dict):
+            return _clean_text(error_body.get("code")) or ""
+    return ""
+
+
+def _safe_stripe_error_message(error: Exception, max_length: int = 160) -> str:
+    message = (
+        _clean_text(getattr(error, "user_message", None))
+        or _clean_text(getattr(error, "message", None))
+        or _clean_text(str(error))
+        or ""
+    )
+    if len(message) <= max_length:
+        return message
+    return f"{message[:max_length - 3]}..."
+
+
+def _log_subscription_recovery_candidate(session: StripeCheckoutSession) -> None:
+    logger.info(
+        (
+            "%s recovery_candidate local_session_id=%s stripe_checkout_session_id=%s "
+            "local_status=%s local_payment_status=%s local_mode=%s local_billing_mode=%s "
+            "has_local_subscription_id=%s client_email_domain=%s"
+        ),
+        SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+        _id_text(getattr(session, "id", None)) or "",
+        _short_stripe_id(getattr(session, "stripe_checkout_session_id", None)),
+        _clean_text(getattr(session, "status", None)) or "",
+        _clean_text(getattr(session, "payment_status", None)) or "",
+        _clean_text(getattr(session, "mode", None)) or "",
+        _clean_text(getattr(session, "billing_mode", None)) or "",
+        bool(_clean_text(getattr(session, "stripe_subscription_id", None))),
+        _email_domain(getattr(session, "client_email", None)),
+    )
+
+
 def _stripe_checkout_expire_error_is_not_expirable(error: Exception) -> bool:
     text_parts = [
         str(error),
@@ -8392,12 +8458,31 @@ def _recover_missing_recurring_subscription_sessions(
     sessions: list[StripeCheckoutSession],
 ) -> None:
     stripe_secret_key = os.getenv("STRIPE_SECRET_KEY", "").strip()
+    selected_count = sum(1 for session in sessions if _checkout_session_needs_subscription_recovery(session))
+    logger.info(
+        "%s recovery_scan inspected_count=%s selected_count=%s",
+        SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+        len(sessions),
+        selected_count,
+    )
     if not stripe_secret_key:
+        if selected_count:
+            for session in sessions:
+                if _checkout_session_needs_subscription_recovery(session):
+                    _log_subscription_recovery_candidate(session)
+            logger.warning(
+                "%s recovery_skipped_missing_stripe_key selected_count=%s stripe_key_configured=%s stripe_key_mode=%s",
+                SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+                selected_count,
+                False,
+                "other/unknown",
+            )
         return
 
     for session in sessions:
         if not _checkout_session_needs_subscription_recovery(session):
             continue
+        _log_subscription_recovery_candidate(session)
         try:
             recovered = _recover_recurring_subscription_session(
                 db,
@@ -8410,15 +8495,24 @@ def _recover_missing_recurring_subscription_sessions(
         except stripe.error.StripeError as error:
             db.rollback()
             logger.warning(
-                "[admin_api] recurring subscription recovery Stripe lookup failed checkout_session_id=%s error_type=%s",
-                _clean_text(getattr(session, "stripe_checkout_session_id", None)),
+                (
+                    "%s stripe_lookup_failed local_session_id=%s stripe_checkout_session_id=%s "
+                    "error_type=%s error_code=%s message=%s"
+                ),
+                SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+                _id_text(getattr(session, "id", None)) or "",
+                _short_stripe_id(getattr(session, "stripe_checkout_session_id", None)),
                 error.__class__.__name__,
+                _safe_stripe_error_code(error),
+                _safe_stripe_error_message(error),
             )
         except Exception:
             db.rollback()
             logger.exception(
-                "[admin_api] recurring subscription recovery failed checkout_session_id=%s",
-                _clean_text(getattr(session, "stripe_checkout_session_id", None)),
+                "%s recovery_failed local_session_id=%s stripe_checkout_session_id=%s",
+                SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+                _id_text(getattr(session, "id", None)) or "",
+                _short_stripe_id(getattr(session, "stripe_checkout_session_id", None)),
             )
 
 
@@ -8432,6 +8526,18 @@ def _recover_recurring_subscription_session(
     if not checkout_session_id:
         return False
 
+    local_session_id = _id_text(getattr(local_session, "id", None)) or ""
+    logger.info(
+        (
+            "%s stripe_retrieve_start local_session_id=%s stripe_checkout_session_id=%s "
+            "stripe_key_configured=%s stripe_key_mode=%s"
+        ),
+        SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+        local_session_id,
+        _short_stripe_id(checkout_session_id),
+        bool(stripe_secret_key),
+        _stripe_secret_key_mode(stripe_secret_key),
+    )
     stripe_session = stripe.checkout.Session.retrieve(
         checkout_session_id,
         expand=["subscription", "subscription.latest_invoice"],
@@ -8441,18 +8547,40 @@ def _recover_recurring_subscription_session(
     if not session_data:
         return False
 
-    _apply_checkout_session_data(local_session, session_data, now)
     subscription_value = session_data.get("subscription")
     subscription_id = _stripe_id(subscription_value)
+    logger.info(
+        (
+            "%s stripe_retrieve_success local_session_id=%s stripe_checkout_session_id=%s "
+            "retrieved_status=%s retrieved_payment_status=%s retrieved_mode=%s "
+            "subscription_present=%s stripe_subscription_id=%s subscription_expanded=%s"
+        ),
+        SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+        local_session_id,
+        _short_stripe_id(checkout_session_id),
+        _clean_text(session_data.get("status")) or "",
+        _clean_text(session_data.get("payment_status")) or "",
+        _clean_text(session_data.get("mode")) or "",
+        bool(subscription_id),
+        _short_stripe_id(subscription_id),
+        isinstance(subscription_value, dict),
+    )
+    _apply_checkout_session_data(local_session, session_data, now)
     if not subscription_id:
         logger.info(
-            "[admin_api] recurring subscription recovery found no subscription checkout_session_id=%s status=%s payment_status=%s",
-            checkout_session_id,
+            (
+                "%s stripe_retrieve_no_subscription local_session_id=%s stripe_checkout_session_id=%s "
+                "retrieved_status=%s retrieved_payment_status=%s"
+            ),
+            SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+            local_session_id,
+            _short_stripe_id(checkout_session_id),
             _clean_text(session_data.get("status")),
             _clean_text(session_data.get("payment_status")),
         )
         return True
 
+    previous_local_subscription_id = _clean_text(getattr(local_session, "stripe_subscription_id", None))
     local_session.stripe_subscription_id = subscription_id
     subscription_data = subscription_value if isinstance(subscription_value, dict) else {}
     if not subscription_data:
@@ -8467,6 +8595,11 @@ def _recover_recurring_subscription_session(
 
     cancel_at = _stripe_timestamp_to_datetime(subscription_data.get("cancel_at"))
     cancel_schedule_status = "scheduled" if cancel_at else None
+    existing_subscription_row = (
+        db.query(StripeSubscription.id)
+        .filter(StripeSubscription.stripe_subscription_id == subscription_id)
+        .first()
+    )
     local_subscription = _upsert_stripe_subscription(
         db,
         subscription_data,
@@ -8482,6 +8615,22 @@ def _recover_recurring_subscription_session(
                 "cancelScheduleStatus": "needs_review",
                 "cancelScheduleReason": "subscription_recovery_validation_failed",
             },
+        )
+        logger.info(
+            (
+                "%s subscription_sync_result local_session_id=%s stripe_checkout_session_id=%s "
+                "local_subscription_id_updated=%s subscription_row_action=%s recovered_subscription_status=%s "
+                "latest_payment_status=%s cancel_at_present=%s cancel_schedule_status=%s"
+            ),
+            SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+            local_session_id,
+            _short_stripe_id(checkout_session_id),
+            _clean_text(getattr(local_session, "stripe_subscription_id", None)) != previous_local_subscription_id,
+            "missing",
+            "",
+            "",
+            False,
+            _checkout_session_cancel_schedule_status(local_session),
         )
         return True
 
@@ -8506,9 +8655,27 @@ def _recover_recurring_subscription_session(
 
     _apply_subscription_to_checkout_sessions(db, local_subscription, now)
     logger.info(
-        "[admin_api] recurring subscription recovery synced checkout_session_id=%s subscription_id=%s status=%s",
-        checkout_session_id,
-        subscription_id,
+        (
+            "%s subscription_sync_result local_session_id=%s stripe_checkout_session_id=%s "
+            "local_subscription_id_updated=%s subscription_row_action=%s recovered_subscription_status=%s "
+            "latest_payment_status=%s cancel_at_present=%s cancel_schedule_status=%s"
+        ),
+        SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+        local_session_id,
+        _short_stripe_id(checkout_session_id),
+        _clean_text(getattr(local_session, "stripe_subscription_id", None)) != previous_local_subscription_id,
+        "updated" if existing_subscription_row else "created",
+        _clean_text(getattr(local_subscription, "status", None)) or "",
+        _clean_text(getattr(local_subscription, "latest_payment_status", None)) or "",
+        bool(getattr(local_subscription, "cancel_at", None)),
+        _checkout_session_cancel_schedule_status(local_session),
+    )
+    logger.info(
+        "%s recovery_synced local_session_id=%s stripe_checkout_session_id=%s stripe_subscription_id=%s status=%s",
+        SUBSCRIPTION_RECOVERY_DEBUG_PREFIX,
+        local_session_id,
+        _short_stripe_id(checkout_session_id),
+        _short_stripe_id(subscription_id),
         _clean_text(getattr(local_subscription, "status", None)),
     )
     return True
