@@ -540,18 +540,50 @@ def upload_agreement_file(path: str, content: bytes, content_type: str, *, upser
             "Supabase storage is not configured.",
             status=500,
         )
+    file_options = {"content-type": content_type}
+    if upsert:
+        file_options["upsert"] = "true"
     try:
         client.storage.from_(AGREEMENTS_BUCKET).upload(
             path,
             content,
-            {"content-type": content_type, "upsert": upsert},
+            file_options,
         )
     except Exception as exc:
+        _log_agreement_storage_upload_failure(path, content, content_type, upsert, exc)
         raise AgreementServiceError(
             "agreement_storage_upload_failed",
             "Agreement file upload failed.",
             status=502,
         ) from exc
+
+
+def _log_agreement_storage_upload_failure(
+    path: str,
+    content: bytes,
+    content_type: str,
+    upsert: bool,
+    exc: Exception,
+) -> None:
+    parts = [part for part in str(path or "").split("/") if part]
+    agreement_id = parts[1] if len(parts) >= 2 and parts[0] == "agreements" else None
+    category = parts[-2] if len(parts) >= 2 else "root"
+    basename = parts[-1] if parts else "unknown"
+    error_message = re.sub(r"\s+", " ", str(getattr(exc, "message", None) or exc)).strip()[:240]
+    logger.warning(
+        "[agreements_storage] upload failed agreement_id=%s object=%s/%s content_type=%s extension=%s bytes=%s upsert=%s error_type=%s status=%s code=%s message=%s",
+        agreement_id or "unknown",
+        category,
+        basename,
+        content_type,
+        basename.rsplit(".", 1)[-1] if "." in basename else "unknown",
+        len(content or b""),
+        bool(upsert),
+        type(exc).__name__,
+        getattr(exc, "status", None) or getattr(exc, "status_code", None),
+        getattr(exc, "code", None),
+        error_message,
+    )
 
 
 def download_agreement_file(path: str) -> bytes:
