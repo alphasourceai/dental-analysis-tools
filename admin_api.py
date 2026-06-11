@@ -3105,13 +3105,7 @@ def process_admin_financial_analysis_job(
             or ""
         )
         file_extension = _file_extension(original_filename)
-        if file_extension == ".pdf":
-            return _error_response(
-                400,
-                "unsupported_file_type",
-                "PDF processing will be added later.",
-            )
-        if file_extension not in {".csv", ".xlsx"}:
+        if file_extension not in {".csv", ".xlsx", ".pdf"}:
             return _error_response(
                 400,
                 "unsupported_file_type",
@@ -3200,9 +3194,17 @@ def process_admin_financial_analysis_job(
         if file_extension == ".csv":
             data_input = extract_csv_text(file_bytes)
             source_format = "csv"
-        else:
+        elif file_extension == ".xlsx":
             data_input = extract_xlsx_text(file_bytes)
             source_format = "xlsx"
+        elif file_extension == ".pdf":
+            data_input = extract_pdf_text(file_bytes, enable_ocr=True)
+            source_format = "pdf"
+        else:
+            raise AdminFinancialProcessingError(
+                "unsupported_file_type",
+                "Unsupported financial file type.",
+            )
     except AdminFinancialProcessingError as exc:
         _mark_admin_financial_processing_error(job_uuid, job_file_id, exc.code, exc.message)
         return _error_response(400, exc.code, exc.message)
@@ -3215,9 +3217,15 @@ def process_admin_financial_analysis_job(
         if file_extension == ".csv":
             error_code = "csv_extract_failed"
             error_message = "Unable to extract CSV data."
-        else:
+        elif file_extension == ".xlsx":
             error_code = "xlsx_extract_failed"
             error_message = "Unable to extract XLSX data."
+        elif file_extension == ".pdf":
+            error_code = "pdf_extract_failed"
+            error_message = "Unable to extract Financial PDF text."
+        else:
+            error_code = "unsupported_file_type"
+            error_message = "Unsupported financial file type."
         _mark_admin_financial_processing_error(
             job_uuid,
             job_file_id,
