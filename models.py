@@ -398,6 +398,59 @@ class ConsultingAgreement(Base):
     superseded_at = Column(DateTime(timezone=True), nullable=True)
     superseded_by_agreement_id = Column(PGUUID(as_uuid=True), ForeignKey("consulting_agreements.id"), nullable=True)
 
+# First-party public-site analytics. Event properties are restricted by the API
+# to non-PII interaction data before a row is written.
+class PublicAnalyticsEvent(Base):
+    __tablename__ = "public_analytics_events"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    event_name = Column(Text, nullable=False, index=True)
+    anonymous_id = Column(Text, nullable=True, index=True)
+    session_id = Column(Text, nullable=True, index=True)
+    path = Column(Text, nullable=True, index=True)
+    page_title = Column(Text, nullable=True)
+    referrer_path = Column(Text, nullable=True)
+    utm = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    properties = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    occurred_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+    request_id = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+# First-party public contact-form capture. This is intentionally separate from
+# public analytics events because it contains business contact information.
+class PublicLeadDraft(Base):
+    __tablename__ = "public_lead_drafts"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True)
+    status = Column(Text, nullable=False, index=True)
+    form_id = Column(Text, nullable=True)
+    form_type = Column(Text, nullable=True)
+    product_interest = Column(Text, nullable=True)
+    first_name = Column(Text, nullable=True)
+    last_name = Column(Text, nullable=True)
+    email = Column(Text, nullable=True, index=True)
+    phone = Column(Text, nullable=True)
+    message = Column(Text, nullable=True)
+    fields_completed = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    last_field = Column(Text, nullable=True)
+    source_path = Column(Text, nullable=True, index=True)
+    source_referrer_path = Column(Text, nullable=True)
+    source_cta = Column(Text, nullable=True)
+    utm = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    anonymous_id = Column(Text, nullable=True)
+    session_id = Column(Text, nullable=True)
+    privacy_notice_version = Column(Text, nullable=True)
+    request_id = Column(Text, nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    archived_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    archived_by_user_id = Column(Text, nullable=True)
+    archive_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"), index=True)
+
+
 # Unified admin audit event model
 class AdminAuditEvent(Base):
     __tablename__ = "admin_audit_events"

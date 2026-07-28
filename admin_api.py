@@ -7,7 +7,9 @@ import logging
 import json
 import mimetypes
 import os
-from datetime import datetime, timedelta, timezone
+import re
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, unquote, urlparse
@@ -74,6 +76,8 @@ from models import (
     BillingOverride,
     ClientSubmission,
     ConsultingAgreement,
+    PublicAnalyticsEvent,
+    PublicLeadDraft,
     StripeCheckoutSession,
     StripeCheckoutSessionUpload,
     StripeCustomer,
@@ -107,6 +111,14 @@ UPLOAD_PORTAL_DEFAULT_ALLOWED_ORIGINS = [
     "https://upload.alphasourceai.com",
     "https://alphasourceai.com",
     "https://www.alphasourceai.com",
+]
+PUBLIC_SITE_DEFAULT_ALLOWED_ORIGINS = [
+    "https://alphasourceconsulting.com",
+    "https://www.alphasourceconsulting.com",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
 ]
 
 ADMIN_ANALYSIS_ALLOWED_TOOL_NAMES = {
@@ -151,6 +163,51 @@ ADMIN_AUDIT_METADATA_DENY_KEYS = {
     "token",
     "url",
 }
+
+PUBLIC_ANALYTICS_RATE_WINDOW_SECONDS = 60
+PUBLIC_ANALYTICS_EVENT_RATE_LIMIT = 180
+PUBLIC_ANALYTICS_LEAD_RATE_LIMIT = 30
+PUBLIC_ANALYTICS_MAX_EVENT_QUERY = 5000
+PUBLIC_ANALYTICS_MAX_LEAD_EXPORT_ROWS = 10000
+PUBLIC_ANALYTICS_ALLOWED_EVENTS = {
+    "page_viewed",
+    "cta_clicked",
+    "lead_form_viewed",
+    "lead_form_started",
+    "lead_form_field_completed",
+    "lead_form_submit_attempted",
+    "lead_form_submit_failed",
+    "lead_form_submit_succeeded",
+    "lead_form_abandoned",
+    "lead_draft_saved",
+    "lead_draft_save_failed",
+}
+PUBLIC_ANALYTICS_EVENT_PROPERTIES = {
+    "page_viewed": {"path"},
+    "cta_clicked": {"cta_label", "cta_target", "placement"},
+    "lead_form_viewed": {"form_id", "form_type", "product_interest"},
+    "lead_form_started": {"form_id", "form_type", "product_interest", "first_field"},
+    "lead_form_field_completed": {"form_id", "form_type", "product_interest", "field_name"},
+    "lead_form_submit_attempted": {"form_id", "form_type", "product_interest"},
+    "lead_form_submit_failed": {"form_id", "form_type", "product_interest", "error_type"},
+    "lead_form_submit_succeeded": {"form_id", "form_type", "product_interest"},
+    "lead_form_abandoned": {"form_id", "form_type", "product_interest", "fields_completed"},
+    "lead_draft_saved": {"form_id", "form_type", "product_interest", "status", "fields_completed"},
+    "lead_draft_save_failed": {"form_id", "form_type", "product_interest", "status", "error_type"},
+}
+PUBLIC_ANALYTICS_UTM_KEYS = {
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+}
+PUBLIC_ANALYTICS_SENSITIVE_KEY_RE = re.compile(
+    r"(email|phone|name|message|password|token|secret|auth|authorization|cookie|session|ip|user[_-]?agent)",
+    re.IGNORECASE,
+)
+PUBLIC_ANALYTICS_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,160}$")
+_public_analytics_rate_buckets: dict[str, tuple[float, int]] = {}
 ADMIN_ONE_TIME_OFFER_PAYMENT_LINKS = {
     "practice_opportunity_review": {
         "name": "Practice Opportunity Review",
@@ -193,6 +250,8 @@ PERMISSION_AGREEMENTS_WRITE = "agreements_write"
 PERMISSION_ADMIN_MANAGEMENT_READ = "admin_management_read"
 PERMISSION_ADMIN_MANAGEMENT_WRITE = "admin_management_write"
 PERMISSION_AUDIT_READ = "audit_read"
+PERMISSION_SITE_ANALYTICS_READ = "site_analytics_read"
+PERMISSION_SITE_ANALYTICS_WRITE = "site_analytics_write"
 ADMIN_API_DASHBOARD_ROLES = {"super_admin", "admin", "analyst", "billing_admin", "viewer"}
 ADMIN_API_ALL_PERMISSIONS = {
     PERMISSION_CLIENTS_READ,
@@ -211,6 +270,8 @@ ADMIN_API_ALL_PERMISSIONS = {
     PERMISSION_ADMIN_MANAGEMENT_READ,
     PERMISSION_ADMIN_MANAGEMENT_WRITE,
     PERMISSION_AUDIT_READ,
+    PERMISSION_SITE_ANALYTICS_READ,
+    PERMISSION_SITE_ANALYTICS_WRITE,
 }
 ADMIN_ROLE_PERMISSION_MAP = {
     "super_admin": ADMIN_API_ALL_PERMISSIONS,
@@ -239,11 +300,23 @@ ADMIN_ROLE_PERMISSION_MAP = {
 }
 ADMIN_USER_WRITE_ROLES = set(ADMIN_ROLE_PERMISSION_MAP.keys())
 
-allowed_origins = [
+configured_public_site_origins = [
     origin.strip()
-    for origin in os.getenv("ADMIN_API_ALLOWED_ORIGINS", "").split(",")
+    for origin in os.getenv("PUBLIC_SITE_ALLOWED_ORIGINS", "").split(",")
     if origin.strip()
 ]
+allowed_origins = list(
+    dict.fromkeys(
+        [
+            *[
+                origin.strip()
+                for origin in os.getenv("ADMIN_API_ALLOWED_ORIGINS", "").split(",")
+                if origin.strip()
+            ],
+            *(configured_public_site_origins or PUBLIC_SITE_DEFAULT_ALLOWED_ORIGINS),
+        ]
+    )
+)
 
 if allowed_origins:
     app.add_middleware(
@@ -305,6 +378,189 @@ def _upload_portal_error_response(request: Request, exc: PortalError) -> JSONRes
         request,
         status_code,
         {"error": exc.message, "code": exc.code, "detail": exc.detail},
+    )
+
+
+def _public_site_allowed_origin(origin: Optional[str]) -> Optional[str]:
+    allowlist = configured_public_site_origins
+    if not allowlist:
+        allowlist = PUBLIC_SITE_DEFAULT_ALLOWED_ORIGINS
+    if origin and origin in allowlist:
+        return origin
+    return None
+
+
+def _public_site_origin_allowed(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    return not origin or _public_site_allowed_origin(origin) is not None
+
+
+def _public_site_cors_headers(request: Request) -> dict[str, str]:
+    headers = {
+        "Access-Control-Allow-Headers": "content-type",
+        "Access-Control-Allow-Methods": "POST,OPTIONS",
+        "Cache-Control": "no-store",
+    }
+    allowed_origin = _public_site_allowed_origin(request.headers.get("origin"))
+    if allowed_origin:
+        headers["Access-Control-Allow-Origin"] = allowed_origin
+        headers["Vary"] = "Origin"
+    return headers
+
+
+def _public_site_json_response(request: Request, status_code: int, payload: dict[str, Any]) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content=payload, headers=_public_site_cors_headers(request))
+
+
+async def _public_site_json_body(request: Request) -> tuple[dict[str, Any], Optional[JSONResponse]]:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}, _public_site_json_response(
+            request,
+            400,
+            {"error": {"code": "invalid_json", "message": "Invalid request."}},
+        )
+    if not isinstance(body, dict):
+        return {}, _public_site_json_response(
+            request,
+            400,
+            {"error": {"code": "invalid_json", "message": "Invalid request."}},
+        )
+    return body, None
+
+
+def _public_site_rate_limited(request: Request, *, limit: int) -> bool:
+    client_key = _request_client_ip(request) or "unknown"
+    now = time.monotonic()
+    window_start, count = _public_analytics_rate_buckets.get(client_key, (now, 0))
+    if now - window_start >= PUBLIC_ANALYTICS_RATE_WINDOW_SECONDS:
+        window_start, count = now, 0
+    count += 1
+    _public_analytics_rate_buckets[client_key] = (window_start, count)
+    if len(_public_analytics_rate_buckets) > 5000:
+        cutoff = now - PUBLIC_ANALYTICS_RATE_WINDOW_SECONDS
+        stale_keys = [key for key, (started_at, _) in _public_analytics_rate_buckets.items() if started_at < cutoff]
+        for key in stale_keys:
+            _public_analytics_rate_buckets.pop(key, None)
+    return count > limit
+
+
+def _public_site_trim(value: object, max_length: int = 300) -> str:
+    return str(value or "").replace("\x00", "").strip()[:max_length]
+
+
+def _public_site_path(value: object) -> str:
+    raw = _public_site_trim(value, 600)
+    if not raw:
+        return "/"
+    parsed = urlparse(raw)
+    if parsed.scheme or parsed.netloc:
+        return _public_site_trim(parsed.path or "/external", 300)
+    path = raw.split("?", 1)[0].split("#", 1)[0]
+    if not path.startswith("/"):
+        return "/"
+    return _public_site_trim(path, 300) or "/"
+
+
+def _public_site_identifier(value: object) -> str:
+    candidate = _public_site_trim(value, 160)
+    return candidate if PUBLIC_ANALYTICS_ID_RE.fullmatch(candidate) else ""
+
+
+def _public_site_utm(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        key_text = _public_site_trim(key, 80).lower()
+        if key_text not in PUBLIC_ANALYTICS_UTM_KEYS:
+            continue
+        item_text = _public_site_trim(item, 160)
+        if item_text:
+            result[key_text] = item_text
+    return result
+
+
+def _public_site_event_properties(event_name: str, value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    allowed_keys = PUBLIC_ANALYTICS_EVENT_PROPERTIES.get(event_name, set())
+    result: dict[str, object] = {}
+    for key, item in value.items():
+        key_text = _public_site_trim(key, 80).lower()
+        if key_text not in allowed_keys or PUBLIC_ANALYTICS_SENSITIVE_KEY_RE.search(key_text):
+            continue
+        if key_text == "fields_completed":
+            if not isinstance(item, list):
+                continue
+            values = []
+            for item_value in item[:20]:
+                item_text = _public_site_trim(item_value, 80)
+                if item_text and not PUBLIC_ANALYTICS_SENSITIVE_KEY_RE.search(item_text):
+                    values.append(item_text)
+            result[key_text] = values
+            continue
+        if isinstance(item, bool):
+            result[key_text] = item
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            result[key_text] = item
+        else:
+            item_text = _public_site_trim(item, 180)
+            if item_text:
+                result[key_text] = item_text
+    return result
+
+
+def _public_site_email(value: object) -> str:
+    email = _public_site_trim(value, 254).lower()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        return ""
+    return email
+
+
+def _public_site_lead_fields(value: object, *, status: str) -> tuple[dict[str, str], list[str], Optional[str]]:
+    if not isinstance(value, dict):
+        return {}, [], "Contact details are required."
+    fields = {
+        "first_name": _public_site_trim(value.get("first_name"), 100),
+        "last_name": _public_site_trim(value.get("last_name"), 100),
+        "email": _public_site_email(value.get("email")),
+        "phone": _public_site_trim(value.get("phone"), 40),
+        "message": _public_site_trim(value.get("message"), 2000) if status == "submitted" else "",
+    }
+    phone_digits = re.sub(r"\D+", "", fields["phone"])
+    if status == "submitted" and (not fields["first_name"] or not fields["last_name"] or not fields["email"]):
+        return {}, [], "First name, last name, and a valid email address are required."
+    if status != "submitted" and not fields["email"] and len(phone_digits) < 7:
+        return {}, [], "An email address or phone number is required."
+    return fields, [name for name, item in fields.items() if item], None
+
+
+def _site_analytics_date_range(
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> tuple[datetime, datetime, Optional[JSONResponse]]:
+    today = datetime.now(timezone.utc).date()
+    try:
+        start_value = date.fromisoformat(start_date) if start_date else today - timedelta(days=29)
+        end_value = date.fromisoformat(end_date) if end_date else today
+    except ValueError:
+        return datetime.now(timezone.utc), datetime.now(timezone.utc), _error_response(
+            400,
+            "invalid_date_range",
+            "Dates must use YYYY-MM-DD.",
+        )
+    if start_value > end_value or (end_value - start_value).days > 366:
+        return datetime.now(timezone.utc), datetime.now(timezone.utc), _error_response(
+            400,
+            "invalid_date_range",
+            "Select a date range of up to 366 days.",
+        )
+    return (
+        datetime.combine(start_value, datetime.min.time(), tzinfo=timezone.utc),
+        datetime.combine(end_value + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc),
+        None,
     )
 
 
@@ -487,6 +743,182 @@ async def upload_portal_complete(request: Request) -> JSONResponse:
     return _upload_portal_json_response(request, 200, {"ok": True, "data": result})
 
 
+@app.options("/api/public-analytics/{path:path}")
+async def public_analytics_options(request: Request, path: str) -> Response:
+    del path
+    if not _public_site_origin_allowed(request):
+        return Response(status_code=403, headers=_public_site_cors_headers(request))
+    return Response(status_code=204, headers=_public_site_cors_headers(request))
+
+
+@app.options("/api/public-leads/{path:path}")
+async def public_leads_options(request: Request, path: str) -> Response:
+    del path
+    if not _public_site_origin_allowed(request):
+        return Response(status_code=403, headers=_public_site_cors_headers(request))
+    return Response(status_code=204, headers=_public_site_cors_headers(request))
+
+
+@app.post("/api/public-analytics/events")
+async def record_public_analytics_event(request: Request) -> JSONResponse:
+    if not _public_site_origin_allowed(request):
+        return _public_site_json_response(
+            request,
+            403,
+            {"error": {"code": "forbidden", "message": "Request not accepted."}},
+        )
+    if _public_site_rate_limited(request, limit=PUBLIC_ANALYTICS_EVENT_RATE_LIMIT):
+        return _public_site_json_response(
+            request,
+            429,
+            {"error": {"code": "rate_limited", "message": "Request not accepted."}},
+        )
+
+    body, parse_error = await _public_site_json_body(request)
+    if parse_error:
+        return parse_error
+    event_name = _public_site_trim(body.get("event_name"), 81).lower()
+    if event_name not in PUBLIC_ANALYTICS_ALLOWED_EVENTS:
+        return _public_site_json_response(
+            request,
+            400,
+            {"error": {"code": "invalid_event", "message": "Request not accepted."}},
+        )
+
+    db = SessionLocal()
+    try:
+        db.add(
+            PublicAnalyticsEvent(
+                event_name=event_name,
+                anonymous_id=_public_site_identifier(body.get("anonymous_id")) or None,
+                session_id=_public_site_identifier(body.get("session_id")) or None,
+                path=_public_site_path(body.get("path")),
+                page_title=_public_site_trim(body.get("page_title"), 180) or None,
+                referrer_path=_public_site_path(body.get("referrer_path")),
+                utm=_public_site_utm(body.get("utm")),
+                properties=_public_site_event_properties(event_name, body.get("properties")),
+                occurred_at=datetime.now(timezone.utc),
+                request_id=_public_site_trim(request.headers.get("x-request-id"), 100) or None,
+            )
+        )
+        db.commit()
+        return _public_site_json_response(request, 201, {"ok": True})
+    except Exception:
+        db.rollback()
+        logger.warning("[public_analytics] event storage failed event_name=%s", event_name)
+        return _public_site_json_response(
+            request,
+            503,
+            {"error": {"code": "event_unavailable", "message": "Request not accepted."}},
+        )
+    finally:
+        db.close()
+
+
+@app.post("/api/public-leads/draft")
+async def save_public_lead_draft(request: Request) -> JSONResponse:
+    if not _public_site_origin_allowed(request):
+        return _public_site_json_response(
+            request,
+            403,
+            {"error": {"code": "forbidden", "message": "Request not accepted."}},
+        )
+    if _public_site_rate_limited(request, limit=PUBLIC_ANALYTICS_LEAD_RATE_LIMIT):
+        return _public_site_json_response(
+            request,
+            429,
+            {"error": {"code": "rate_limited", "message": "Please wait a moment and try again."}},
+        )
+
+    body, parse_error = await _public_site_json_body(request)
+    if parse_error:
+        return parse_error
+    try:
+        draft_id = UUID(str(body.get("draft_id") or ""))
+    except (TypeError, ValueError):
+        return _public_site_json_response(
+            request,
+            400,
+            {"error": {"code": "invalid_draft", "message": "Request not accepted."}},
+        )
+    status = _public_site_trim(body.get("status"), 20).lower()
+    if status not in {"partial", "abandoned", "submitted"}:
+        return _public_site_json_response(
+            request,
+            400,
+            {"error": {"code": "invalid_status", "message": "Request not accepted."}},
+        )
+    fields, default_completed, field_error = _public_site_lead_fields(body.get("fields"), status=status)
+    if field_error:
+        return _public_site_json_response(
+            request,
+            400,
+            {"error": {"code": "invalid_contact", "message": field_error}},
+        )
+    source = body.get("source") if isinstance(body.get("source"), dict) else {}
+    provided_fields = body.get("fields_completed") if isinstance(body.get("fields_completed"), list) else default_completed
+    allowed_completed = {"first_name", "last_name", "email", "phone", "message"}
+    fields_completed = [
+        _public_site_trim(item, 40)
+        for item in provided_fields[:20]
+        if _public_site_trim(item, 40) in allowed_completed
+    ]
+    now = datetime.now(timezone.utc)
+    db = SessionLocal()
+    try:
+        lead = db.query(PublicLeadDraft).filter(PublicLeadDraft.id == draft_id).first()
+        if lead is None:
+            lead = PublicLeadDraft(
+                id=draft_id,
+                status=status,
+                created_at=now,
+                expires_at=now + timedelta(days=90),
+            )
+            db.add(lead)
+        elif str(getattr(lead, "status", "")) == "submitted":
+            status = "submitted"
+
+        lead.status = status
+        lead.form_id = _public_site_trim(body.get("form_id"), 100) or None
+        lead.form_type = _public_site_trim(body.get("form_type"), 80) or None
+        lead.product_interest = _public_site_trim(body.get("product_interest"), 160) or None
+        lead.first_name = fields["first_name"] or None
+        lead.last_name = fields["last_name"] or None
+        lead.email = fields["email"] or None
+        lead.phone = fields["phone"] or None
+        if status == "submitted":
+            lead.message = fields["message"] or None
+            lead.submitted_at = getattr(lead, "submitted_at", None) or now
+        lead.fields_completed = list(dict.fromkeys(fields_completed))
+        lead.last_field = _public_site_trim(body.get("last_field"), 40) or None
+        lead.source_path = _public_site_path(source.get("path"))
+        lead.source_referrer_path = _public_site_path(source.get("referrer_path"))
+        lead.source_cta = _public_site_trim(source.get("cta"), 160) or None
+        lead.utm = _public_site_utm(source.get("utm"))
+        lead.anonymous_id = _public_site_identifier(body.get("anonymous_id")) or None
+        lead.session_id = _public_site_identifier(body.get("session_id")) or None
+        lead.privacy_notice_version = _public_site_trim(body.get("privacy_notice_version"), 100) or None
+        lead.request_id = _public_site_trim(request.headers.get("x-request-id"), 100) or None
+        lead.updated_at = now
+        lead.expires_at = now + timedelta(days=90)
+        db.commit()
+        return _public_site_json_response(
+            request,
+            200,
+            {"ok": True, "lead": {"id": str(lead.id), "status": lead.status}},
+        )
+    except Exception:
+        db.rollback()
+        logger.warning("[public_leads] lead storage failed status=%s", status)
+        return _public_site_json_response(
+            request,
+            503,
+            {"error": {"code": "lead_unavailable", "message": "We could not save your request. Please try again."}},
+        )
+    finally:
+        db.close()
+
+
 @app.get("/api/admin/me")
 def get_admin_me(request: Request) -> JSONResponse:
     user, admin_user, error_response = _require_dashboard_access(request)
@@ -644,6 +1076,400 @@ def export_admin_audit_events_csv(
     except Exception:
         logger.exception("[admin_audit] audit event CSV export failed.")
         return _error_response(500, "audit_events_export_failed", "Unable to export audit events.")
+    finally:
+        db.close()
+
+
+def _site_analytics_filtered_events_query(
+    db: Any,
+    *,
+    start_at: datetime,
+    end_at: datetime,
+    path: Optional[str],
+    event_name: Optional[str],
+) -> Any:
+    query = db.query(PublicAnalyticsEvent).filter(PublicAnalyticsEvent.occurred_at >= start_at).filter(
+        PublicAnalyticsEvent.occurred_at < end_at
+    )
+    normalized_path = _public_site_trim(path, 300)
+    if normalized_path:
+        query = query.filter(PublicAnalyticsEvent.path == _public_site_path(normalized_path))
+    normalized_event = _public_site_trim(event_name, 81).lower()
+    if normalized_event:
+        query = query.filter(PublicAnalyticsEvent.event_name == normalized_event)
+    return query
+
+
+def _site_analytics_filtered_leads_query(
+    db: Any,
+    *,
+    start_at: datetime,
+    end_at: datetime,
+    status: Optional[str],
+    archive: str,
+    path: Optional[str],
+) -> Any:
+    query = db.query(PublicLeadDraft).filter(PublicLeadDraft.updated_at >= start_at).filter(
+        PublicLeadDraft.updated_at < end_at
+    )
+    normalized_status = _public_site_trim(status, 20).lower()
+    if normalized_status in {"partial", "abandoned", "submitted"}:
+        query = query.filter(PublicLeadDraft.status == normalized_status)
+    if archive == "active":
+        query = query.filter(PublicLeadDraft.archived_at.is_(None))
+    elif archive == "archived":
+        query = query.filter(PublicLeadDraft.archived_at.is_not(None))
+    normalized_path = _public_site_trim(path, 300)
+    if normalized_path:
+        query = query.filter(PublicLeadDraft.source_path == _public_site_path(normalized_path))
+    return query
+
+
+def _site_analytics_event_payload(row: PublicAnalyticsEvent) -> dict[str, object]:
+    properties = getattr(row, "properties", None)
+    utm = getattr(row, "utm", None)
+    return {
+        "id": _id_text(getattr(row, "id", None)),
+        "eventName": _clean_text(getattr(row, "event_name", None)),
+        "path": _clean_text(getattr(row, "path", None)) or "/",
+        "properties": properties if isinstance(properties, dict) else {},
+        "utm": utm if isinstance(utm, dict) else {},
+        "occurredAt": _iso_datetime(getattr(row, "occurred_at", None)),
+    }
+
+
+def _site_analytics_lead_payload(row: PublicLeadDraft) -> dict[str, object]:
+    first_name = _clean_text(getattr(row, "first_name", None))
+    last_name = _clean_text(getattr(row, "last_name", None))
+    full_name = " ".join(part for part in (first_name, last_name) if part)
+    fields_completed = getattr(row, "fields_completed", None)
+    utm = getattr(row, "utm", None)
+    return {
+        "id": _id_text(getattr(row, "id", None)),
+        "status": _clean_text(getattr(row, "status", None)),
+        "formId": _clean_text(getattr(row, "form_id", None)),
+        "formType": _clean_text(getattr(row, "form_type", None)),
+        "productInterest": _clean_text(getattr(row, "product_interest", None)),
+        "contact": {
+            "fullName": full_name or None,
+            "email": _clean_text(getattr(row, "email", None)) or None,
+            "phone": _clean_text(getattr(row, "phone", None)) or None,
+        },
+        "messagePreview": _public_site_trim(getattr(row, "message", None), 600) or None,
+        "fieldsCompleted": fields_completed if isinstance(fields_completed, list) else [],
+        "lastField": _clean_text(getattr(row, "last_field", None)) or None,
+        "source": {
+            "path": _clean_text(getattr(row, "source_path", None)) or "/",
+            "cta": _clean_text(getattr(row, "source_cta", None)) or None,
+            "utm": utm if isinstance(utm, dict) else {},
+        },
+        "submittedAt": _iso_datetime(getattr(row, "submitted_at", None)),
+        "updatedAt": _iso_datetime(getattr(row, "updated_at", None)),
+        "expiresAt": _iso_datetime(getattr(row, "expires_at", None)),
+        "archived": getattr(row, "archived_at", None) is not None,
+        "archivedAt": _iso_datetime(getattr(row, "archived_at", None)),
+    }
+
+
+@app.get("/api/admin/site-analytics")
+def get_site_analytics(
+    request: Request,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    leadStatus: Optional[str] = None,
+    archive: str = "active",
+    path: Optional[str] = None,
+    eventName: Optional[str] = None,
+    leadLimit: int = Query(50, ge=1),
+    leadOffset: int = Query(0, ge=0),
+) -> JSONResponse:
+    _, _, error_response = _require_admin_permission(request, PERMISSION_SITE_ANALYTICS_READ)
+    if error_response:
+        return error_response
+    start_at, end_at, validation_error = _site_analytics_date_range(startDate, endDate)
+    if validation_error:
+        return validation_error
+    normalized_archive = _public_site_trim(archive, 20).lower() or "active"
+    if normalized_archive not in {"active", "archived", "all"}:
+        return _error_response(400, "invalid_archive_filter", "archive must be active, archived, or all.")
+    normalized_lead_status = _public_site_trim(leadStatus, 20).lower()
+    if normalized_lead_status and normalized_lead_status not in {"partial", "abandoned", "submitted"}:
+        return _error_response(400, "invalid_lead_status", "Unsupported lead status.")
+    normalized_event_name = _public_site_trim(eventName, 81).lower()
+    if normalized_event_name and normalized_event_name not in PUBLIC_ANALYTICS_ALLOWED_EVENTS:
+        return _error_response(400, "invalid_event_name", "Unsupported event name.")
+
+    db = SessionLocal()
+    try:
+        event_query = _site_analytics_filtered_events_query(
+            db,
+            start_at=start_at,
+            end_at=end_at,
+            path=path,
+            event_name=normalized_event_name or None,
+        )
+        lead_query = _site_analytics_filtered_leads_query(
+            db,
+            start_at=start_at,
+            end_at=end_at,
+            status=normalized_lead_status or None,
+            archive=normalized_archive,
+            path=path,
+        )
+        safe_lead_limit = min(leadLimit, 100)
+        lead_rows = lead_query.order_by(PublicLeadDraft.updated_at.desc()).offset(leadOffset).limit(safe_lead_limit + 1).all()
+        leads_has_more = len(lead_rows) > safe_lead_limit
+        lead_rows = lead_rows[:safe_lead_limit]
+
+        event_rows = event_query.order_by(PublicAnalyticsEvent.occurred_at.desc()).limit(PUBLIC_ANALYTICS_MAX_EVENT_QUERY + 1).all()
+        events_sampled = len(event_rows) > PUBLIC_ANALYTICS_MAX_EVENT_QUERY
+        event_rows = event_rows[:PUBLIC_ANALYTICS_MAX_EVENT_QUERY]
+        all_lead_rows = lead_query.order_by(PublicLeadDraft.updated_at.desc()).limit(PUBLIC_ANALYTICS_MAX_EVENT_QUERY + 1).all()
+        leads_sampled = len(all_lead_rows) > PUBLIC_ANALYTICS_MAX_EVENT_QUERY
+        all_lead_rows = all_lead_rows[:PUBLIC_ANALYTICS_MAX_EVENT_QUERY]
+
+        page_activity: dict[str, dict[str, object]] = {}
+        cta_activity: dict[tuple[str, str, str], int] = {}
+        form_activity: dict[tuple[str, str, str], dict[str, int]] = {}
+        event_counts: dict[str, int] = {}
+        page_views = 0
+        cta_clicks = 0
+        for row in event_rows:
+            event = _clean_text(getattr(row, "event_name", None)) or "unknown"
+            event_counts[event] = event_counts.get(event, 0) + 1
+            row_path = _clean_text(getattr(row, "path", None)) or "/"
+            page = page_activity.setdefault(row_path, {"path": row_path, "pageViews": 0, "ctaClicks": 0, "formActivity": 0, "leadCount": 0})
+            properties = getattr(row, "properties", None)
+            properties = properties if isinstance(properties, dict) else {}
+            if event == "page_viewed":
+                page["pageViews"] = int(page["pageViews"]) + 1
+                page_views += 1
+            if event == "cta_clicked":
+                page["ctaClicks"] = int(page["ctaClicks"]) + 1
+                cta_clicks += 1
+                cta_key = (
+                    _public_site_trim(properties.get("cta_label"), 180) or "Unknown CTA",
+                    _public_site_trim(properties.get("placement"), 120) or "Unknown placement",
+                    _public_site_trim(properties.get("cta_target"), 300) or "Unknown target",
+                )
+                cta_activity[cta_key] = cta_activity.get(cta_key, 0) + 1
+            if event.startswith("lead_"):
+                page["formActivity"] = int(page["formActivity"]) + 1
+                form_key = (
+                    _public_site_trim(properties.get("form_id"), 100) or "contact",
+                    _public_site_trim(properties.get("form_type"), 80) or "contact",
+                    _public_site_trim(properties.get("product_interest"), 160) or "Dental consulting",
+                )
+                form_metrics = form_activity.setdefault(form_key, {"viewed": 0, "started": 0, "submitted": 0, "draftSaved": 0, "abandoned": 0})
+                if event == "lead_form_viewed":
+                    form_metrics["viewed"] += 1
+                elif event == "lead_form_started":
+                    form_metrics["started"] += 1
+                elif event == "lead_form_submit_succeeded":
+                    form_metrics["submitted"] += 1
+                elif event == "lead_draft_saved":
+                    form_metrics["draftSaved"] += 1
+                elif event == "lead_form_abandoned":
+                    form_metrics["abandoned"] += 1
+
+        lead_status_counts = {"partial": 0, "abandoned": 0, "submitted": 0}
+        for lead in all_lead_rows:
+            status = _clean_text(getattr(lead, "status", None)).lower()
+            if status in lead_status_counts:
+                lead_status_counts[status] += 1
+            row_path = _clean_text(getattr(lead, "source_path", None)) or "/"
+            page = page_activity.setdefault(row_path, {"path": row_path, "pageViews": 0, "ctaClicks": 0, "formActivity": 0, "leadCount": 0})
+            page["leadCount"] = int(page["leadCount"]) + 1
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "generatedAt": _iso_datetime(datetime.now(timezone.utc)),
+                "dateRange": {"startDate": start_at.date().isoformat(), "endDate": (end_at - timedelta(days=1)).date().isoformat()},
+                "sampled": events_sampled or leads_sampled,
+                "summary": {
+                    "publicAnalyticsEvents": len(event_rows),
+                    "pageViews": page_views,
+                    "ctaClicks": cta_clicks,
+                    "leadCaptures": len(all_lead_rows),
+                    "submittedLeads": lead_status_counts["submitted"],
+                    "partialLeads": lead_status_counts["partial"],
+                    "abandonedLeads": lead_status_counts["abandoned"],
+                },
+                "leads": {
+                    "items": [_site_analytics_lead_payload(row) for row in lead_rows],
+                    "count": len(lead_rows),
+                    "hasMore": leads_has_more,
+                    "offset": leadOffset,
+                },
+                "pageActivity": sorted(page_activity.values(), key=lambda item: int(item["pageViews"]) + int(item["leadCount"]), reverse=True)[:20],
+                "ctaActivity": [
+                    {"label": key[0], "placement": key[1], "target": key[2], "count": count}
+                    for key, count in sorted(cta_activity.items(), key=lambda item: item[1], reverse=True)[:20]
+                ],
+                "formActivity": [
+                    {"formId": key[0], "formType": key[1], "productInterest": key[2], **metrics}
+                    for key, metrics in sorted(form_activity.items(), key=lambda item: item[1]["submitted"], reverse=True)[:20]
+                ],
+                "eventTypes": [
+                    {"eventName": event_name, "count": count}
+                    for event_name, count in sorted(event_counts.items(), key=lambda item: item[1], reverse=True)
+                ],
+                "events": {"items": [_site_analytics_event_payload(row) for row in event_rows[:100]], "count": min(len(event_rows), 100)},
+            }
+        )
+    except Exception:
+        logger.exception("[site_analytics] dashboard lookup failed.")
+        return _error_response(500, "site_analytics_lookup_failed", "Unable to load site analytics.")
+    finally:
+        db.close()
+
+
+@app.get("/api/admin/site-analytics/leads.csv")
+def export_site_analytics_leads_csv(
+    request: Request,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    leadStatus: Optional[str] = None,
+    archive: str = "active",
+    path: Optional[str] = None,
+) -> Response:
+    _, _, error_response = _require_admin_permission(request, PERMISSION_SITE_ANALYTICS_READ)
+    if error_response:
+        return error_response
+    start_at, end_at, validation_error = _site_analytics_date_range(startDate, endDate)
+    if validation_error:
+        return validation_error
+    normalized_archive = _public_site_trim(archive, 20).lower() or "active"
+    if normalized_archive not in {"active", "archived", "all"}:
+        return _error_response(400, "invalid_archive_filter", "archive must be active, archived, or all.")
+    normalized_lead_status = _public_site_trim(leadStatus, 20).lower()
+    if normalized_lead_status and normalized_lead_status not in {"partial", "abandoned", "submitted"}:
+        return _error_response(400, "invalid_lead_status", "Unsupported lead status.")
+
+    db = SessionLocal()
+    try:
+        rows = (
+            _site_analytics_filtered_leads_query(
+                db,
+                start_at=start_at,
+                end_at=end_at,
+                status=normalized_lead_status or None,
+                archive=normalized_archive,
+                path=path,
+            )
+            .order_by(PublicLeadDraft.updated_at.desc())
+            .limit(PUBLIC_ANALYTICS_MAX_LEAD_EXPORT_ROWS)
+            .all()
+        )
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["status", "first_name", "last_name", "email", "phone", "message", "product_interest", "source_path", "source_cta", "submitted_at", "updated_at", "archived_at"])
+        for row in rows:
+            writer.writerow(
+                [
+                    _audit_csv_cell(getattr(row, "status", None)),
+                    _audit_csv_cell(getattr(row, "first_name", None)),
+                    _audit_csv_cell(getattr(row, "last_name", None)),
+                    _audit_csv_cell(getattr(row, "email", None)),
+                    _audit_csv_cell(getattr(row, "phone", None)),
+                    _audit_csv_cell(getattr(row, "message", None)),
+                    _audit_csv_cell(getattr(row, "product_interest", None)),
+                    _audit_csv_cell(getattr(row, "source_path", None)),
+                    _audit_csv_cell(getattr(row, "source_cta", None)),
+                    _audit_csv_cell(_iso_datetime(getattr(row, "submitted_at", None))),
+                    _audit_csv_cell(_iso_datetime(getattr(row, "updated_at", None))),
+                    _audit_csv_cell(_iso_datetime(getattr(row, "archived_at", None))),
+                ]
+            )
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="site-leads.csv"'},
+        )
+    except Exception:
+        logger.exception("[site_analytics] lead CSV export failed.")
+        return _error_response(500, "site_analytics_export_failed", "Unable to export leads.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/site-analytics/leads/{lead_id}/archive")
+async def archive_site_analytics_lead(lead_id: str, request: Request) -> JSONResponse:
+    current_user, current_admin_access, error_response = _require_admin_permission(request, PERMISSION_SITE_ANALYTICS_WRITE)
+    if error_response:
+        return error_response
+    try:
+        lead_uuid = UUID(lead_id)
+    except (TypeError, ValueError):
+        return _error_response(400, "invalid_lead_id", "Lead ID is invalid.")
+    body, parse_error = await _request_json_body(request)
+    if parse_error:
+        return parse_error
+
+    db = SessionLocal()
+    try:
+        lead = db.query(PublicLeadDraft).filter(PublicLeadDraft.id == lead_uuid).first()
+        if not lead:
+            return _error_response(404, "lead_not_found", "Lead capture was not found.")
+        lead.archived_at = datetime.now(timezone.utc)
+        lead.archived_by_user_id = _clean_text(current_user.get("id")) or None
+        lead.archive_reason = _public_site_trim(body.get("reason"), 300) or None
+        lead.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        _record_admin_audit_event(
+            db,
+            request,
+            "site_lead.archived",
+            target_type="public_lead",
+            target_id=lead.id,
+            metadata={"status": _clean_text(getattr(lead, "status", None))},
+            admin_auth_user=current_user,
+            admin_access=current_admin_access,
+        )
+        return JSONResponse({"ok": True, "lead": _site_analytics_lead_payload(lead)})
+    except Exception:
+        db.rollback()
+        logger.exception("[site_analytics] lead archive failed lead_id=%s", lead_id)
+        return _error_response(500, "site_lead_archive_failed", "Unable to archive lead capture.")
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/site-analytics/leads/{lead_id}/unarchive")
+async def unarchive_site_analytics_lead(lead_id: str, request: Request) -> JSONResponse:
+    current_user, current_admin_access, error_response = _require_admin_permission(request, PERMISSION_SITE_ANALYTICS_WRITE)
+    if error_response:
+        return error_response
+    try:
+        lead_uuid = UUID(lead_id)
+    except (TypeError, ValueError):
+        return _error_response(400, "invalid_lead_id", "Lead ID is invalid.")
+    db = SessionLocal()
+    try:
+        lead = db.query(PublicLeadDraft).filter(PublicLeadDraft.id == lead_uuid).first()
+        if not lead:
+            return _error_response(404, "lead_not_found", "Lead capture was not found.")
+        lead.archived_at = None
+        lead.archived_by_user_id = None
+        lead.archive_reason = None
+        lead.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        _record_admin_audit_event(
+            db,
+            request,
+            "site_lead.unarchived",
+            target_type="public_lead",
+            target_id=lead.id,
+            metadata={"status": _clean_text(getattr(lead, "status", None))},
+            admin_auth_user=current_user,
+            admin_access=current_admin_access,
+        )
+        return JSONResponse({"ok": True, "lead": _site_analytics_lead_payload(lead)})
+    except Exception:
+        db.rollback()
+        logger.exception("[site_analytics] lead unarchive failed lead_id=%s", lead_id)
+        return _error_response(500, "site_lead_unarchive_failed", "Unable to restore lead capture.")
     finally:
         db.close()
 
@@ -10622,6 +11448,8 @@ def _admin_permissions_payload(admin_user: Optional[AdminUser]) -> dict[str, boo
         "canReadAdminManagement": _admin_has_permission(admin_user, PERMISSION_ADMIN_MANAGEMENT_READ),
         "canManageAdminAccess": _admin_has_permission(admin_user, PERMISSION_ADMIN_MANAGEMENT_WRITE),
         "canReadAudit": _admin_has_permission(admin_user, PERMISSION_AUDIT_READ),
+        "canReadSiteAnalytics": _admin_has_permission(admin_user, PERMISSION_SITE_ANALYTICS_READ),
+        "canManageSiteAnalytics": _admin_has_permission(admin_user, PERMISSION_SITE_ANALYTICS_WRITE),
     }
 
 
