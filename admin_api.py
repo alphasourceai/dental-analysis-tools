@@ -207,6 +207,16 @@ PUBLIC_ANALYTICS_SENSITIVE_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 PUBLIC_ANALYTICS_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,160}$")
+PUBLIC_ANALYTICS_AI_REFERRERS = (
+    (("chatgpt.com", "chat.openai.com", "openai.com"), "ChatGPT / OpenAI"),
+    (("perplexity.ai",), "Perplexity"),
+    (("gemini.google.com", "bard.google.com"), "Google Gemini"),
+    (("claude.ai",), "Claude"),
+    (("copilot.microsoft.com",), "Microsoft Copilot"),
+    (("meta.ai",), "Meta AI"),
+    (("you.com",), "You.com"),
+    (("phind.com",), "Phind"),
+)
 _public_analytics_rate_buckets: dict[str, tuple[float, int]] = {}
 ADMIN_ONE_TIME_OFFER_PAYMENT_LINKS = {
     "practice_opportunity_review": {
@@ -461,6 +471,47 @@ def _public_site_path(value: object) -> str:
     if not path.startswith("/"):
         return "/"
     return _public_site_trim(path, 300) or "/"
+
+
+def _public_site_host(value: object) -> str:
+    raw = _public_site_trim(value, 600).lower()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw if "://" in raw or raw.startswith("//") else f"//{raw}")
+        host = (parsed.hostname or "").rstrip(".")
+    except (TypeError, ValueError):
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+    if (
+        not host
+        or len(host) > 253
+        or ".." in host
+        or not re.fullmatch(r"[a-z0-9.-]+", host)
+    ):
+        return ""
+    return host
+
+
+def _public_site_host_matches(host: str, domain: str) -> bool:
+    return host == domain or host.endswith(f".{domain}")
+
+
+def _public_site_referrer_source(value: object) -> tuple[str, bool]:
+    host = _public_site_host(value)
+    if not host or _public_site_host_matches(host, "alphasourceconsulting.com"):
+        return "Direct / internal", False
+    for domains, label in PUBLIC_ANALYTICS_AI_REFERRERS:
+        if any(_public_site_host_matches(host, domain) for domain in domains):
+            return label, True
+    if _public_site_host_matches(host, "google.com") or host.startswith("google."):
+        return "Google Search", False
+    if _public_site_host_matches(host, "bing.com"):
+        return "Bing Search", False
+    if _public_site_host_matches(host, "linkedin.com"):
+        return "LinkedIn", False
+    return host, False
 
 
 def _public_site_identifier(value: object) -> str:
@@ -795,6 +846,7 @@ async def record_public_analytics_event(request: Request) -> JSONResponse:
                 path=_public_site_path(body.get("path")),
                 page_title=_public_site_trim(body.get("page_title"), 180) or None,
                 referrer_path=_public_site_path(body.get("referrer_path")),
+                referrer_host=_public_site_host(body.get("referrer_host")) or None,
                 utm=_public_site_utm(body.get("utm")),
                 properties=_public_site_event_properties(event_name, body.get("properties")),
                 occurred_at=datetime.now(timezone.utc),
@@ -893,6 +945,7 @@ async def save_public_lead_draft(request: Request) -> JSONResponse:
         lead.last_field = _public_site_trim(body.get("last_field"), 40) or None
         lead.source_path = _public_site_path(source.get("path"))
         lead.source_referrer_path = _public_site_path(source.get("referrer_path"))
+        lead.source_referrer_host = _public_site_host(source.get("referrer_host")) or None
         lead.source_cta = _public_site_trim(source.get("cta"), 160) or None
         lead.utm = _public_site_utm(source.get("utm"))
         lead.anonymous_id = _public_site_identifier(body.get("anonymous_id")) or None
@@ -1128,12 +1181,16 @@ def _site_analytics_filtered_leads_query(
 def _site_analytics_event_payload(row: PublicAnalyticsEvent) -> dict[str, object]:
     properties = getattr(row, "properties", None)
     utm = getattr(row, "utm", None)
+    referrer_host = _public_site_host(getattr(row, "referrer_host", None))
+    referrer_source, _ = _public_site_referrer_source(referrer_host)
     return {
         "id": _id_text(getattr(row, "id", None)),
         "eventName": _clean_text(getattr(row, "event_name", None)),
         "path": _clean_text(getattr(row, "path", None)) or "/",
         "properties": properties if isinstance(properties, dict) else {},
         "utm": utm if isinstance(utm, dict) else {},
+        "referrerHost": referrer_host or None,
+        "referrerSource": referrer_source,
         "occurredAt": _iso_datetime(getattr(row, "occurred_at", None)),
     }
 
@@ -1144,6 +1201,8 @@ def _site_analytics_lead_payload(row: PublicLeadDraft) -> dict[str, object]:
     full_name = " ".join(part for part in (first_name, last_name) if part)
     fields_completed = getattr(row, "fields_completed", None)
     utm = getattr(row, "utm", None)
+    referrer_host = _public_site_host(getattr(row, "source_referrer_host", None))
+    referrer_source, _ = _public_site_referrer_source(referrer_host)
     return {
         "id": _id_text(getattr(row, "id", None)),
         "status": _clean_text(getattr(row, "status", None)),
@@ -1162,6 +1221,8 @@ def _site_analytics_lead_payload(row: PublicLeadDraft) -> dict[str, object]:
             "path": _clean_text(getattr(row, "source_path", None)) or "/",
             "cta": _clean_text(getattr(row, "source_cta", None)) or None,
             "utm": utm if isinstance(utm, dict) else {},
+            "referrerHost": referrer_host or None,
+            "referrerSource": referrer_source,
         },
         "submittedAt": _iso_datetime(getattr(row, "submitted_at", None)),
         "updatedAt": _iso_datetime(getattr(row, "updated_at", None)),
@@ -1231,9 +1292,11 @@ def get_site_analytics(
         page_activity: dict[str, dict[str, object]] = {}
         cta_activity: dict[tuple[str, str, str], int] = {}
         form_activity: dict[tuple[str, str, str], dict[str, int]] = {}
+        referrer_activity: dict[tuple[str, str], dict[str, object]] = {}
         event_counts: dict[str, int] = {}
         page_views = 0
         cta_clicks = 0
+        ai_referrals = 0
         for row in event_rows:
             event = _clean_text(getattr(row, "event_name", None)) or "unknown"
             event_counts[event] = event_counts.get(event, 0) + 1
@@ -1244,6 +1307,21 @@ def get_site_analytics(
             if event == "page_viewed":
                 page["pageViews"] = int(page["pageViews"]) + 1
                 page_views += 1
+                referrer_host = _public_site_host(getattr(row, "referrer_host", None))
+                referrer_source, is_ai_referrer = _public_site_referrer_source(referrer_host)
+                referrer_key = (referrer_source, referrer_host)
+                referrer = referrer_activity.setdefault(
+                    referrer_key,
+                    {
+                        "source": referrer_source,
+                        "host": referrer_host or None,
+                        "count": 0,
+                        "isAi": is_ai_referrer,
+                    },
+                )
+                referrer["count"] = int(referrer["count"]) + 1
+                if is_ai_referrer:
+                    ai_referrals += 1
             if event == "cta_clicked":
                 page["ctaClicks"] = int(page["ctaClicks"]) + 1
                 cta_clicks += 1
@@ -1290,6 +1368,7 @@ def get_site_analytics(
                 "summary": {
                     "publicAnalyticsEvents": len(event_rows),
                     "pageViews": page_views,
+                    "aiReferrals": ai_referrals,
                     "ctaClicks": cta_clicks,
                     "leadCaptures": len(all_lead_rows),
                     "submittedLeads": lead_status_counts["submitted"],
@@ -1303,6 +1382,11 @@ def get_site_analytics(
                     "offset": leadOffset,
                 },
                 "pageActivity": sorted(page_activity.values(), key=lambda item: int(item["pageViews"]) + int(item["leadCount"]), reverse=True)[:20],
+                "referrerActivity": sorted(
+                    referrer_activity.values(),
+                    key=lambda item: int(item["count"]),
+                    reverse=True,
+                )[:20],
                 "ctaActivity": [
                     {"label": key[0], "placement": key[1], "target": key[2], "count": count}
                     for key, count in sorted(cta_activity.items(), key=lambda item: item[1], reverse=True)[:20]
@@ -1364,8 +1448,10 @@ def export_site_analytics_leads_csv(
         )
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["status", "first_name", "last_name", "email", "phone", "message", "product_interest", "source_path", "source_cta", "submitted_at", "updated_at", "archived_at"])
+        writer.writerow(["status", "first_name", "last_name", "email", "phone", "message", "product_interest", "source_path", "referrer_source", "referrer_host", "source_cta", "submitted_at", "updated_at", "archived_at"])
         for row in rows:
+            referrer_host = _public_site_host(getattr(row, "source_referrer_host", None))
+            referrer_source, _ = _public_site_referrer_source(referrer_host)
             writer.writerow(
                 [
                     _audit_csv_cell(getattr(row, "status", None)),
@@ -1376,6 +1462,8 @@ def export_site_analytics_leads_csv(
                     _audit_csv_cell(getattr(row, "message", None)),
                     _audit_csv_cell(getattr(row, "product_interest", None)),
                     _audit_csv_cell(getattr(row, "source_path", None)),
+                    _audit_csv_cell(referrer_source),
+                    _audit_csv_cell(referrer_host),
                     _audit_csv_cell(getattr(row, "source_cta", None)),
                     _audit_csv_cell(_iso_datetime(getattr(row, "submitted_at", None))),
                     _audit_csv_cell(_iso_datetime(getattr(row, "updated_at", None))),
