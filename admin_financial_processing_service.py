@@ -11,6 +11,13 @@ from difflib import SequenceMatcher
 from io import BytesIO, StringIO
 from typing import Any, Callable, Optional
 
+from admin_analysis_agent_pipeline import (
+    investigate_root_causes,
+    resolve_recommendations,
+    retrieve_evidence,
+    supervise,
+    verify_candidate,
+)
 from supabase_utils import _get_supabase_admin_client
 
 logger = logging.getLogger("uvicorn.error")
@@ -46,6 +53,7 @@ ADMIN_ANALYSIS_PROVIDER_MODE_XAI_ONLY = "xai_only"
 ADMIN_ANALYSIS_PROVIDER_MODE_DEEP_REVIEW = "deep_review"
 ADMIN_ANALYSIS_PROVIDER_MODE_DEFAULT = ADMIN_ANALYSIS_PROVIDER_MODE_XAI_ONLY
 ADMIN_ANALYSIS_PROVIDER_ORDER = ("openai", "xai", "anthropic")
+ADMIN_ANALYSIS_PIPELINE_MODE_ENV = "ADMIN_ANALYSIS_PIPELINE_MODE"
 
 CancelChecker = Callable[[], bool]
 
@@ -267,6 +275,9 @@ def run_financial_csv_analysis(
 ) -> dict[str, Any]:
     _raise_if_canceled(cancel_checker)
     normalized_tool_type = _normalize_tool_type(tool_type)
+    agentic_mode = os.getenv(ADMIN_ANALYSIS_PIPELINE_MODE_ENV, "legacy").strip().lower() == "agentic"
+    plan = supervise(normalized_tool_type, source_format, data_input) if agentic_mode else None
+    evidence_index = retrieve_evidence(plan) if plan else None
     model_labels = _get_model_labels()
     provider_specs = [
         ("openai", "OpenAI Analysis", "openai", _openai_analysis),
@@ -343,8 +354,45 @@ def run_financial_csv_analysis(
         provider_structured_outputs,
         normalized_tool_type,
     )
+    verification = None
+    agentic_review = None
+    if plan and evidence_index:
+        _raise_if_canceled(cancel_checker)
+        root_causes = investigate_root_causes(structured_analysis)
+        recommendations = resolve_recommendations(structured_analysis, root_causes)
+        verification = verify_candidate(
+            plan,
+            structured_analysis,
+            evidence_index,
+            root_causes,
+            recommendations,
+            additional_outputs=[
+                [
+                    {key: issue.get(key) for key in ("title", "impact", "recommendation")}
+                    for issue in deduplicated_issues
+                ],
+                [trend.get("text") for trend in all_trends],
+            ],
+        )
+        if not verification["approved"]:
+            logger.warning(
+                "[admin_analysis] verifier rejected tool=%s checks=%s findings_checked=%s",
+                normalized_tool_type,
+                verification["checks"],
+                verification["findings_checked"],
+            )
+            raise AdminFinancialProcessingError(
+                "analysis_verification_failed",
+                "The analysis could not be verified against the supplied file. No result was saved.",
+            )
+        agentic_review = {
+            "schemaVersion": "internal_agentic_review_v1",
+            "rootCauses": root_causes,
+            "recommendations": recommendations,
+            "consultantReviewRequired": True,
+        }
 
-    return {
+    result = {
         "sourceFormat": source_format,
         "toolType": normalized_tool_type,
         "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -359,6 +407,11 @@ def run_financial_csv_analysis(
         "deduplicated_issues": deduplicated_issues,
         "total_issue_count": len(deduplicated_issues),
     }
+    if verification is not None:
+        result["analysisPipelineMode"] = "agentic"
+        result["agentic_verification"] = verification
+        result["agentic_review"] = agentic_review
+    return result
 
 
 def parse_issues_from_analysis(analysis_text: str, source_model: str) -> list[dict[str, Any]]:
@@ -523,11 +576,14 @@ def _strip_json_fence(value: str) -> str:
 
 def _normalize_structured_analysis(value: dict[str, Any], tool_type: str) -> dict[str, Any]:
     normalized_tool_type = _normalize_tool_type(value.get("toolType") or tool_type)
+    strict_confidence = os.getenv(ADMIN_ANALYSIS_PIPELINE_MODE_ENV, "legacy").strip().lower() == "agentic"
     return {
         "schemaVersion": STRUCTURED_ANALYSIS_SCHEMA_VERSION,
         "toolType": normalized_tool_type,
         "executiveSummary": _normalize_executive_summary(value.get("executiveSummary")),
-        "rankedFindings": _normalize_ranked_findings(value.get("rankedFindings")),
+        "rankedFindings": _normalize_ranked_findings(
+            value.get("rankedFindings"), strict_confidence=strict_confidence
+        ),
         "dataQualityNotes": _normalize_structured_text_list(value.get("dataQualityNotes")),
         "implementationPriorities": _normalize_structured_text_list(value.get("implementationPriorities")),
         "consultantChecklist": _normalize_structured_text_list(value.get("consultantChecklist")),
@@ -544,7 +600,7 @@ def _normalize_executive_summary(value: Any) -> dict[str, str]:
     }
 
 
-def _normalize_ranked_findings(value: Any) -> list[dict[str, Any]]:
+def _normalize_ranked_findings(value: Any, *, strict_confidence: bool = False) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
 
@@ -559,8 +615,7 @@ def _normalize_ranked_findings(value: Any) -> list[dict[str, Any]]:
         if not any((title, operational_implication, recommended_action, client_summary)):
             continue
 
-        findings.append(
-            {
+        finding = {
                 "rank": _structured_rank(item.get("rank"), index),
                 "title": title,
                 "category": _structured_text(item.get("category"), max_chars=MAX_STRUCTURED_SHORT_TEXT_CHARS),
@@ -572,7 +627,7 @@ def _normalize_ranked_findings(value: Any) -> list[dict[str, Any]]:
                 "confidence": _structured_choice(
                     item.get("confidence"),
                     {"low", "medium", "high"},
-                    "medium",
+                    "" if strict_confidence else "medium",
                 ),
                 "evidence": _normalize_structured_evidence(item.get("evidence")),
                 "financialValue": _structured_text(item.get("financialValue"), max_chars=MAX_STRUCTURED_SHORT_TEXT_CHARS),
@@ -598,8 +653,12 @@ def _normalize_ranked_findings(value: Any) -> list[dict[str, Any]]:
                 ),
                 "clientFacingSummary": client_summary,
                 "internalReviewerNotes": _structured_text(item.get("internalReviewerNotes")),
-            }
-        )
+        }
+        if "rootCauseHypothesis" in item:
+            finding["rootCauseHypothesis"] = _structured_text(
+                item.get("rootCauseHypothesis")
+            )
+        findings.append(finding)
     return findings
 
 
@@ -959,7 +1018,9 @@ def _normalize_tool_type(tool_type: object) -> str:
 
 def _get_analysis_prompt(tool_type: str = "financial") -> str:
     normalized_tool_type = _normalize_tool_type(tool_type)
-    return f"""You are an expert dental operations consultant with deep knowledge of practice management, revenue cycle, and operational efficiency.
+    agentic_mode = os.getenv(ADMIN_ANALYSIS_PIPELINE_MODE_ENV, "legacy").strip().lower() == "agentic"
+    root_cause_schema_field = '      "rootCauseHypothesis": "",\n' if agentic_mode else ""
+    prompt = f"""You are an expert dental operations consultant with deep knowledge of practice management, revenue cycle, and operational efficiency.
 
 IMPORTANT FORMATTING RULES:
 - Use PLAIN TEXT only - no LaTeX, no math formatting, no special markup
@@ -1027,7 +1088,7 @@ After the plain-text sections, include exactly one JSON object between these mar
       ],
       "financialValue": "",
       "operationalImplication": "",
-      "recommendedAction": "",
+{root_cause_schema_field}      "recommendedAction": "",
       "followUpQuestion": "",
       "implementationDifficulty": "low | medium | high",
       "estimatedImpactCategory": "cash_flow | revenue_leakage | workflow_efficiency | growth | compliance | data_quality",
@@ -1047,6 +1108,18 @@ Structured JSON rules:
 - Keep evidence metric-based and concise; do not include raw extracted rows, raw document text, PHI, filenames, storage paths, signed URLs, tokens, or secrets.
 - Separate client-facing wording from internal reviewer notes.
 - Rank findings by operational urgency and review value."""
+    if agentic_mode:
+        prompt += """
+
+Agentic review fields for each rankedFinding:
+- Add "rootCauseHypothesis" as a string describing a possible cause only when the supplied evidence supports that hypothesis. Do not state an inference as an observed fact.
+- If the cause cannot be determined from the supplied file, use an empty rootCauseHypothesis and provide a specific followUpQuestion for the consultant.
+- Keep recommendedAction tied to that finding's cited evidence and proposed cause or unresolved question. Do not claim an action was performed.
+- Every evidence value must appear in the supplied file. Do not invent measurements, calculations, or citations.
+- Across the structured JSON and plain-text issues/trends, use a number only if that exact numeric value appears in the supplied file. Do not invent timelines or financial estimates.
+- Never include patient names, direct identifiers, or patient-specific details in findings or recommendations.
+- These are internal draft hypotheses and actions requiring consultant review."""
+    return prompt
 
 
 def _tool_specific_prompt_focus(tool_type: str) -> str:

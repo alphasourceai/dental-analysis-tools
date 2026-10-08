@@ -33,6 +33,7 @@ from admin_financial_processing_service import (
     extract_xlsx_text,
     run_financial_csv_analysis,
 )
+from admin_analysis_agent_pipeline import numeric_claims_supported
 from admin_pdf_generator_service import (
     cleanup_pdf_report,
     create_report_signed_url,
@@ -3964,7 +3965,7 @@ def process_admin_financial_analysis_job(
             )
 
         job_file = financial_files[0]
-        retrying_storage_download = False
+        retrying_processing_error = False
         if status == "error":
             job_error_code = _clean_text(getattr(job, "error_code", None))
             job_file_error_code = _clean_text(getattr(job_file, "error_code", None))
@@ -3972,18 +3973,22 @@ def process_admin_financial_analysis_job(
                 _clean_text(getattr(job_file, "analysis_data", None))
                 or getattr(job_file, "upload_id", None)
             )
-            retrying_storage_download = (
-                job_error_code == "storage_download_failed"
+            retrying_processing_error = (
+                job_error_code in {"storage_download_failed", "analysis_verification_failed"}
                 and (
-                    job_file_error_code == "storage_download_failed"
+                    job_error_code != "analysis_verification_failed"
+                    or os.getenv("ADMIN_ANALYSIS_PIPELINE_MODE", "legacy").strip().lower() == "agentic"
+                )
+                and (
+                    job_file_error_code in {"storage_download_failed", "analysis_verification_failed"}
                     or not job_file_has_output
                 )
             )
-            if not retrying_storage_download:
+            if not retrying_processing_error:
                 return _error_response(
                     409,
                     "invalid_job_status",
-                    "Only storage download failures can be retried from error status.",
+                    "Only storage download or analysis verification failures can be retried from error status.",
                 )
         elif status not in {"queued", "processing"}:
             return _error_response(
@@ -4044,8 +4049,8 @@ def process_admin_financial_analysis_job(
         job.status = "processing"
         job.progress_percent = max(_optional_int(getattr(job, "progress_percent", None)) or 0, 20)
         job.current_step = (
-            "Retrying financial file download"
-            if retrying_storage_download
+            "Retrying financial analysis"
+            if retrying_processing_error
             else "Downloading financial file"
         )
         if not getattr(job, "started_at", None):
@@ -4293,7 +4298,7 @@ def process_admin_ar_analysis_job(
             return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
 
         job_file = ar_files[0]
-        retrying_storage_download = False
+        retrying_processing_error = False
         if status == "error":
             job_error_code = _clean_text(getattr(job, "error_code", None))
             job_file_error_code = _clean_text(getattr(job_file, "error_code", None))
@@ -4301,18 +4306,22 @@ def process_admin_ar_analysis_job(
                 _clean_text(getattr(job_file, "analysis_data", None))
                 or getattr(job_file, "upload_id", None)
             )
-            retrying_storage_download = (
-                job_error_code == "storage_download_failed"
+            retrying_processing_error = (
+                job_error_code in {"storage_download_failed", "analysis_verification_failed"}
                 and (
-                    job_file_error_code == "storage_download_failed"
+                    job_error_code != "analysis_verification_failed"
+                    or os.getenv("ADMIN_ANALYSIS_PIPELINE_MODE", "legacy").strip().lower() == "agentic"
+                )
+                and (
+                    job_file_error_code in {"storage_download_failed", "analysis_verification_failed"}
                     or not job_file_has_output
                 )
             )
-            if not retrying_storage_download:
+            if not retrying_processing_error:
                 return _error_response(
                     409,
                     "invalid_job_status",
-                    "Only storage download failures can be retried from error status.",
+                    "Only storage download or analysis verification failures can be retried from error status.",
                 )
         elif status not in {"queued", "processing"}:
             return _error_response(
@@ -4373,8 +4382,8 @@ def process_admin_ar_analysis_job(
         job.status = "processing"
         job.progress_percent = max(_optional_int(getattr(job, "progress_percent", None)) or 0, 20)
         job.current_step = (
-            "Retrying AR file download"
-            if retrying_storage_download
+            "Retrying AR analysis"
+            if retrying_processing_error
             else "Downloading AR file"
         )
         if not getattr(job, "started_at", None):
@@ -4627,7 +4636,7 @@ def process_admin_claims_analysis_job(
             return JSONResponse({"ok": True, "job": _admin_analysis_job_payload(job, files)})
 
         job_file = claims_files[0]
-        retrying_storage_download = False
+        retrying_processing_error = False
         if status == "error":
             job_error_code = _clean_text(getattr(job, "error_code", None))
             job_file_error_code = _clean_text(getattr(job_file, "error_code", None))
@@ -4635,18 +4644,22 @@ def process_admin_claims_analysis_job(
                 _clean_text(getattr(job_file, "analysis_data", None))
                 or getattr(job_file, "upload_id", None)
             )
-            retrying_storage_download = (
-                job_error_code == "storage_download_failed"
+            retrying_processing_error = (
+                job_error_code in {"storage_download_failed", "analysis_verification_failed"}
                 and (
-                    job_file_error_code == "storage_download_failed"
+                    job_error_code != "analysis_verification_failed"
+                    or os.getenv("ADMIN_ANALYSIS_PIPELINE_MODE", "legacy").strip().lower() == "agentic"
+                )
+                and (
+                    job_file_error_code in {"storage_download_failed", "analysis_verification_failed"}
                     or not job_file_has_output
                 )
             )
-            if not retrying_storage_download:
+            if not retrying_processing_error:
                 return _error_response(
                     409,
                     "invalid_job_status",
-                    "Only storage download failures can be retried from error status.",
+                    "Only storage download or analysis verification failures can be retried from error status.",
                 )
         elif status not in {"queued", "processing"}:
             return _error_response(
@@ -4707,8 +4720,8 @@ def process_admin_claims_analysis_job(
         job.status = "processing"
         job.progress_percent = max(_optional_int(getattr(job, "progress_percent", None)) or 0, 20)
         job.current_step = (
-            "Retrying Claims file download"
-            if retrying_storage_download
+            "Retrying Claims analysis"
+            if retrying_processing_error
             else "Downloading Claims file"
         )
         if not getattr(job, "started_at", None):
@@ -5423,6 +5436,24 @@ async def generate_admin_pdf_report(request: Request) -> JSONResponse:
                 "analysis_data_unavailable",
                 "Upload analysis data is missing or unreadable.",
             )
+        agentic_verification = analysis_payload.get("agentic_verification")
+        if analysis_payload.get("analysisPipelineMode") == "agentic" or agentic_verification is not None:
+            if not isinstance(agentic_verification, dict) or agentic_verification.get("approved") is not True:
+                return _error_response(409, "analysis_verification_required", "This analysis must pass verification before report generation.")
+            stored_issues = analysis_payload.get("deduplicated_issues")
+            stored_trends = analysis_payload.get("all_trends")
+            verified_content = [
+                analysis_payload.get("structured_analysis"),
+                [
+                    {key: issue.get(key) for key in ("title", "impact", "recommendation")}
+                    for issue in (stored_issues if isinstance(stored_issues, list) else [])
+                    if isinstance(issue, dict)
+                ],
+                [trend.get("text") for trend in (stored_trends if isinstance(stored_trends, list) else []) if isinstance(trend, dict)],
+            ]
+            report_content = [opportunities, trends, key_trends, structured_sections, additional_notes]
+            if not numeric_claims_supported(report_content, verified_content):
+                return _error_response(409, "unverified_report_number", "Report figures must match the verified analysis. Review edited values before generating the PDF.")
 
         client_email = _clean_text(getattr(upload, "user_email", None)) or ""
         submission = None
@@ -8675,6 +8706,11 @@ def _legacy_analysis_payload_with_structured(analysis_data: dict[str, Any]) -> s
     structured_provider_statuses = analysis_data.get("structured_provider_statuses")
     if isinstance(structured_provider_statuses, dict):
         payload["structured_provider_statuses"] = structured_provider_statuses
+    agentic_verification = analysis_data.get("agentic_verification")
+    if isinstance(agentic_verification, dict):
+        payload["agentic_verification"] = agentic_verification
+    if analysis_data.get("analysisPipelineMode") == "agentic":
+        payload["analysisPipelineMode"] = "agentic"
     return json.dumps(payload)
 
 
