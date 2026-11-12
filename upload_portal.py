@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import quote
 
 import requests
+from email_delivery import email_configured, send_transactional_email
 from sqlalchemy import func
 
 from database import SessionLocal
@@ -200,8 +201,8 @@ def _require_request_config() -> None:
     missing = []
     if not _portal_base_url():
         missing.append("PORTAL_BASE_URL")
-    if not _get_env("SENDGRID_API_KEY"):
-        missing.append("SENDGRID_API_KEY")
+    if not _get_env("RESEND_API_KEY"):
+        missing.append("RESEND_API_KEY")
     if not _get_env("FROM_EMAIL"):
         missing.append("FROM_EMAIL")
     if missing:
@@ -259,11 +260,9 @@ def _send_magic_link_email(
     request_id: Optional[str] = None,
 ) -> None:
     from_email = _get_env("FROM_EMAIL")
-    api_key = _get_env("SENDGRID_API_KEY")
-    if not from_email or not api_key:
+    if not email_configured():
         raise PortalError("config_missing", "Email configuration missing", status=500)
 
-    template_id = _get_env("UPLOAD_PORTAL_SENDGRID_TEMPLATE_ID").strip()
     expires_in_minutes = max(1, _token_ttl_minutes())
     support_email = "hello@alphasourceconsulting.com"
 
@@ -329,42 +328,9 @@ def _send_magic_link_email(
     </html>
     """.strip()
 
-    from sendgrid import SendGridAPIClient
-    from sendgrid.helpers.mail import ClickTracking, Mail, TrackingSettings
-
-    if template_id:
-        message = Mail(
-            from_email=from_email,
-            to_emails=email,
-            subject=subject,
-        )
-        message.template_id = template_id
-        message.dynamic_template_data = {
-            "upload_link": link,
-            "expires_in_minutes": expires_in_minutes,
-            "subject": subject,
-            "brand_name": "alphaSource Consulting",
-            "headline": "Secure Document Upload",
-            "body": "Use the secure link below to upload the requested documents.",
-            "cta_label": "Upload Documents",
-            "support_email": support_email,
-            "footer": "alphaSource Consulting · All rights reserved.",
-        }
-        template_mode = "dynamic"
-    else:
-        message = Mail(
-            from_email=from_email,
-            to_emails=email,
-            subject=subject,
-            plain_text_content=plain_text,
-            html_content=html_content,
-        )
-        template_mode = "inline"
-    message.tracking_settings = TrackingSettings()
-    message.tracking_settings.click_tracking = ClickTracking(enable=False, enable_text=False)
     try:
-        SendGridAPIClient(api_key=api_key).send(message)
-        _log_event("portal_email_sent", template_mode=template_mode, request_id=request_id)
+        send_transactional_email(email, subject, plain_text=plain_text, html_content=html_content)
+        _log_event("portal_email_sent", template_mode="inline", provider="resend", request_id=request_id)
     except Exception as exc:
         _log_event("portal_email_failed")
         raise PortalError("email_failed", "Unable to send email", status=502) from exc

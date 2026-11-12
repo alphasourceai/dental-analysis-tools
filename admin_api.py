@@ -2484,7 +2484,7 @@ async def send_admin_agreement(request: Request) -> JSONResponse:
         return _error_response(
             500,
             "agreement_email_not_configured",
-            "SendGrid agreement email configuration is missing.",
+            "Agreement email configuration is missing.",
         )
 
     try:
@@ -2878,9 +2878,9 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
             if not agreement_email_configured():
                 db.rollback()
                 logger.error(
-                    "[agreements_public] BA countersign email config missing agreement_id=%s has_sendgrid=%s has_from_email=%s has_signer_base_url=%s",
+                    "[agreements_public] BA countersign email config missing agreement_id=%s has_resend=%s has_from_email=%s has_signer_base_url=%s",
                     locked_agreement.id,
-                    bool(os.getenv("SENDGRID_API_KEY")),
+                    bool(os.getenv("RESEND_API_KEY")),
                     bool(os.getenv("FROM_EMAIL")),
                     bool(os.getenv("AGREEMENTS_SIGNER_BASE_URL")),
                 )
@@ -2922,10 +2922,10 @@ async def sign_public_agreement(request: Request) -> JSONResponse:
                         status=502,
                     )
                 return _agreement_public_error(exc.code, exc.message, status=exc.status)
-            except Exception:
+            except Exception as exc:
                 db.rollback()
-                logger.exception(
-                    "[agreements_public] BA countersign email failed agreement_id=%s error_type=%s sendgrid_status=%s",
+                logger.warning(
+                    "[agreements_public] BA countersign email failed agreement_id=%s error_type=%s provider_status=%s",
                     locked_agreement.id,
                     type(exc).__name__,
                     getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None),

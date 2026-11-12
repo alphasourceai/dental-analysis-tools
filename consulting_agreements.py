@@ -22,6 +22,7 @@ except Exception:  # pragma: no cover - dependency is validated at runtime.
     fitz = None
 
 from supabase_utils import _get_supabase_admin_client
+from email_delivery import email_configured, send_transactional_email
 
 logger = logging.getLogger("consulting_agreements")
 
@@ -652,7 +653,7 @@ def create_agreement_signed_url(path: Optional[str], expires_in: Optional[int] =
 
 
 def agreement_email_configured() -> bool:
-    return bool(os.getenv("SENDGRID_API_KEY") and os.getenv("FROM_EMAIL"))
+    return email_configured()
 
 
 def send_agreement_signature_request_email(
@@ -665,7 +666,7 @@ def send_agreement_signature_request_email(
     if not agreement_email_configured():
         raise AgreementServiceError(
             "agreement_email_not_configured",
-            "SendGrid agreement email configuration is missing.",
+            "Agreement email configuration is missing.",
             status=500,
         )
     subject = "BAA/Privacy Agreement signature requested"
@@ -702,7 +703,7 @@ def send_agreement_ba_countersign_request_email(
     if not agreement_email_configured():
         raise AgreementServiceError(
             "agreement_email_not_configured",
-            "SendGrid agreement email configuration is missing.",
+            "Agreement email configuration is missing.",
             status=500,
         )
     subject = "BAA/Privacy Agreement countersignature requested"
@@ -738,7 +739,7 @@ def send_agreement_signed_copy_email(
     company_copy: bool = False,
 ) -> dict[str, Any]:
     if not agreement_email_configured():
-        return {"skipped": True, "reason": "sendgrid_not_configured"}
+        return {"skipped": True, "reason": "email_not_configured"}
     subject = "Signed BAA/Privacy Agreement available"
     signed_label = signed_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     audience_line = (
@@ -770,22 +771,9 @@ def send_agreement_signed_copy_email(
 
 
 def _send_email(to_email: str, subject: str, *, plain_text: str, html_content: str) -> dict[str, Any]:
-    from sendgrid import SendGridAPIClient
-    from sendgrid.helpers.mail import ClickTracking, Email, Mail, TrackingSettings
-
-    from_email = normalize_text(os.getenv("FROM_EMAIL"))
-    from_name = normalize_text(os.getenv("FROM_NAME")) or AGREEMENTS_DEFAULT_FROM_NAME
-    message = Mail(
-        from_email=Email(from_email, from_name),
-        to_emails=to_email,
-        subject=subject,
-        plain_text_content=plain_text,
-        html_content=html_content,
+    return send_transactional_email(
+        to_email, subject, plain_text=plain_text, html_content=html_content,
     )
-    message.tracking_settings = TrackingSettings()
-    message.tracking_settings.click_tracking = ClickTracking(enable=False, enable_text=False)
-    response = SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY")).send(message)
-    return {"statusCode": getattr(response, "status_code", None) or getattr(response, "statusCode", None)}
 
 
 def _email_cta(url: str, label: str) -> str:

@@ -31,7 +31,7 @@ PY
 
 ## Admin: Create Upload Request
 - Confirm `PORTAL_BASE_URL`, `PORTAL_SIGNER_SERVICE_URL`, `PORTAL_SIGNER_API_KEY`, `GCS_BUCKET_NAME`,
-  `SENDGRID_API_KEY`, and `FROM_EMAIL` are set.
+  `RESEND_API_KEY`, and `FROM_EMAIL` are set.
 - Log into the admin dashboard and open **Secure Uploads**.
 - Submit a client email and confirm a magic link is delivered.
 - Verify a row exists in `upload_portal_requests` with `used_at` null and future `expires_at`.

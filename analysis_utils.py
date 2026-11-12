@@ -7,8 +7,7 @@ import os
 import base64
 import textwrap
 import logging
-import sendgrid
-from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition, ContentId, TrackingSettings, ClickTracking
+from email_delivery import attachment, send_transactional_email
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from io import BytesIO
 from typing import Callable, Optional
@@ -1037,7 +1036,6 @@ def extract_compelling_insights(results, max_insights=5, format_financial_values
 
 def send_followup_email(user_info, tool_name, results):
     """Send follow-up email to user with detailed insights in branded HTML format"""
-    sg = sendgrid.SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
     
     insights = extract_compelling_insights(results, max_insights=5, format_financial_values=True)
     
@@ -1048,15 +1046,9 @@ def send_followup_email(user_info, tool_name, results):
     logo_path = os.path.join(os.path.dirname(__file__), "public", "logo-dark-text.png")
     if os.path.exists(logo_path):
         with open(logo_path, "rb") as logo_file:
-            logo_encoded = base64.b64encode(logo_file.read()).decode()
+            logo_bytes = logo_file.read()
         logo_cid = "alphasource-consulting-logo"
-        logo_attachment = Attachment(
-            FileContent(logo_encoded),
-            FileName("logo-dark-text.png"),
-            FileType("image/png"),
-            Disposition("inline"),
-            ContentId(logo_cid),
-        )
+        logo_attachment = attachment(logo_bytes, "logo-dark-text.png", "image/png", content_id=logo_cid)
         signature_html = (
             f'<img src="cid:{logo_cid}" alt="alphaSource Consulting" width="220" '
             'style="display:block;max-width:220px;width:220px;height:auto;border:0;outline:none;text-decoration:none;">'
@@ -1225,25 +1217,14 @@ alphaSource Consulting
   </body>
 </html>'''
     
-    message = Mail(
-        from_email=support_email,
-        to_emails=user_info['email'],
-        subject=subject,
-        plain_text_content=plain_text,
-        html_content=html_content
+    send_transactional_email(
+        user_info['email'], subject, plain_text=plain_text, html_content=html_content,
+        attachments=[logo_attachment] if logo_attachment is not None else None,
     )
-    if logo_attachment is not None:
-        message.add_attachment(logo_attachment)
-    
-    message.tracking_settings = TrackingSettings()
-    message.tracking_settings.click_tracking = ClickTracking(enable=False, enable_text=False)
-    
-    sg.send(message)
 
 
 def send_email(user_info, file_content, file_name, file_type, results, tool_name):
     """Send full analysis email to admin team"""
-    sg = sendgrid.SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
     
     subject = f"[{tool_name}] {user_info['office_name']} ({user_info['email']})"
     
@@ -1295,28 +1276,10 @@ def send_email(user_info, file_content, file_name, file_type, results, tool_name
     
     with open("/tmp/unified_analysis.txt", "rb") as f:
         file_data = f.read()
-        encoded = base64.b64encode(file_data).decode()
-        analysis_attachment = Attachment(
-            FileContent(encoded),
-            FileName("unified_analysis.txt"),
-            FileType("text/plain"),
-            Disposition("attachment")
-        )
-    
-    original_encoded = base64.b64encode(file_content).decode()
-    original_attachment = Attachment(
-        FileContent(original_encoded),
-        FileName(file_name),
-        FileType(file_type),
-        Disposition("attachment")
+        analysis_attachment = attachment(file_data, "unified_analysis.txt", "text/plain")
+
+    original_attachment = attachment(file_content, file_name, file_type)
+    send_transactional_email(
+        "analyzer@alphasourceconsulting.com", subject, plain_text=body,
+        attachments=[analysis_attachment, original_attachment],
     )
-    
-    message = Mail(
-        from_email="info@alphasourceai.com",
-        to_emails="analyzer@alphasourceconsulting.com",
-        subject=subject,
-        plain_text_content=body
-    )
-    message.add_attachment(analysis_attachment)
-    message.add_attachment(original_attachment)
-    sg.send(message)

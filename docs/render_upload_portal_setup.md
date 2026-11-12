@@ -11,7 +11,7 @@ and is available at `/uploads` with API endpoints under `/api/upload-portal/*`.
 - `PORTAL_SIGNER_SERVICE_URL`
 - `PORTAL_SIGNER_API_KEY`
 - `GCS_BUCKET_NAME`
-- `SENDGRID_API_KEY`
+- `RESEND_API_KEY`
 - `FROM_EMAIL`
 - `PORTAL_MAX_FILE_SIZE_MB`
 - `PORTAL_ALLOWED_CONTENT_TYPES`
@@ -23,12 +23,9 @@ Default origins should include `https://alphasourceai.com` and `https://www.alph
 
 Default content types (when `PORTAL_ALLOWED_CONTENT_TYPES` is unset): PDF, CSV, XLS, XLSX.
 
-## Optional Upload Portal Email Env Vars
-- `UPLOAD_PORTAL_SENDGRID_TEMPLATE_ID` (SendGrid dynamic template ID for magic link emails)
-
-## SendGrid Dynamic Template Variables
-- `{{upload_link}}`
-- `{{expires_in_minutes}}`
+## Upload Portal Email
+Resend delivers the local branded HTML/plain-text template. The former
+`UPLOAD_PORTAL_SENDGRID_TEMPLATE_ID` is no longer used. See `resend_migration.md`.
 
 ## Render Start Command
 No change required. Keep the existing Streamlit start command:
@@ -38,7 +35,7 @@ streamlit run app.py --server.port=${PORT:-8080} --server.address=0.0.0.0
 
 ## Local Test
 1) Export env vars (at minimum: `PORTAL_BASE_URL`, `PORTAL_SIGNER_SERVICE_URL`, `PORTAL_SIGNER_API_KEY`,
-   `GCS_BUCKET_NAME`, `SENDGRID_API_KEY`, `FROM_EMAIL`).
+   `GCS_BUCKET_NAME`, `RESEND_API_KEY`, `FROM_EMAIL`).
 2) Run the app: `streamlit run app.py`.
 3) Visit `http://localhost:8080/uploads`.
 4) Run the smoke test: `python3 scripts/upload_portal_smoke_test.py`.

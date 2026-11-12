@@ -14,4 +14,3 @@ PyMuPDF
 pillow
 pytesseract
 fpdf2
-sendgrid
