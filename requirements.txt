@@ -5,7 +5,6 @@ openpyxl
 pillow
 PyMuPDF
 pytesseract
-sendgrid
 requests
 sqlalchemy
 psycopg2-binary
